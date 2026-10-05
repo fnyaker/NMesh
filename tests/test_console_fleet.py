@@ -662,6 +662,60 @@ class TestFleetRoutes:
         assert bridge.wait_shell_open("ee" * 20, 5.0) == "ab" * 16
         assert bridge.wait_shell_open("11" * 20, 0.2) == ""
 
+    async def test_a_shell_is_found_by_the_request_that_opened_it(self):
+        """Reading by node picked up whichever shell on that machine was newest
+        — a forgotten one from another tab as readily as the one just asked
+        for. The request's own id names exactly one."""
+        bridge = FleetBridge(_StubApp())
+        bridge._open_shell_record("aa" * 16, "ee" * 20, "rid-old")
+
+        def opened():
+            time.sleep(0.05)
+            bridge._open_shell_record("ab" * 16, "ee" * 20, "rid-new")
+
+        threading.Thread(target=opened, daemon=True).start()
+        assert bridge.wait_shell_rid("rid-new", 5.0) == ("ab" * 16, "")
+        assert bridge.wait_shell_rid("rid-none", 0.2) == ("", "")
+
+    async def test_a_refused_shell_says_why_instead_of_timing_out(self):
+        """A refusal from the far node used to be invisible: the page read by
+        node, found nothing, and tried twenty times before saying the session
+        was gone. The reason was in the job all along."""
+        bridge = FleetBridge(_StubApp())
+        bridge._job("rid-1", "shell", "ee" * 20)
+
+        def refused():
+            time.sleep(0.05)
+            bridge._finish("rid-1", "failed", "too many open shells")
+
+        threading.Thread(target=refused, daemon=True).start()
+        started = time.monotonic()
+        assert bridge.wait_shell_rid("rid-1", 5.0) == ("", "too many open shells")
+        assert time.monotonic() - started < 2.0
+
+    async def test_the_route_answers_a_refused_open_with_its_reason(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            bridge = host.bridge("fleet")
+            bridge._job("rid-2", "shell", "ee" * 20)
+            bridge._finish("rid-2", "failed", "that node has not granted a shell")
+            status, _, _, data = await _get(
+                console, "/api/fleet/shell?rid=rid-2&offset=0&wait=1", token)
+            assert status == 409
+            assert data == {"error": "that node has not granted a shell",
+                            "failed": True}
+            bridge._open_shell_record("ab" * 16, "ee" * 20, "rid-3")
+            bridge._append_shell("ab" * 16, b"prompt$ ")
+            status, _, _, data = await _get(
+                console, "/api/fleet/shell?rid=rid-3&offset=0&wait=1", token)
+            assert status == 200 and data["sid"] == "ab" * 16
+            assert base64.b64decode(data["data"]) == b"prompt$ "
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
     async def test_the_route_holds_only_when_it_is_asked_to(self):
         """`wait=1` is the page saying it will park. Without it the answer is
         immediate, because something else is driving the cadence."""

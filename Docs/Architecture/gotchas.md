@@ -1726,6 +1726,27 @@ before and after.
 - **`visualViewport`, not `100dvh`.** Android shrinks the visual viewport when
   the keyboard opens; viewport units keep describing the screen behind it, so a
   layout built on them puts the key row under the keyboard.
+- **`TERM` is the far end's, never the node's.** The shell inherited the node
+  process's `TERM`; a node started from a Linux console passed on `linux`, and
+  `top` set its cursor shape with `CSI ? 1 c`. The emulator read every `… c` as
+  "who are you?", answered `CSI ? 1 ; 2 c` into `top`'s input, and `top` filled
+  its status line with "Unknown command" until it was killed — while every
+  keystroke the operator typed competed with the answers. Two fixes, and each
+  would have hidden the other: the shell is started with `xterm-256color`
+  whatever the node has, and the emulator answers only the questions themselves
+  (`CSI c`, `CSI 0 c`, `CSI > c`), never a sequence that shares a final byte
+  with one. **A prefix (`?`, `>`, `=`, `<`) or an intermediate makes it a
+  different sequence**: `CSI > 4;2 m` is vim's keyboard negotiation, not "dim".
+- **Replayed history must not be answered.** Re-attaching replays the recent
+  output into a fresh screen, questions included; answering them types the
+  answers into whatever runs *now*. The replay is written with `term.quiet`.
+- **A click is not an empty selection.** A press and release on one spot kept
+  `{from, to}` equal and non-null, and the cursor is hidden while a selection
+  exists — so focusing the pane with a click hid the cursor for good.
+- **AltGr is Ctrl+Alt.** On Windows the composed character arrives with both
+  flags set; a key handler that treats Ctrl as a control chord drops `|`, `#`,
+  `{` on an AZERTY keyboard. Text goes through the `input` event of a focused
+  field; only non-text keys are read off `keydown`.
 
 ## Self-update: installing is not updating
 

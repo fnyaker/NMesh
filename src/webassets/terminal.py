@@ -57,6 +57,7 @@ CSS = """
    question. */
 .term{--page-term-bg:#0a0f16;--page-term-fg:#cfe0f7;
   margin:0;position:relative;min-height:440px;height:62vh;overflow:hidden;
+  padding:6px 8px;
   background:var(--page-term-bg);color:var(--page-term-fg);
   border-bottom:1px solid var(--border);
   font:13px/1.25 var(--term-font)}
@@ -69,10 +70,33 @@ CSS = """
    beside it, off screen and updated far more slowly than the picture. */
 .term .t-a11y{position:absolute;left:-9999px;top:0;width:1px;height:1px;
   overflow:hidden;white-space:pre}
-.t-back{position:absolute;right:6px;top:6px;z-index:2;
+.t-back{position:absolute;right:14px;top:6px;z-index:2;
   padding:2px 8px;border-radius:var(--r-full);
   background:var(--surface);border:1px solid var(--border);
   font:var(--fs-2xs)/1.6 var(--mono);color:var(--text-muted)}
+/* The pane has the keyboard when its input does; the ring says so. */
+.term.t-focus{outline:2px solid var(--ring);outline-offset:-2px}
+/* The editable element everything typed goes through. On the cursor, one
+   pixel and transparent: an input method opens its window there, and nobody
+   else ever sees it. Not `display:none` — that cannot take the focus, and the
+   focus is the only thing that raises a phone's keyboard. */
+.term .t-input{position:absolute;left:0;top:0;width:1px;height:1em;
+  padding:0;margin:0;border:0;outline:0;resize:none;overflow:hidden;
+  opacity:0;background:transparent;color:transparent;caret-color:transparent;
+  font:inherit;white-space:nowrap;z-index:-1}
+/* Where the view is in the scrollback: a thumb, not a scroller — the wheel and
+   Shift-PageUp move the view, and the thumb follows. */
+.term .t-bar{position:absolute;right:2px;width:4px;border-radius:2px;
+  background:rgba(207,224,247,.35);pointer-events:none;z-index:1}
+/* What the session is doing — opening, gone, waiting to be reopened — over the
+   screen, never painted into it, where the next byte would overwrite it. */
+.term .t-status{position:absolute;left:50%;bottom:var(--s-3);z-index:3;
+  transform:translateX(-50%);display:flex;align-items:center;gap:var(--s-3);
+  max-width:calc(100% - 2 * var(--s-3));padding:var(--s-2) var(--s-3);
+  border-radius:var(--r-md);background:var(--surface);color:var(--text);
+  border:1px solid var(--border);box-shadow:var(--shadow-2);
+  font:var(--fs-sm)/1.4 var(--font)}
+.term .t-status[hidden],.term .t-status button[hidden]{display:none}
 """
 
 
@@ -132,6 +156,11 @@ function t256(index){
   const grey = 8 + (index - 232) * 10;
   return t_hex([grey, grey, grey]);
 }
+// `#rrggbb` as an X11 colour report: `rgb:rrrr/gggg/bbbb`.
+function t_rgb(hex){
+  const part = (at) => hex.slice(at, at + 2).repeat(2);
+  return "rgb:" + part(1) + "/" + part(3) + "/" + part(5);
+}
 function t_colour(value){
   if(value === null) return null;
   if(typeof value === "number") return t256(value & 255);
@@ -190,7 +219,8 @@ function termWidth(code){
      (code >= 0xf900 && code <= 0xfaff) || (code >= 0xfe10 && code <= 0xfe19) ||
      (code >= 0xfe30 && code <= 0xfe6f) || (code >= 0xff00 && code <= 0xff60) ||
      (code >= 0xffe0 && code <= 0xffe6) ||
-     (code >= 0x1f300 && code <= 0x1f64f) || (code >= 0x1f900 && code <= 0x1f9ff) ||
+     (code >= 0x1f300 && code <= 0x1f64f) || (code >= 0x1f680 && code <= 0x1f6ff) ||
+     (code >= 0x1f900 && code <= 0x1f9ff) || (code >= 0x1fa70 && code <= 0x1faff) ||
      (code >= 0x20000 && code <= 0x3fffd)) return 2;
   return 1;
 }
@@ -228,6 +258,7 @@ Term.prototype.reset = function(){
   this.cursorVisible = true; this.appCursor = false; this.appKeypad = false;
   this.bracketed = false; this.mouse = 0; this.mouseSgr = false;
   this.graphics = false; this.title = "";
+  this.cursorShape = "block"; this.lastGlyph = ""; this.lastWidth = 1;
   this.pending = "";
   // Which rows a repaint has to touch. A frame that changed one line should
   // cost one line, and `all` is the honest answer when the screen moved.
@@ -359,6 +390,7 @@ Term.prototype.put = function(ch, width){
     }
   }
   line[this.x] = {c:ch, s:this.style, w:width};
+  this.lastGlyph = ch; this.lastWidth = width;
   for(let n = 1; n < width; n++){
     if(this.x + n < this.cols) line[this.x + n] = {c:"", s:this.style, w:0};
   }
@@ -375,9 +407,11 @@ Term.prototype.eraseLine = function(mode){
 };
 Term.prototype.eraseDisplay = function(mode){
   const grid = this.screen();
-  if(mode === 2 || mode === 3){
+  // 3 is "the saved lines", and only them: `clear` sends it after a 2, but a
+  // program that sends it alone has not asked for its screen to go.
+  if(mode === 3){ this.scrollback.length = 0; this.sbAdded++; this.touchAll(); return; }
+  if(mode === 2){
     for(let y = 0; y < this.rows; y++) grid[y] = this.eraseRow();
-    if(mode === 3){ this.scrollback.length = 0; this.sbAdded = 0; }
     this.touchAll();
     return;
   }
@@ -425,24 +459,28 @@ Term.prototype.setAttrs = function(params){
   // Only the attributes a program can actually be seen to use. Anything else is
   // consumed: an unhandled SGR must change nothing, never print.
   for(let i = 0; i < params.length; i++){
+    // `38:2::r:g:b` and `4:3` carry their arguments *inside* one parameter,
+    // separated by colons. Read as `;`-separated, a colour swallowed the next
+    // attribute and an undercurl came out as whatever followed it.
+    if(params[i].indexOf(":") >= 0){ this.setAttrSub(params[i].split(":")); continue; }
     const n = params[i] === "" ? 0 : parseInt(params[i], 10);
     if(!isFinite(n)) continue;
     if(n === 0){ this.fg = null; this.bg = null; this.flags = 0; }
     else if(n === 1) this.flags |= T_BOLD;
     else if(n === 2) this.flags |= T_DIM;
     else if(n === 3) this.flags |= T_ITALIC;
-    else if(n === 4) this.flags |= T_UNDER;
+    else if(n === 4 || n === 21) this.flags |= T_UNDER;
     else if(n === 7) this.flags |= T_INVERSE;
     else if(n === 8) this.flags |= T_HIDDEN;
     else if(n === 9) this.flags |= T_STRIKE;
-    else if(n === 21 || n === 22) this.flags &= ~(T_BOLD | T_DIM);
+    else if(n === 22) this.flags &= ~(T_BOLD | T_DIM);
     else if(n === 23) this.flags &= ~T_ITALIC;
     else if(n === 24) this.flags &= ~T_UNDER;
     else if(n === 27) this.flags &= ~T_INVERSE;
     else if(n === 28) this.flags &= ~T_HIDDEN;
     else if(n === 29) this.flags &= ~T_STRIKE;
     else if(n >= 30 && n <= 37) this.fg = n - 30;
-    else if(n === 38 || n === 48){
+    else if(n === 38 || n === 48 || n === 58){
       const mode = parseInt(params[i + 1] || "", 10);
       let colour = null;
       if(mode === 5){ colour = parseInt(params[i + 2] || "", 10) & 255; i += 2; }
@@ -452,7 +490,7 @@ Term.prototype.setAttrs = function(params){
                   parseInt(params[i + 4] || "0", 10) & 255];
         i += 4;
       }else{ i += 1; }
-      if(n === 38) this.fg = colour; else this.bg = colour;
+      if(n === 38) this.fg = colour; else if(n === 48) this.bg = colour;
     }
     else if(n === 39) this.fg = null;
     else if(n >= 40 && n <= 47) this.bg = n - 40;
@@ -462,7 +500,31 @@ Term.prototype.setAttrs = function(params){
   }
   this.style = termStyle(this.fg, this.bg, this.flags);
 };
+Term.prototype.setAttrSub = function(parts){
+  const n = parseInt(parts[0], 10);
+  if(n === 4){
+    // `4:0` is "no underline"; every other style is drawn as the one we have.
+    if((parseInt(parts[1] || "1", 10) || 0) === 0) this.flags &= ~T_UNDER;
+    else this.flags |= T_UNDER;
+    return;
+  }
+  if(n !== 38 && n !== 48) return;                    // 58: underline colour, not kept
+  const mode = parseInt(parts[1] || "", 10);
+  let colour = null;
+  if(mode === 5) colour = (parseInt(parts[2] || "0", 10) || 0) & 255;
+  else if(mode === 2){
+    // `2:r:g:b`, or `2:<colour space>:r:g:b` — the space is optional and empty.
+    const rgb = parts.length >= 6 ? parts.slice(3, 6) : parts.slice(2, 5);
+    colour = rgb.map((part) => (parseInt(part || "0", 10) || 0) & 255);
+    while(colour.length < 3) colour.push(0);
+  }else return;
+  if(n === 38) this.fg = colour; else this.bg = colour;
+};
+// `quiet` is set while a session's history is replayed into a fresh screen. The
+// questions in that history were asked of a terminal that is gone, and answered
+// then; answering them again types the answers into whatever runs *now*.
 Term.prototype.reply = function(text){
+  if(this.quiet) return;
   if(this.onReply) try{ this.onReply(text); }catch(_){}
 };
 Term.prototype.setMode = function(params, on, priv){
@@ -607,6 +669,14 @@ Term.prototype.escape = function(data, start, length){
   match = T_OSC.exec(data);
   if(match){
     if(match[1] === "0" || match[1] === "2") this.title = match[2].slice(0, 200);
+    // "What colour is your text, your background?" — asked by an editor
+    // choosing between its light and dark scheme, which waits for the answer.
+    // Never OSC 52: a remote program writing to this machine's clipboard is
+    // not a feature a shell needs.
+    else if((match[1] === "10" || match[1] === "11") && match[2] === "?"){
+      this.reply("\x1b]" + match[1] + ";" + t_rgb(match[1] === "10" ? T_DEF_FG : T_DEF_BG) +
+                 match[3]);
+    }
     return T_OSC.lastIndex;
   }
   T_STR.lastIndex = start;
@@ -645,8 +715,24 @@ Term.prototype.escape = function(data, start, length){
   }
 };
 Term.prototype.csi = function(paramText, intermediate, final){
-  const priv = paramText.charCodeAt(0) === 0x3f;      // `?` — a DEC private mode
-  const params = (priv ? paramText.slice(1) : paramText).split(";");
+  // The first parameter byte can be a *prefix* rather than a digit, and the
+  // prefix changes what the final byte means: `CSI 4 m` underlines, `CSI > 4 m`
+  // is vim negotiating its keyboard, and `CSI ? 1 c` is a cursor shape on the
+  // Linux console — not a question. Reading them as one sequence is how a vim
+  // session ended up dimmed and `top` fed its own answers back as keystrokes.
+  const lead = paramText.charCodeAt(0);
+  const prefix = (lead >= 0x3c && lead <= 0x3f) ? paramText[0] : "";
+  const params = (prefix ? paramText.slice(1) : paramText).split(";");
+  if(intermediate){ this.csiIntermediate(params, intermediate, final); return; }
+  if(prefix === "?"){ this.csiPrivate(params, final); return; }
+  if(prefix === ">"){
+    // Secondary device attributes: "a VT220-class terminal". Answered only to
+    // the question itself, never to the other `>` sequences that end in a
+    // letter a primary sequence also uses.
+    if(final === "c" && (parseInt(params[0] || "0", 10) || 0) === 0) this.reply("\x1b[>0;10;1c");
+    return;
+  }
+  if(prefix) return;                                  // `<` and `=`: nothing we keep
   const first = Math.max(1, parseInt(params[0] || "1", 10) || 1);
   const raw0 = parseInt(params[0] || "0", 10) || 0;
   switch(final){
@@ -657,7 +743,7 @@ Term.prototype.csi = function(paramText, intermediate, final){
     case "E": this.touch(this.y); this.x = 0; this.y = Math.min(this.rows - 1, this.y + first); this.touch(this.y); break;
     case "F": this.touch(this.y); this.x = 0; this.y = Math.max(0, this.y - first); this.touch(this.y); break;
     case "G": case "`": this.x = Math.min(this.cols - 1, Math.max(0, first - 1)); this.wrapNext = false; this.touch(this.y); break;
-    case "d": this.touch(this.y); this.y = Math.min(this.rows - 1, Math.max(0, first - 1)); this.wrapNext = false; this.touch(this.y); break;
+    case "d": this.goto(first - 1, this.x); break;
     case "H": case "f": {
       const row = Math.max(1, parseInt(params[0] || "1", 10) || 1);
       const col = Math.max(1, parseInt(params[1] || "1", 10) || 1);
@@ -675,9 +761,10 @@ Term.prototype.csi = function(paramText, intermediate, final){
     case "X": this.eraseChars(first); break;
     case "S": this.scrollUp(first); break;
     case "T": this.scrollDown(first); break;
-    case "h": this.setMode(params, true, priv); break;
-    case "l": this.setMode(params, false, priv); break;
-    case "m": if(!priv) this.setAttrs(params); break;
+    case "b": if(this.lastGlyph) for(let n = 0; n < Math.min(first, this.cols * this.rows); n++) this.put(this.lastGlyph, this.lastWidth); break;
+    case "h": this.setMode(params, true, false); break;
+    case "l": this.setMode(params, false, false); break;
+    case "m": this.setAttrs(params); break;
     case "r": {
       const top = Math.max(1, parseInt(params[0] || "1", 10) || 1);
       const bot = Math.max(top, parseInt(params[1] || String(this.rows), 10) || this.rows);
@@ -694,11 +781,48 @@ Term.prototype.csi = function(paramText, intermediate, final){
       if(raw0 === 6) this.reply("\x1b[" + (this.y + 1) + ";" + (this.x + 1) + "R");
       else if(raw0 === 5) this.reply("\x1b[0n");
       break;
-    case "c": this.reply("\x1b[?1;2c"); break;         // "a VT100 with options"
+    // Primary device attributes, and only the question: `CSI c` or `CSI 0 c`.
+    case "c": if(raw0 === 0) this.reply("\x1b[?1;2c"); break;    // "a VT100 with options"
     case "t": if(raw0 === 18) this.reply("\x1b[8;" + this.rows + ";" + this.cols + "t"); break;
     case "g": if(raw0 === 3) this.tabs = {}; else delete this.tabs[this.x]; break;
     default: break;                                     // consumed, never printed
   }
+};
+// `CSI ? …`: the DEC private sequences. The modes are most of them; the rest
+// are either reports a program asks for or saves we have no reason to keep.
+Term.prototype.csiPrivate = function(params, final){
+  const raw0 = parseInt(params[0] || "0", 10) || 0;
+  switch(final){
+    case "h": this.setMode(params, true, true); break;
+    case "l": this.setMode(params, false, true); break;
+    case "J": this.eraseDisplay(raw0); break;           // selective erase: no protected cells here
+    case "K": this.eraseLine(raw0); break;
+    case "n": if(raw0 === 6) this.reply("\x1b[?" + (this.y + 1) + ";" + (this.x + 1) + "R"); break;
+    default: break;      // `?c`, `?u`, `?s`, `?r`… — none of them is ours to answer
+  }
+};
+// Sequences with an intermediate byte. Two are worth keeping: the cursor's
+// shape, which every editor changes between modes, and a soft reset. Anything
+// else is consumed whole — its final byte means something else without it.
+Term.prototype.csiIntermediate = function(params, intermediate, final){
+  const raw0 = parseInt(params[0] || "0", 10) || 0;
+  if(intermediate === " " && final === "q"){
+    this.cursorShape = raw0 === 3 || raw0 === 4 ? "under"
+                     : (raw0 === 5 || raw0 === 6 ? "bar" : "block");
+    this.touch(this.y);
+    return;
+  }
+  if(intermediate === "!" && final === "p") this.softReset();
+};
+// What `CSI ! p` resets: the modes and the pen, not the screen.
+Term.prototype.softReset = function(){
+  this.insert = false; this.origin = false; this.autowrap = true;
+  this.appCursor = false; this.appKeypad = false; this.cursorVisible = true;
+  this.top = 0; this.bot = this.rows - 1;
+  this.fg = null; this.bg = null; this.flags = 0; this.style = T_PLAIN;
+  this.saved = null; this.graphics = false; this.cursorShape = "block";
+  this.wrapNext = false;
+  this.touchAll();
 };
 
 // ---- reading the screen back ------------------------------------------------
@@ -773,35 +897,76 @@ const T_FKEYS = {
   F5:"\x1b[15~", F6:"\x1b[17~", F7:"\x1b[18~", F8:"\x1b[19~",
   F9:"\x1b[20~", F10:"\x1b[21~", F11:"\x1b[23~", F12:"\x1b[24~",
 };
+// The keys whose sequence takes a modifier: `CSI 1 ; m X` for a letter-final
+// one, `CSI n ; m ~` for a numbered one. Ctrl-Left is how readline jumps a
+// word, and without the modifier it is a plain Left.
+const T_CURSOR_KEYS = {ArrowUp:"A", ArrowDown:"B", ArrowRight:"C", ArrowLeft:"D",
+                       Home:"H", End:"F"};
+const T_TILDE_KEYS = {Insert:2, Delete:3, PageUp:5, PageDown:6};
+// On a Mac, Option is how a character is typed — `|` and `~` on a French
+// layout, `@` on a German one — not a Meta key. Reading it as Meta sends ESC
+// and a letter where the person typed a pipe.
+const T_MAC = typeof navigator !== "undefined" &&
+              /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
+
+function t_modifier(event){
+  return 1 + (event.shiftKey ? 1 : 0) + (event.altKey ? 2 : 0) + (event.ctrlKey ? 4 : 0);
+}
+// Is this key a *character*, to be left for the text path to deliver? AltGr
+// arrives as Ctrl and Alt together on Windows, and the key it names is the
+// character it composed — `|`, `#`, `{` on an AZERTY keyboard. Treated as a
+// control chord it was dropped, and half the punctuation a shell needs could
+// not be typed at all.
+function keyIsText(event){
+  if(!event.key || [...event.key].length !== 1) return false;
+  if(event.metaKey) return false;
+  const altGr = (event.getModifierState && event.getModifierState("AltGraph")) ||
+                (event.ctrlKey && event.altKey);
+  if(altGr) return true;
+  if(event.ctrlKey) return false;
+  if(event.altKey) return T_MAC;
+  return true;
+}
 function keyBytes(event, term){
-  if(event.ctrlKey && !event.altKey && event.key.length === 1){
-    const code = event.key.toUpperCase().charCodeAt(0);
+  const key = event.key || "";
+  if(keyIsText(event)) return key;
+  if(event.ctrlKey && !event.altKey && !event.metaKey && key.length === 1){
+    const code = key.toUpperCase().charCodeAt(0);
     if(code >= 64 && code <= 95) return String.fromCharCode(code - 64);   // ^A..^_
-    if(event.key === "?") return "\x7f";
-    if(event.key === " ") return "\x00";
+    if(key === "?" || key === "8") return "\x7f";
+    if(key === " " || key === "2") return "\x00";
+    if(key >= "3" && key <= "7") return String.fromCharCode(key.charCodeAt(0) - 24);
+    if(key === "/") return "\x1f";
+    return null;
   }
+  const mod = t_modifier(event);
   const app = term && term.appCursor;
-  const arrow = (letter) => (app ? "\x1bO" : "\x1b[") + letter;
-  switch(event.key){
-    case "Enter": return "\r";
-    case "Backspace": return "\x7f";
+  if(T_CURSOR_KEYS[key]){
+    const final = T_CURSOR_KEYS[key];
+    if(mod > 1) return "\x1b[1;" + mod + final;
+    return (app ? "\x1bO" : "\x1b[") + final;
+  }
+  if(T_TILDE_KEYS[key]){
+    return "\x1b[" + T_TILDE_KEYS[key] + (mod > 1 ? ";" + mod : "") + "~";
+  }
+  switch(key){
+    case "Enter": return event.altKey ? "\x1b\r" : "\r";
+    case "Backspace":
+      if(event.ctrlKey) return "\x08";
+      return event.altKey ? "\x1b\x7f" : "\x7f";
     case "Tab": return event.shiftKey ? "\x1b[Z" : "\t";
     case "Escape": return "\x1b";
-    case "ArrowUp": return arrow("A");
-    case "ArrowDown": return arrow("B");
-    case "ArrowRight": return arrow("C");
-    case "ArrowLeft": return arrow("D");
-    case "Home": return app ? "\x1bOH" : "\x1b[H";
-    case "End": return app ? "\x1bOF" : "\x1b[F";
-    case "Insert": return "\x1b[2~";
-    case "Delete": return "\x1b[3~";
-    case "PageUp": return "\x1b[5~";
-    case "PageDown": return "\x1b[6~";
     default: break;
   }
-  if(T_FKEYS[event.key]) return T_FKEYS[event.key];
-  if(event.key.length === 1 && !event.ctrlKey && !event.metaKey){
-    return event.altKey ? "\x1b" + event.key : event.key;
+  if(T_FKEYS[key]){
+    const plain = T_FKEYS[key];
+    if(mod === 1) return plain;
+    // F1-F4 are `SS3 P`…; with a modifier they become `CSI 1 ; m P`.
+    return plain.startsWith("\x1bO") ? "\x1b[1;" + mod + plain[2]
+                                     : plain.slice(0, -1) + ";" + mod + "~";
+  }
+  if(key.length === 1 && event.altKey && !event.ctrlKey && !event.metaKey){
+    return "\x1b" + key;                     // Alt as Meta, off a Mac
   }
   return null;
 }
@@ -819,8 +984,21 @@ function keyBytes(event, term){
 // **Cost.** The DOM version rebuilt a few thousand nodes for a frame in which a
 // program moved one line. Here a repaint touches the rows that changed, and a
 // row is a handful of canvas calls.
+//
+// Beside the canvas, three small things the canvas cannot be: the **input** (a
+// real editable element, which is the only thing a keyboard — a phone's, an
+// IME's, a dead key's — will type into), a **status** strip that says what the
+// session is doing, and a **scroll bar** that says where in the scrollback the
+// view is. Each one is a node of its own, written with `textContent` and the
+// CSSOM, never markup.
 
 const T_A11Y_TICK = 700;        // how often the off-screen text mirror catches up
+// Two clicks within this many milliseconds, on the same cell, are one gesture:
+// a double click picks a word, a triple click a line.
+const T_CLICK_GAP = 450;
+// What a word is, for a double click: what a path, an address or an identifier
+// is made of, so a click on a file name takes the whole name.
+const T_WORD = /[\w\-.\/~:@%+=,#]/;
 
 function TermScreen(host){
   this.host = host;
@@ -833,6 +1011,21 @@ function TermScreen(host){
   this.mirror = document.createElement("pre");
   this.mirror.className = "t-a11y";
   host.appendChild(this.mirror);
+  // The editable element everything typed goes through. Inside the pane, so
+  // the pane's own focus ring follows it, and moved to the cursor on every
+  // paint, so an input method's candidate window opens where the text goes.
+  this.input = document.createElement("textarea");
+  this.input.className = "t-input";
+  for(const [name, value] of [["autocapitalize", "off"], ["autocorrect", "off"],
+                              ["autocomplete", "off"], ["spellcheck", "false"],
+                              ["aria-label", "Terminal input"], ["tabindex", "-1"]]){
+    this.input.setAttribute(name, value);
+  }
+  host.appendChild(this.input);
+  this.bar = document.createElement("div");
+  this.bar.className = "t-bar";
+  this.bar.hidden = true;
+  host.appendChild(this.bar);
   this.back = document.createElement("button");
   this.back.className = "t-back";
   this.back.type = "button";
@@ -840,6 +1033,17 @@ function TermScreen(host){
   this.back.hidden = true;
   host.appendChild(this.back);
   this.back.addEventListener("click", () => { this.toBottom(); this.draw(true); });
+  this.status = document.createElement("div");
+  this.status.className = "t-status";
+  this.status.setAttribute("role", "status");
+  this.statusText = document.createElement("span");
+  this.statusAction = document.createElement("button");
+  this.statusAction.type = "button";
+  this.statusAction.className = "primary sm";
+  this.statusAction.hidden = true;
+  this.status.append(this.statusText, this.statusAction);
+  this.status.hidden = true;
+  host.appendChild(this.status);
 
   this.ctx = this.canvas.getContext("2d", {alpha:false});
   this.term = null;
@@ -849,6 +1053,7 @@ function TermScreen(host){
   this.painted = -1; this.lastCursor = null; this.lastSb = 0;
   this.select = null; this.focused = false;
   this.mirrorAt = 0;
+  this.clicks = {at:0, count:0, row:-1, col:-1};
   this.measure();
 }
 TermScreen.prototype.font = function(style){
@@ -885,6 +1090,10 @@ TermScreen.prototype.measure = function(){
   this.canvas.style.height = height + "px";
   ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
   ctx.textBaseline = "alphabetic";
+  // The rows the grid does not fill are still the terminal's: painted once
+  // here, or a strip of whatever the canvas held last shows under the screen.
+  ctx.fillStyle = T_DEF_BG;
+  ctx.fillRect(0, 0, width, height);
   this.painted = -1;
   return {cols:this.cols, rows:this.rows};
 };
@@ -918,13 +1127,22 @@ TermScreen.prototype.rowAt = function(index){
   const grid = term.screen();
   return grid[index - above] || null;
 };
+// What the session is doing, said over the screen rather than on it: a message
+// painted *into* the canvas was overwritten by the next byte the shell sent,
+// and the one painted when a session ended sat on top of its last line.
+TermScreen.prototype.say = function(text, action, onAction){
+  this.statusText.textContent = text || "";
+  this.status.hidden = !text;
+  this.statusAction.hidden = !action;
+  this.statusAction.textContent = action || "";
+  this.statusAction.onclick = action && onAction ? () => onAction() : null;
+};
 
 TermScreen.prototype.draw = function(showCursor){
   const term = this.term;
   if(!term) return;
   if(this.following) this.toBottom();
-  const ctx = this.ctx;
-  const cursorOn = showCursor !== false && term.cursorVisible && !this.select;
+  const cursorOn = showCursor !== false && term.cursorVisible;
   const cursor = cursorOn ? {x:term.x, y:term.y} : null;
   // A full repaint when the view moved under us, and only the rows a program
   // touched otherwise.
@@ -955,12 +1173,35 @@ TermScreen.prototype.draw = function(showCursor){
     this.drawRow(k, row, onCursor);
   }
   this.back.hidden = this.following;
+  this.placeInput(above);
+  this.placeBar();
   const now = Date.now();
   if(now - this.mirrorAt > T_A11Y_TICK){
     this.mirrorAt = now;
     // textContent, never markup: this is bytes a remote machine chose.
     this.mirror.textContent = term.lines().slice(-this.rows).join("\n");
   }
+};
+// The input sits on the cursor. Nobody sees it; an input method does, and
+// opens its candidate window there rather than in a corner of the page.
+TermScreen.prototype.placeInput = function(above){
+  const term = this.term;
+  const k = Math.max(0, Math.min(this.rows - 1, term.y + above - this.viewTop));
+  this.input.style.left = Math.round(this.canvas.offsetLeft + term.x * this.cw) + "px";
+  this.input.style.top = Math.round(this.canvas.offsetTop + k * this.lh) + "px";
+};
+// Where the view is in the scrollback. Drawn only when there is somewhere to
+// scroll to: a full-screen program has no scrollback, and a bar over it would
+// be a claim that it does.
+TermScreen.prototype.placeBar = function(){
+  const total = this.total();
+  if(total <= this.rows){ this.bar.hidden = true; return; }
+  const span = this.height;
+  const size = Math.max(16, Math.round(span * this.rows / total));
+  const at = Math.round((span - size) * this.viewTop / Math.max(1, total - this.rows));
+  this.bar.style.height = size + "px";
+  this.bar.style.top = at + "px";
+  this.bar.hidden = false;
 };
 TermScreen.prototype.drawRow = function(k, row, cursorX){
   const ctx = this.ctx, cw = this.cw, lh = this.lh;
@@ -1040,22 +1281,30 @@ TermScreen.prototype.decorate = function(ctx, column, top, width, style){
   if(style.under) ctx.fillRect(column * this.cw, top + this.lh - 2, span, 1);
   if(style.strike) ctx.fillRect(column * this.cw, top + Math.round(this.lh * 0.55), span, 1);
 };
+// The cursor takes the shape the program asked for — an editor shows a bar
+// while inserting and a block otherwise — and an outline while the pane does
+// not have the keyboard, so a glance says where typing would go.
 TermScreen.prototype.drawCursor = function(column, top, cell){
-  const ctx = this.ctx, cw = this.cw;
+  const ctx = this.ctx, cw = this.cw, lh = this.lh;
   const style = (cell && cell.s) || T_PLAIN;
+  const colour = style.front || T_DEF_FG;
+  const wide = cell && cell.w === 2 ? 2 : 1;
   if(!this.focused){
-    ctx.strokeStyle = style.front || T_DEF_FG;
+    ctx.strokeStyle = colour;
     ctx.lineWidth = 1;
-    ctx.strokeRect(column * cw + 0.5, top + 0.5, cw - 1, this.lh - 1);
+    ctx.strokeRect(column * cw + 0.5, top + 0.5, cw * wide - 1, lh - 1);
     return;
   }
-  ctx.fillStyle = style.front || T_DEF_FG;
-  ctx.fillRect(column * cw, top, cw, this.lh);
+  const shape = this.term ? this.term.cursorShape : "block";
+  ctx.fillStyle = colour;
+  if(shape === "bar"){ ctx.fillRect(column * cw, top, 2, lh); return; }
+  if(shape === "under"){ ctx.fillRect(column * cw, top + lh - 2, cw * wide, 2); return; }
+  ctx.fillRect(column * cw, top, cw * wide, lh);
   const glyph = cell && cell.c && cell.c !== " " ? cell.c : "";
   if(glyph){
     ctx.fillStyle = style.back || T_DEF_BG;
     ctx.font = this.font(style);
-    ctx.fillText(glyph, column * cw, top + Math.round(this.lh * 0.78), cw);
+    ctx.fillText(glyph, column * cw, top + Math.round(lh * 0.78), cw * wide);
   }
 };
 TermScreen.prototype.drawSelection = function(k, top){
@@ -1064,12 +1313,16 @@ TermScreen.prototype.drawSelection = function(k, top){
   this.ctx.fillStyle = T_SELECT;
   this.ctx.fillRect(span[0] * this.cw, top, (span[1] - span[0]) * this.cw, this.lh);
 };
-TermScreen.prototype.selectionOn = function(line){
-  if(!this.select) return null;
+TermScreen.prototype.ordered = function(){
   let from = this.select.from, to = this.select.to;
   if(from.row > to.row || (from.row === to.row && from.col > to.col)){
     from = this.select.to; to = this.select.from;
   }
+  return [from, to];
+};
+TermScreen.prototype.selectionOn = function(line){
+  if(!this.select) return null;
+  const [from, to] = this.ordered();
   if(line < from.row || line > to.row) return null;
   const left = line === from.row ? from.col : 0;
   const right = line === to.row ? to.col : this.cols;
@@ -1078,21 +1331,57 @@ TermScreen.prototype.selectionOn = function(line){
 
 // ---- where the pointer is, in cells -----------------------------------------
 
+// Two answers, because two questions are asked. A selection's edge falls
+// *between* cells, so it rounds to the nearest boundary; a click a program
+// reported is *on* a cell, so it is the cell the pointer is over. Rounding the
+// second sent every click on the right half of a cell to its neighbour.
 TermScreen.prototype.pointAt = function(event){
   const rect = this.canvas.getBoundingClientRect();
-  const col = Math.max(0, Math.min(this.cols,
-    Math.round((event.clientX - rect.left) / this.cw)));
+  const x = (event.clientX - rect.left) / this.cw;
+  const col = Math.max(0, Math.min(this.cols, Math.round(x)));
+  const cell = Math.max(0, Math.min(this.cols - 1, Math.floor(x)));
   const k = Math.max(0, Math.min(this.rows - 1,
     Math.floor((event.clientY - rect.top) / this.lh)));
-  return {row: this.viewTop + k, col: col, screenRow: k};
+  return {row: this.viewTop + k, col: col, cell: cell, screenRow: k};
 };
+// One click starts a selection, two pick the word under the pointer, three the
+// whole line — what every terminal does, and what a person reaches for when
+// they want a path out of a listing.
 TermScreen.prototype.beginSelect = function(event){
   const at = this.pointAt(event);
-  this.select = {from:at, to:at};
+  const now = Date.now(), last = this.clicks;
+  const again = now - last.at < T_CLICK_GAP && last.row === at.row &&
+                Math.abs(last.col - at.cell) <= 1;
+  this.clicks = {at: now, count: again ? Math.min(3, last.count + 1) : 1,
+                 row: at.row, col: at.cell};
+  const count = this.clicks.count;
+  if(count === 1){
+    this.select = {from:at, to:at, mode:1};
+    return;
+  }
+  const line = this.term ? t_rowText(this.rowAt(at.row) || []) : "";
+  if(count === 3){
+    this.select = {from:{row:at.row, col:0}, to:{row:at.row, col:line.length}, mode:3};
+    return;
+  }
+  let left = at.cell, right = at.cell;
+  if(T_WORD.test(line[at.cell] || " ")){
+    while(left > 0 && T_WORD.test(line[left - 1])) left--;
+    while(right < line.length && T_WORD.test(line[right])) right++;
+  }else right = at.cell + 1;
+  this.select = {from:{row:at.row, col:left}, to:{row:at.row, col:right}, mode:2};
 };
 TermScreen.prototype.extendSelect = function(event){
-  if(!this.select) return false;
+  if(!this.select || this.select.mode !== 1) return false;
   this.select.to = this.pointAt(event);
+  return true;
+};
+// A press and a release on the same spot is a click, not a selection. Keeping
+// it as an empty one hid the cursor until something else was selected.
+TermScreen.prototype.endSelect = function(){
+  if(!this.select) return false;
+  const from = this.select.from, to = this.select.to;
+  if(from.row === to.row && from.col === to.col) return this.clearSelect();
   return true;
 };
 TermScreen.prototype.clearSelect = function(){
@@ -1103,7 +1392,7 @@ TermScreen.prototype.clearSelect = function(){
 };
 TermScreen.prototype.selected = function(){
   if(!this.select || !this.term) return "";
-  const from = this.select.from, to = this.select.to;
+  const [from, to] = this.ordered();
   if(from.row === to.row && from.col === to.col) return "";
   return this.term.range({row:from.row, col:from.col},
                          {row:to.row, col:to.col}).text;
@@ -1111,37 +1400,54 @@ TermScreen.prototype.selected = function(){
 
 // ---- one shell session -----------------------------------------------------
 // Both pages drive a session through this. It owns the terminal, the screen it
-// is drawn on, the reading loop and the sid; the page owns the chrome around it
-// and says what to do when it opens or closes.
+// is drawn on, the keyboard, the reading loop and the sid; the page owns the
+// chrome around it and says what to do when it opens or closes.
 //
 // The read is a *held* request: the console answers the moment the pty produces
 // bytes, and the loop asks again straight away. So an idle shell costs one
 // parked request rather than a question several times a second, and what a
 // person sees after a keystroke costs one round trip instead of one round trip
 // plus half a polling interval.
+//
+// The keyboard is the session's too, and that is a fix rather than a tidy-up.
+// Each page used to read keys off its own element, two different ways: the
+// panel on /fleet lost every character typed with AltGr — `|`, `~`, `#`, `{`
+// on an AZERTY keyboard — and neither took a dead key or an input method. Text
+// now arrives the way it arrives in any editable field, through `input`, and
+// only what is not text (Enter, the arrows, a control chord) is read off the
+// key itself.
 const SHELL_RETRY = 700;        // after a failed read, before trying again
 const SHELL_MISSES = 20;        // …and how many in a row before giving up
+const SHELL_SHAKY = 3;          // misses before the screen says the link is shaky
+
+function t_ctrlChar(text){
+  const code = text.toUpperCase().charCodeAt(0);
+  if(code >= 64 && code <= 95) return String.fromCharCode(code - 64);   // ^A..^_
+  if(text === "?") return "\x7f";
+  if(text === " ") return "\x00";
+  return text;
+}
 
 function ShellSession(box, handlers){
   this.box = box;
   this.on = handlers || {};
-  this.node = null; this.sid = null; this.off = 0; this.term = null;
+  this.node = null; this.sid = null; this.rid = null; this.off = 0; this.term = null;
   this.size = {cols:80, rows:24};
   this.screen = new TermScreen(box);
   this.reading = false; this.stopped = true; this.retry = null;
   this.pending = ""; this.sending = null; this.frame = null;
   this.decoder = null; this.lastCell = null; this.misses = 0;
-  this.dragging = false;
+  this.dragging = false; this.composing = false; this.replaying = false;
+  // Ctrl and Alt held for the next key by a page's key row — a touch screen
+  // does not press two keys at once.
+  this.sticky = {ctrl:false, alt:false};
+  // The node a session just ended on: Enter, or the button, opens a new one
+  // there, the way a terminal window offers to reconnect rather than going dead.
+  this.ended = null;
   this.bind();
 }
-ShellSession.prototype.say = function(text){
-  this.screen.mirror.textContent = text;
-  const ctx = this.screen.ctx;
-  ctx.fillStyle = T_DEF_BG;
-  ctx.fillRect(0, 0, this.screen.width, this.screen.height);
-  ctx.fillStyle = T_DEF_FG;
-  ctx.font = this.screen.font(null);
-  ctx.fillText(text, 0, this.screen.lh);
+ShellSession.prototype.say = function(text, action, onAction){
+  this.screen.say(text, action, onAction);
 };
 ShellSession.prototype.newTerm = function(){
   const fit = this.screen.measure();
@@ -1152,21 +1458,32 @@ ShellSession.prototype.newTerm = function(){
   this.term.onReply = (text) => { this.send(text); };
   this.decoder = new TextDecoder();
   this.screen.attach(this.term);
+  this.screen.say("");
   this.paint(true);
 };
 ShellSession.prototype.open = async function(node){
   await this.stop();
-  this.node = node; this.sid = null; this.off = 0; this.stopped = false;
-  this.misses = 0;
+  this.node = node; this.sid = null; this.rid = null; this.off = 0;
+  this.stopped = false; this.misses = 0; this.ended = null; this.replaying = false;
   this.newTerm();
+  this.say("Opening a shell…");
+  let answer;
   try{
-    await api("/api/fleet/shell", "POST",
-              {node, cols:this.size.cols, rows:this.size.rows});
-  }catch(_){
-    this.node = null; this.stopped = true;
-    this.say("Could not open a shell on that node.");
+    answer = await apiJson("/api/fleet/shell", "POST",
+                           {node, cols:this.size.cols, rows:this.size.rows});
+  }catch(_){ answer = {ok:false, data:{}}; }
+  if(!answer.ok){
+    this.node = null; this.stopped = true; this.ended = node;
+    this.say("Could not open a shell on that node" +
+             (answer.data && answer.data.error ? ": " + answer.data.error : "."),
+             "Try again", () => this.reopen());
     return false;
   }
+  // The open answers over the mesh, later. Reading by *this request's* id is
+  // what makes the session the one just asked for: reading by node picked up
+  // whichever shell on that machine was newest — a forgotten one from another
+  // tab as readily as this one.
+  this.rid = (answer.data && answer.data.rid) || null;
   this.loop();
   if(this.on.opened) this.on.opened();
   return true;
@@ -1174,10 +1491,27 @@ ShellSession.prototype.open = async function(node){
 // Attaching rather than opening: a shell this console already holds — one this
 // tab did not start — is picked back up instead of a second one being spawned.
 ShellSession.prototype.attach = function(node){
-  this.node = node; this.sid = null; this.off = 0; this.stopped = false;
-  this.misses = 0;
+  this.node = node; this.sid = null; this.rid = null; this.off = 0;
+  this.stopped = false; this.misses = 0; this.ended = null;
   this.newTerm();
+  this.replaying = true;
   this.loop();
+};
+// A session that ended, opened again on the same machine — or picked back up,
+// if it never actually ended and only the link to it went.
+ShellSession.prototype.reopen = async function(){
+  const node = this.ended || this.node;
+  if(!node) return false;
+  let answer = null;
+  try{
+    answer = await apiJson("/api/fleet/shell?node=" + encodeURIComponent(node) + "&offset=0");
+  }catch(_){ answer = null; }
+  if(answer && answer.ok && answer.data && answer.data.open){
+    this.attach(node);
+    if(this.on.opened) this.on.opened();
+    return true;
+  }
+  return this.open(node);
 };
 ShellSession.prototype.loop = function(){
   if(this.reading || this.stopped) return;
@@ -1191,15 +1525,24 @@ ShellSession.prototype.loop = function(){
 ShellSession.prototype.read = async function(){
   if(!this.node) return;
   const where = this.sid ? "sid=" + encodeURIComponent(this.sid)
-                         : "node=" + encodeURIComponent(this.node);
+              : (this.rid ? "rid=" + encodeURIComponent(this.rid)
+                          : "node=" + encodeURIComponent(this.node));
   let answer;
   try{
     answer = await apiJson("/api/fleet/shell?" + where + "&offset=" + this.off + "&wait=1");
   }catch(_){ return this.miss(); }
+  if(!answer.ok && answer.data && answer.data.failed){
+    // The far node refused, or could not start one: a reason, not a delay.
+    return this.end("Could not open a shell: " + (answer.data.error || "refused"));
+  }
   if(!answer.ok || !answer.data) return this.miss();   // not open yet, or gone
+  if(this.misses >= SHELL_SHAKY) this.say("");
   this.misses = 0;
   const data = answer.data;
-  if(!this.sid){ this.sid = data.sid; this.off = 0; }
+  if(!this.sid){
+    this.sid = data.sid; this.off = 0; this.rid = null;
+    this.say("");                              // whatever it said, it is live now
+  }
   if(data.data){
     if(!this.term) this.newTerm();
     // Streaming: a multi-byte character split across two reads has to survive
@@ -1207,15 +1550,24 @@ ShellSession.prototype.read = async function(){
     let text;
     try{ text = this.decoder.decode(t_bytes(data.data), {stream:true}); }
     catch(_){ text = ""; }
+    this.term.quiet = this.replaying;
     this.term.write(text);
+    this.term.quiet = false;
     this.paint();
   }
+  this.replaying = false;
   this.off = data.seq;
   if(!data.open){
-    this.paint(false, true);
-    this.node = null; this.sid = null; this.stopped = true;
-    if(this.on.closed) this.on.closed();
+    this.end("Session closed" + (data.status ? " (exit " + data.status + ")" : "") +
+             ". Press Enter to open a new one.");
   }
+};
+ShellSession.prototype.end = function(message){
+  this.paint(true);
+  this.ended = this.node;
+  this.node = null; this.sid = null; this.rid = null; this.stopped = true;
+  this.say(message, "Open a new shell", () => this.reopen());
+  if(this.on.closed) this.on.closed();
 };
 // A read that answered nothing. Retried, but not for ever: a session the
 // console has forgotten answers 404 as readily as one that is merely slow to
@@ -1224,39 +1576,28 @@ ShellSession.prototype.read = async function(){
 ShellSession.prototype.miss = function(){
   this.misses += 1;
   if(this.misses < SHELL_MISSES){
+    if(this.misses === SHELL_SHAKY && this.sid) this.say("Connection lost — trying again…");
     return new Promise((resolve) => { this.retry = setTimeout(resolve, SHELL_RETRY); });
   }
-  this.node = null; this.sid = null; this.stopped = true;
-  this.say("That session is gone.");
-  if(this.on.closed) this.on.closed();
+  this.end(this.sid ? "Disconnected from that node." : "That shell did not open.");
   return Promise.resolve();
 };
 // Repaints are coalesced to one a frame, by the browser's own clock: a program
 // redrawing a whole screen sends it in several chunks, and painting each one is
 // the same picture three times — out of step with the display on top of it.
-ShellSession.prototype.paint = function(now, closed){
-  if(closed){
+ShellSession.prototype.paint = function(now){
+  if(now){
     if(this.frame){ cancelAnimationFrame(this.frame); this.frame = null; }
-    this.screen.draw(false);
-    this.say_closed();
+    this.draw();
     return;
   }
-  if(now){ this.draw(); return; }
   if(this.frame) return;
   this.frame = requestAnimationFrame(() => { this.frame = null; this.draw(); });
 };
 ShellSession.prototype.draw = function(){
   if(!this.term) return;
-  this.screen.draw(true);
+  this.screen.draw(!!this.sid);
   this.box.classList.toggle("t-mouse", !!this.term.mouse);
-};
-ShellSession.prototype.say_closed = function(){
-  const screen = this.screen, ctx = screen.ctx;
-  ctx.fillStyle = T_DEF_BG;
-  ctx.fillRect(0, screen.height - screen.lh, screen.width, screen.lh);
-  ctx.fillStyle = T_DEF_FG;
-  ctx.font = screen.font(null);
-  ctx.fillText("[session closed]", 0, screen.height - Math.round(screen.lh * 0.25));
 };
 // Keystrokes are queued, never fired in parallel. One request per key looks
 // fine and is not: two POSTs in flight reach a threaded server in whichever
@@ -1284,6 +1625,26 @@ ShellSession.prototype.drain = async function(){
       }catch(_){}                               // the read will show it went
     }
   }finally{ this.sending = null; }
+};
+// Something a person typed, from whichever path it came by. The sticky
+// modifiers of a page's key row apply here, once; typing takes the view back
+// to the bottom and drops a selection, as it does in every terminal.
+ShellSession.prototype.typed = function(text, chord){
+  if(!text) return Promise.resolve();
+  if(!chord && (this.sticky.ctrl || this.sticky.alt)){
+    if(this.sticky.ctrl && [...text].length === 1) text = t_ctrlChar(text);
+    if(this.sticky.alt) text = "\x1b" + text;
+    this.sticky.ctrl = this.sticky.alt = false;
+    if(this.on.sticky) this.on.sticky(this.sticky);
+  }
+  let moved = this.screen.clearSelect();
+  if(!this.screen.following){ this.screen.toBottom(); moved = true; }
+  if(moved) this.paint(true);
+  return this.send(text);
+};
+ShellSession.prototype.toggleSticky = function(name){
+  this.sticky[name] = !this.sticky[name];
+  if(this.on.sticky) this.on.sticky(this.sticky);
 };
 // The pty is told the size it actually has, and the emulator's own grid follows
 // it. Telling one and not the other is the bug that makes every full-screen
@@ -1313,7 +1674,7 @@ ShellSession.prototype.mouse = function(event, kind){
   const term = this.term;
   if(!term || !term.mouse || !this.sid) return false;
   const at = this.screen.pointAt(event);
-  const row = at.screenRow + 1, col = Math.max(1, at.col);
+  const row = at.screenRow + 1, col = at.cell + 1;
   if(row < 1 || row > term.rows) return false;
   let button;
   if(kind === "wheel") button = event.deltaY < 0 ? 64 : 65;
@@ -1339,43 +1700,163 @@ ShellSession.prototype.mouse = function(event, kind){
   this.send(report);
   return true;
 };
+ShellSession.prototype.focus = function(){
+  const input = this.screen.input;
+  try{ input.focus({preventScroll:true}); }catch(_){ input.focus(); }
+};
+ShellSession.prototype.blur = function(){ this.screen.input.blur(); };
+// A key that is not text. Text is left alone here and arrives through `input`,
+// which is the one path that every keyboard — an AZERTY one with AltGr, a dead
+// key, an input method, a phone's — actually types through.
+ShellSession.prototype.onKey = function(event){
+  if(event.isComposing || event.keyCode === 229) return;      // an IME has it
+  const key = event.key || "";
+  const chord = event.ctrlKey || event.metaKey;
+  const letter = key.toLowerCase();
+  // Copy and paste stay the browser's: Ctrl-C copies while something is
+  // selected and is ^C otherwise, Ctrl-V and Shift-Insert paste, and the shifted
+  // pair do both without ever reaching the pty.
+  if(chord && event.shiftKey && letter === "c"){ event.preventDefault(); this.copy(); return; }
+  if(chord && letter === "v") return;
+  if(event.shiftKey && key === "Insert") return;
+  if(chord && letter === "c" && this.screen.selected()) return;
+  // Shift with a page key scrolls the scrollback rather than reaching the pty —
+  // the convention every terminal uses, and the only way back up now that the
+  // screen is drawn rather than laid out.
+  if(event.shiftKey && (key === "PageUp" || key === "PageDown")){
+    if(this.screen.scrollBy((key === "PageUp" ? -1 : 1) * (this.screen.rows - 1))){
+      this.paint(true);
+    }
+    event.preventDefault();
+    return;
+  }
+  if(!this.sid){
+    if(key === "Enter" && this.ended){ event.preventDefault(); this.reopen(); }
+    return;
+  }
+  if(keyIsText(event)) return;                 // `input` delivers it
+  const bytes = keyBytes(event, this.term);
+  if(bytes === null) return;
+  event.preventDefault();
+  // A modifier held on a real keyboard is already in `bytes`; the sticky ones
+  // are for a key row, and must not be applied twice.
+  this.typed(bytes, event.ctrlKey || event.altKey || event.metaKey);
+};
+ShellSession.prototype.onText = function(){
+  if(this.composing) return;
+  const input = this.screen.input;
+  const text = input.value;
+  input.value = "";
+  if(!text) return;
+  if(!this.sid){
+    if(this.ended && /[\r\n]/.test(text)) this.reopen();
+    return;
+  }
+  // Enter arrives as a line break from a soft keyboard; a pty wants a return.
+  this.typed(text.replace(/\r?\n/g, "\r"));
+};
+ShellSession.prototype.copy = function(){
+  const text = this.screen.selected();
+  if(text) copyText(text);
+};
+// Bracketed paste: a program that asked for it wants to know the text arrived
+// as a paste rather than as typing — which is what stops an editor
+// auto-indenting every line of it. The markers are taken *out* of what is
+// pasted first: clipboard text carrying its own end marker would close the
+// bracket early, and whatever followed it would run as though it were typed.
+ShellSession.prototype.paste = function(text){
+  if(!text) return Promise.resolve();
+  text = text.replace(/\x1b\[20[01]~/g, "").replace(/\r?\n/g, "\r");
+  if(this.term && this.term.bracketed) text = "\x1b[200~" + text + "\x1b[201~";
+  return this.typed(text, true);
+};
 // Selection and scrollback, for when no program asked for the pointer. Both are
 // the screen's, not the browser's — there is no text in the DOM to select.
 ShellSession.prototype.bind = function(){
-  const box = this.box;
+  const box = this.box, screen = this.screen, input = screen.input;
+  const ours = (event) => !event.target.closest(".t-status, .t-back");
   box.addEventListener("mousedown", (event) => {
+    if(!ours(event)) return;
     // Shift bypasses mouse reporting, the way every terminal does it: without
     // it there is no way to select text out of a program that took the pointer.
-    if(!event.shiftKey && this.mouse(event, "down")){ event.preventDefault(); return; }
+    if(!event.shiftKey && this.mouse(event, "down")){
+      event.preventDefault();
+      this.focus();
+      return;
+    }
     if(event.button !== 0) return;
     this.dragging = true;
-    this.screen.beginSelect(event);
-    this.screen.painted = -1;
+    screen.beginSelect(event);
+    screen.painted = -1;
     this.paint(true);
+    // Kept from moving the focus to the pane: the keyboard belongs to the input.
     event.preventDefault();
   });
   box.addEventListener("mousemove", (event) => {
     if(this.dragging){
-      if(this.screen.extendSelect(event)){ this.screen.painted = -1; this.paint(); }
+      if(screen.extendSelect(event)){ screen.painted = -1; this.paint(); }
       return;
     }
     this.mouse(event, "move");
   });
   window.addEventListener("mouseup", (event) => {
-    if(this.dragging){ this.dragging = false; this.screen.extendSelect(event); this.paint(true); return; }
+    if(this.dragging){
+      this.dragging = false;
+      screen.extendSelect(event);
+      screen.endSelect();
+      this.paint(true);
+      this.focus();
+      return;
+    }
     this.mouse(event, "up");
   });
   box.addEventListener("wheel", (event) => {
     if(!event.shiftKey && this.mouse(event, "wheel")){ event.preventDefault(); return; }
     if(!this.term) return;
-    const lines = event.deltaMode === 1 ? event.deltaY : event.deltaY / this.screen.lh;
-    if(this.screen.scrollBy(Math.round(lines) || (event.deltaY > 0 ? 1 : -1))){
+    const lines = event.deltaMode === 1 ? event.deltaY : event.deltaY / screen.lh;
+    if(screen.scrollBy(Math.round(lines) || (event.deltaY > 0 ? 1 : -1))){
       this.paint(true);
       event.preventDefault();
     }
   }, {passive:false});
-  box.addEventListener("focus", () => { this.screen.focused = true; this.paint(true); });
-  box.addEventListener("blur", () => { this.screen.focused = false; this.paint(true); });
+  // The pane can take the focus from the keyboard (it is in the tab order); it
+  // hands it straight to the input, which is where typing has to land.
+  box.addEventListener("focus", (event) => { if(event.target === box) this.focus(); });
+  input.addEventListener("focus", () => {
+    screen.focused = true; box.classList.add("t-focus"); this.paint(true);
+  });
+  input.addEventListener("blur", () => {
+    screen.focused = false; box.classList.remove("t-focus"); this.paint(true);
+  });
+  input.addEventListener("keydown", (event) => this.onKey(event));
+  input.addEventListener("compositionstart", () => { this.composing = true; });
+  input.addEventListener("compositionend", () => {
+    this.composing = false;
+    this.onText();
+  });
+  input.addEventListener("input", () => this.onText());
+  input.addEventListener("beforeinput", (event) => {
+    // Backspace on an empty field produces no `input` event at all, so on a
+    // phone — whose keyboard names no key — it has to be caught here.
+    if(event.inputType === "deleteContentBackward" && !input.value){
+      event.preventDefault();
+      if(this.sid) this.typed("\x7f");
+    }
+  });
+  const paste = (event) => {
+    event.preventDefault();
+    if(!this.sid) return;
+    this.paste((event.clipboardData || window.clipboardData).getData("text"));
+  };
+  input.addEventListener("paste", paste);
+  const copy = (event) => {
+    const picked = screen.selected();
+    if(!picked) return;
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", picked);
+  };
+  input.addEventListener("copy", copy);
+  box.addEventListener("copy", copy);
   box.addEventListener("contextmenu", (event) => {
     if(this.term && this.term.mouse) event.preventDefault();
   });
@@ -1388,22 +1869,15 @@ ShellSession.prototype.halt = function(){
 ShellSession.prototype.stop = async function(){
   this.halt();
   const node = this.node, sid = this.sid;
-  this.node = null; this.sid = null;
+  this.node = null; this.sid = null; this.rid = null; this.ended = null;
   if(!sid) return;
+  this.say("Closed.");
   try{ await api("/api/fleet/close", "POST", {node, sid}); }catch(_){}
 };
 ShellSession.prototype.live = function(){ return !!this.sid; };
 ShellSession.prototype.copyText = function(){
   const picked = this.screen.selected();
   return picked || (this.term ? this.term.text() : "");
-};
-// Bracketed paste: a program that asked for it wants to know the text arrived
-// as a paste rather than as typing — which is what stops an editor
-// auto-indenting every line of it.
-ShellSession.prototype.paste = function(text){
-  if(!text) return Promise.resolve();
-  if(this.term && this.term.bracketed) text = "\x1b[200~" + text + "\x1b[201~";
-  return this.send(text);
 };
 
 // base64 both ways, without a callback per byte. `atob` and `btoa` are the only
@@ -1469,12 +1943,6 @@ PAGE_HTML = """<!doctype html>
   <div id="term" class="term full" tabindex="0" role="application"
        aria-label="Remote shell"></div>
 
-  <!-- The real editable element. Android only raises its keyboard for one of
-       these, and only while it has focus — so it lives behind the screen rather
-       than being hidden, which would make it unfocusable. -->
-  <textarea id="tin" class="offscreen" autocapitalize="off" autocorrect="off"
-            autocomplete="off" spellcheck="false" aria-hidden="true" tabindex="-1"></textarea>
-
   <div id="keys" class="keys" role="toolbar" aria-label="Terminal keys"></div>
 </div>
 
@@ -1534,10 +2002,6 @@ body{height:100vh;overflow:hidden}
 .tbar select{min-width:0;max-width:40vw}
 .term.full{flex:1 1 auto;min-height:0;max-height:none;border-bottom:0;
   padding:var(--s-3);font-size:13px}
-/* Behind the screen, not hidden: `display:none` cannot take focus, and focus is
-   the only thing that raises a phone's keyboard. */
-.offscreen{position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;
-  border:0;padding:0;resize:none}
 .keys{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;
   padding:6px var(--s-2) calc(6px + env(safe-area-inset-bottom));
   border-top:1px solid var(--border);background:var(--surface)}
@@ -1575,7 +2039,6 @@ PAGE_JS = r"""
 
 let TERM_SESSION = null;
 let NODES = [];
-const MODS = {ctrl:false, alt:false};
 const FILES = {node:"", path:"", busy:false};
 
 function setState(text, tone){
@@ -1615,7 +2078,8 @@ function currentNode(){ return $("node").value || ""; }
 // The row Termux settled on, and for the same reason: without Esc, Tab, Ctrl and
 // the arrows, a soft keyboard cannot drive a shell at all. Ctrl and Alt are
 // sticky for one keystroke — pressing two keys at once is not something a touch
-// screen does well.
+// screen does well — and they are the session's, so a key typed on the phone's
+// own keyboard takes them too.
 
 const KEYROW = [
   ["esc", "\x1b"], ["tab", "\t"], ["ctrl", "#ctrl"], ["alt", "#alt"],
@@ -1629,9 +2093,10 @@ const KEYROW = [
 const ARROWS = {arrowLeft:"Left", arrowUp:"Up", arrowDown:"Down", arrowRight:"Right"};
 
 function paintKeys(){
+  const held = TERM_SESSION ? TERM_SESSION.sticky : {ctrl:false, alt:false};
   $("keys").innerHTML = KEYROW.map(([label, payload]) => {
     const sticky = payload === "#ctrl" || payload === "#alt";
-    const pressed = sticky ? MODS[payload.slice(1)] : false;
+    const pressed = sticky ? held[payload.slice(1)] : false;
     const body = ARROWS[label] ? icon(label, ARROWS[label] + " arrow") : esc(label);
     return '<button type="button" data-key="' + esc(payload) + '"' +
       (sticky ? ' aria-pressed="' + (pressed ? "true" : "false") + '"' : "") +
@@ -1639,133 +2104,31 @@ function paintKeys(){
   }).join("");
 }
 
-function ctrlChar(text){
-  const code = text.toUpperCase().charCodeAt(0);
-  if(code >= 64 && code <= 95) return String.fromCharCode(code - 64);   // ^A..^_
-  if(text === "?") return "\x7f";
-  if(text === " ") return "\x00";
-  return text;
-}
-
-// Everything typed goes through here, from whichever of the three input paths:
-// the physical keyboard, the hidden field the soft keyboard feeds, and the row.
-async function typeIn(text){
-  if(!text || !TERM_SESSION) return;
-  if(MODS.ctrl && text.length === 1) text = ctrlChar(text);
-  if(MODS.alt) text = "\x1b" + text;
-  if(MODS.ctrl || MODS.alt){ MODS.ctrl = MODS.alt = false; paintKeys(); }
-  await TERM_SESSION.send(text);
-}
-
-// ---- the three ways something gets typed ------------------------------------
-
-// 1. A physical keyboard, on the pane itself.
-$("term").addEventListener("keydown", async (event) => {
-  if(!TERM_SESSION || !TERM_SESSION.live()) return;
-  if((event.ctrlKey || event.metaKey) && ["c", "C"].includes(event.key) &&
-     TERM_SESSION.screen.selected()) return;             // let a copy through
-  if((event.ctrlKey || event.metaKey) && ["v", "V"].includes(event.key)) return;
-  // Shift with a page key scrolls the scrollback rather than reaching the pty —
-  // the convention every terminal uses, and the only way back up now that the
-  // screen is drawn rather than laid out.
-  if(event.shiftKey && (event.key === "PageUp" || event.key === "PageDown")){
-    if(TERM_SESSION.screen.scrollBy(
-        (event.key === "PageUp" ? -1 : 1) * (TERM_SESSION.screen.rows - 1))){
-      TERM_SESSION.paint(true);
-    }
-    event.preventDefault();
-    return;
-  }
-  const bytes = keyBytes(event, TERM_SESSION.term);
-  if(bytes === null) return;
-  event.preventDefault();
-  // A modifier already held on a real keyboard is in `bytes`; the sticky ones
-  // are for the row, so they must not be applied twice.
-  if(event.ctrlKey || event.metaKey || event.altKey) await TERM_SESSION.send(bytes);
-  else await typeIn(bytes);
-});
-
-// 2. A soft keyboard, through the field behind the screen. Android reports no
-//    usable key for an IME (`keydown` arrives as 229), so what was typed is read
-//    from the input events instead and the field is emptied again at once.
-$("tin").addEventListener("input", async (event) => {
-  const text = event.target.value;
-  event.target.value = "";
-  if(!text) return;
-  // Enter arrives as a line break; a pty wants a carriage return.
-  await typeIn(text.replace(/\n/g, "\r"));
-});
-$("tin").addEventListener("beforeinput", async (event) => {
-  // Backspace on an empty field produces no `input` event at all, so it has to
-  // be caught here or it would never reach the shell.
-  if(event.inputType === "deleteContentBackward"){
-    event.preventDefault();
-    await typeIn("\x7f");
-  }
-});
-$("tin").addEventListener("keydown", async (event) => {
-  // A phone with a hardware keyboard attached, or the arrows some soft keyboards
-  // do send: handled here so the field never has to hold them.
-  if(["Enter", "Backspace"].includes(event.key)) return;   // the input path has these
-  const bytes = keyBytes(event, TERM_SESSION ? TERM_SESSION.term : null);
-  if(bytes === null || bytes === event.key) return;        // plain text: let it type
-  event.preventDefault();
-  await typeIn(bytes);
-});
-$("tin").addEventListener("paste", async (event) => {
-  event.preventDefault();
-  await TERM_SESSION.paste((event.clipboardData || window.clipboardData).getData("text"));
-});
-$("term").addEventListener("paste", async (event) => {
-  event.preventDefault();
-  await TERM_SESSION.paste((event.clipboardData || window.clipboardData).getData("text"));
-});
-// The pointer, the wheel and the selection belong to the session: it owns the
-// screen they act on, and there is no text in the DOM for a browser to select.
-$("term").addEventListener("copy", (event) => {
-  if(!TERM_SESSION) return;
-  const picked = TERM_SESSION.screen.selected();
-  if(!picked) return;
-  event.preventDefault();
-  event.clipboardData.setData("text/plain", picked);
-});
-
-// 3. The key row. `pointerdown` is where the default is stopped: without it the
-//    button takes focus, the phone's keyboard folds away, and every second key
-//    press is spent bringing it back.
+// The key row. `pointerdown` is where the default is stopped: without it the
+// button takes focus, the phone's keyboard folds away, and every second key
+// press is spent bringing it back.
 $("keys").addEventListener("pointerdown", (event) => {
   if(event.target.closest("button")) event.preventDefault();
 });
 $("keys").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-key]");
-  if(!button) return;
+  if(!button || !TERM_SESSION) return;
   const payload = button.dataset.key;
   if(payload === "#ctrl" || payload === "#alt"){
-    const name = payload.slice(1);
-    MODS[name] = !MODS[name];
-    paintKeys();
-    focusInput();
+    TERM_SESSION.toggleSticky(payload.slice(1));
+    TERM_SESSION.focus();
     return;
   }
   if(payload === "#paste"){ await pasteIn(); return; }
-  await typeIn(payload);
-  focusInput();
+  await TERM_SESSION.typed(payload);
+  TERM_SESSION.focus();
 });
 
-// Tapping the screen means "type here", which on a phone means "raise the
-// keyboard" — and the only thing that does that is focus on a real field.
-function focusInput(){
-  const input = $("tin");
-  try{ input.focus({preventScroll:true}); }catch(_){ input.focus(); }
-}
-$("term").addEventListener("pointerup", () => {
-  if(TERM_SESSION && TERM_SESSION.screen.selected()) return;  // a selection is not a tap
-  if(TERM_SESSION && TERM_SESSION.live()) focusInput();
-});
 $("kbd").addEventListener("click", () => {
   const wanted = $("kbd").getAttribute("aria-pressed") !== "true";
   $("kbd").setAttribute("aria-pressed", wanted ? "true" : "false");
-  if(wanted) focusInput(); else $("tin").blur();
+  if(!TERM_SESSION) return;
+  if(wanted) TERM_SESSION.focus(); else TERM_SESSION.blur();
 });
 
 // ---- clipboard --------------------------------------------------------------
@@ -1780,7 +2143,7 @@ async function pasteIn(){
   let text = "";
   try{ text = await navigator.clipboard.readText(); }
   catch(_){ text = ""; }
-  if(text){ await TERM_SESSION.paste(text); return; }
+  if(text){ await TERM_SESSION.paste(text); TERM_SESSION.focus(); return; }
   // Firefox and most of Android refuse a silent clipboard read. A field the
   // person pastes into themselves is the one path that always works.
   $("paste-text").value = "";
@@ -1794,7 +2157,7 @@ $("paste-send").addEventListener("click", async (event) => {
   $("paste-text").value = "";
   $("paste-dialog").close();
   await TERM_SESSION.paste(text);
-  focusInput();
+  TERM_SESSION.focus();
 });
 
 // ---- opening and closing ----------------------------------------------------
@@ -1805,12 +2168,13 @@ $("open").addEventListener("click", (event) => withBusy(event.target, async () =
   setState("opening…");
   const ok = await TERM_SESSION.open(node);
   setState(ok ? "live" : "failed", ok ? "ok" : "danger");
-  if(ok){ FILES.node = node; FILES.path = ""; focusInput(); }
+  if(ok){ FILES.node = node; FILES.path = ""; TERM_SESSION.focus(); }
 }));
 
 $("stop").addEventListener("click", async () => {
   await TERM_SESSION.stop();
   setState("closed");
+  TERM_SESSION.say("Press Open to start a shell on that node.");
 });
 
 $("node").addEventListener("change", () => {
@@ -1997,8 +2361,11 @@ async function enter(token){
   fitViewport();
   await loadNodes();
   TERM_SESSION = new ShellSession($("term"), {
+    opened: () => setState("live", "ok"),
     closed: () => setState("closed"),
+    sticky: () => paintKeys(),
   });
+  paintKeys();
   // A session this console already holds is picked up rather than replaced: the
   // tab that opened this one may have started it, and two shells where the
   // operator asked for one is a machine with a stray login on it.
@@ -2010,7 +2377,7 @@ async function enter(token){
       TERM_SESSION.attach(node);
       FILES.node = node;
       setState("live", "ok");
-      focusInput();
+      TERM_SESSION.focus();
     }else{
       TERM_SESSION.say("Press Open to start a shell on that node.");
       setState("idle");

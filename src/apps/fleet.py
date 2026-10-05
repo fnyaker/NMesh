@@ -3479,9 +3479,23 @@ def _clean_env() -> dict:
 
 
 def _shell_env() -> dict:
+    """What an interactive shell is started with.
+
+    ``TERM`` names the terminal at the *other* end, and that is always the
+    console's emulator — never whatever the node process happened to inherit.
+    A node started from a Linux console passed on ``TERM=linux``, and every
+    program then drew with that console's sequences into an xterm-class
+    emulator: ``top`` set a cursor shape the emulator read as a question, and
+    answered itself into the program's input. The locale defaults to UTF-8 for
+    the same reason: the emulator decodes UTF-8, and a box drawn in another
+    encoding is a screen of replacement glyphs."""
     env = _clean_env()
     env.pop("DEBIAN_FRONTEND", None)
-    env["TERM"] = os.environ.get("TERM", "xterm-256color")
+    env["TERM"] = "xterm-256color"
+    env["COLORTERM"] = "truecolor"
+    if "UTF-8" not in (env.get("LC_ALL") or env.get("LANG") or "").upper().replace("UTF8", "UTF-8"):
+        env.pop("LC_ALL", None)
+        env["LANG"] = "C.UTF-8"
     return env
 
 

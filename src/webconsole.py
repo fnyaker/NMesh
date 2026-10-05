@@ -1948,6 +1948,7 @@ def _make_handler(console: WebConsole):
             many can be parked at once — each one is a thread of this server."""
             sid = (query.get("sid") or [""])[0]
             node = (query.get("node") or [""])[0]
+            rid = (query.get("rid") or [""])[0][:64]
             offset = _int_param(query, "offset", 0)
             wanted = (query.get("wait") or [""])[0] in ("1", "true", "yes")
             parked = False
@@ -1961,7 +1962,19 @@ def _make_handler(console: WebConsole):
                 # A page that has just asked for a shell knows the node, not the
                 # session: the open answers asynchronously. Naming the node is
                 # how a terminal draws itself without reading the whole ledger.
-                if not sid and node:
+                if not sid and rid:
+                    # The shell *this* request opened, or the reason it will
+                    # not open — a refusal is an answer, not a wait.
+                    sid, failure = console._fleet.wait_shell_rid(
+                        rid, _SHELL_HOLD if hold else 0.0)
+                    if failure:
+                        self._json(409, {"error": failure[:200], "failed": True})
+                        return
+                    if not sid:
+                        self._json(404, {"error": "no session"})
+                        return
+                    hold = False
+                elif not sid and node:
                     sid = (console._fleet.wait_shell_open(node, _SHELL_HOLD) if hold
                            else console._fleet.newest_shell(node))
                     if not sid:

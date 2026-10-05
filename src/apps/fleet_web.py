@@ -308,7 +308,7 @@ class FleetBridge:
                           node_hex)
         elif isinstance(event, ShellOpened):
             self._finish(event.rid, "ok")
-            self._open_shell_record(event.sid.hex(), node_hex)
+            self._open_shell_record(event.sid.hex(), node_hex, event.rid)
             self._say("ok", f"shell opened on {short}…", node_hex)
         elif isinstance(event, ShellOutput):
             self._append_shell(event.sid.hex(), event.data)
@@ -401,13 +401,16 @@ class FleetBridge:
                 self._bump()
         return invite
 
-    def _open_shell_record(self, sid: str, node_hex: str) -> None:
+    def _open_shell_record(self, sid: str, node_hex: str, rid: str = "") -> None:
         with self._lock:
             while len(self._shells) >= MAX_SHELLS:
                 self._shells.popitem(last=False)
+            # The request it answers is kept with it: that is how a page that
+            # asked for a shell finds *that* shell, rather than whichever one on
+            # the machine happens to be newest.
             self._shells[sid] = {"sid": sid, "node": node_hex, "open": True,
                                  "data": bytearray(), "seq": 0, "status": None,
-                                 "at": time.time()}
+                                 "rid": str(rid or ""), "at": time.time()}
             self._bump()
 
     def _append_shell(self, sid: str, data: bytes) -> None:
@@ -527,6 +530,29 @@ class FleetBridge:
                 left = deadline - time.monotonic()
                 if left <= 0:
                     return ""
+                self._lock.wait(left)
+
+    def wait_shell_rid(self, rid: str, timeout: float) -> tuple[str, str]:
+        """``(sid, "")`` once the shell opened by request ``rid`` exists, or
+        ``("", reason)`` once that request has failed.
+
+        A refusal from the far node — no right to a shell, too many open — used
+        to be invisible to the page that asked: it read by node, found nothing,
+        and tried again twenty times before saying the session was gone. The
+        reason was in the job all along."""
+        rid = str(rid or "")
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lock:
+            while True:
+                for record in self._shells.values():
+                    if rid and record.get("rid") == rid:
+                        return record["sid"], ""
+                job = self._jobs.get(rid)
+                if job is not None and job.get("state") in ("failed", "refused"):
+                    return "", job.get("detail") or "refused"
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return "", ""
                 self._lock.wait(left)
 
     def shell_data(self, sid: str, offset: int = 0) -> dict | None:
