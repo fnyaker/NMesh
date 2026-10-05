@@ -1123,6 +1123,8 @@ const CONTEXT = {
     // tick, which is what "I had to reload the page" was.
     this.trouble(false);
     EVENTS.start();
+    REFRESH.arm(REFRESH.read());
+    REFRESH.paint(REFRESH.read());
     REFRESH.run();
   },
 
@@ -1746,6 +1748,17 @@ const EVENTS = {
   timer: null,
   handlers: {},
   onLive: null,
+  // Whether the stream has been down since it last said `ready`. What moved
+  // while it was down was never told to anybody — a restart (which is what an
+  // update ends in) starts the node's counter again, so not even the browser's
+  // own `Last-Event-ID` can ask for it — and the page went on showing the
+  // links of a node that had rebuilt every one of them.
+  dropped: false,
+  // A browser reconnects on its own after a network error, and never after a
+  // refusal: a 503 when too many streams are open, or a 401, closes the stream
+  // for good, and the page sat on its timer for the rest of the session.
+  retry: 0,
+  reopen: null,
 
   // `topics` is a list of names, or "*" for anything at all.
   on(topics, fn){
@@ -1767,13 +1780,19 @@ const EVENTS = {
     this.source = source;
     source.addEventListener("ready", (event) => {
       this.say(true);
+      this.retry = 0;
       // The node names the build answering. A page served by one build and
       // answered by another is a page whose assets were replaced under it —
       // the stream is the first place that shows, because it reconnects on its
       // own after the restart an update ends in.
       let hello = {};
       try{ hello = JSON.parse(event.data) || {}; }catch(_){}
-      FEED.agrees(hello);
+      if(!FEED.agrees(hello)) return;
+      if(this.dropped){
+        this.dropped = false;
+        this.everything();
+        REFRESH.run();
+      }
     });
     source.addEventListener("change", (event) => {
       let topics = [];
@@ -1783,11 +1802,29 @@ const EVENTS = {
     });
     // The browser reconnects on its own; what it cannot do is tell the page it
     // is currently blind. Saying so is what puts the timer back.
-    source.addEventListener("error", () => this.say(false));
+    source.addEventListener("error", () => {
+      this.say(false);
+      this.dropped = true;
+      if(source.readyState !== 2 || this.source !== source) return;
+      const wait = this.retry = Math.min(60000, (this.retry || 2500) * 2);
+      if(this.reopen) clearTimeout(this.reopen);
+      this.reopen = setTimeout(() => {
+        this.reopen = null;
+        if(this.source === source) this.start();
+      }, wait);
+    });
+  },
+
+  // Every topic somebody listens to, as if each had just moved: one repaint
+  // per view, inside one frame, like any other burst.
+  everything(){
+    Object.keys(this.handlers).forEach((topic) => this.pending.add(topic));
+    this.schedule();
   },
 
   stop(){
     if(this.source){ this.source.close(); this.source = null; }
+    if(this.reopen){ clearTimeout(this.reopen); this.reopen = null; }
     if(this.timer){ clearTimeout(this.timer); this.timer = null; }
     CHANGES.stop();
     this.pending.clear();
@@ -1833,6 +1870,12 @@ const EVENTS = {
 const REFRESH = {
   MAX: 30,
   DEFAULT: 2,
+  // The floor while another node is being driven. Every read then crosses the
+  // mesh and is a signed frame that node verifies and counts against us; at
+  // two seconds a console page, a node card and the change poll together were
+  // most of what the far node allows an operator, and a second window was the
+  // rest.
+  REMOTE_MIN: 5,
   timer: null,
   jobs: [],
 
@@ -1876,10 +1919,12 @@ const REFRESH = {
       const stream = EVENTS.live
         ? "Links and nodes update as they change. "
         : "Not streaming — everything is read on this interval. ";
+      const every = CONTEXT.remote ? Math.max(seconds, this.REMOTE_MIN) : seconds;
       const cadence = seconds === 0
         ? "The interval is off, so ping, jitter, throughput and everything on "
           + "a node's card stand still."
-        : "Ping, jitter and throughput every " + seconds + " seconds.";
+        : "Ping, jitter and throughput every " + every + " seconds" +
+          (every !== seconds ? " (the floor while another node is driven)." : ".");
       box.title = stream + cadence;
       const dot = $("refresh-live");
       if(dot) dot.title = cadence;
@@ -1901,8 +1946,10 @@ const REFRESH = {
 
   arm(seconds){
     if(this.timer){ clearInterval(this.timer); this.timer = null; }
-    if(seconds > 0 && this.jobs.length)
-      this.timer = setInterval(() => this.run(), seconds * 1000);
+    const every = seconds > 0 && CONTEXT.remote
+      ? Math.max(seconds, this.REMOTE_MIN) : seconds;
+    if(every > 0 && this.jobs.length)
+      this.timer = setInterval(() => this.run(), every * 1000);
   },
 
   set(value){

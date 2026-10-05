@@ -347,8 +347,16 @@ tests/
 ├── test_updater.py                                    — GitHub update:
 │     version comparison, hostile fields bounded, a booby-trapped archive
 │     (absolute path, traversal, symlink, special file), state and venv never
-│     touched, restore after a failure, the repository pinned, and the two ways
+│     touched, restore after a failure, the repository pinned, the two ways
 │     a node comes back after an install — a supervisor, or re-execing itself
+│     — and a new tree that will not import (or hangs, or has no launcher)
+│     taken straight out again before anything restarts onto it
+├── test_boot_guard.py                                 — a tree on trial: every
+│     start counted, a tree that never stays up put back (what it added
+│     removed, the failed one kept aside, state untouched), one that stays up
+│     left alone, a rollback cut short finished by the next start, a trial file
+│     it cannot read never stopping a start, start.sh counting before anything
+│     an update can break, and a start counted once by either launcher
 ├── test_config.py                                     — configuration file:
 │     hostile parsing (a broken line, an unknown key, a huge file, random bytes,
 │     a value trying to open a second line), precedence, settings not editable
@@ -360,7 +368,11 @@ tests/
 │     test), no `$("id")` points at a missing element, no external resource, no
 │     `style=` attribute (the CSP ignores it silently), and the terminal emulator
 │     reads back what a real shell writes (`term_emulator_test.js`, run under
-│     node), read back from the **model** rather than from markup — the screen is
+│     node; `channel_test.js` and `events_test.js` drive the console's two
+│     loops the same way: one change poll however often it is restarted, a
+│     node that restarted read from zero, a context kept through a link being
+│     rebuilt, a stream that came back repainting everything and one the
+│     browser gave up on reopened), read back from the **model** rather than from markup — the screen is
 │     drawn on a canvas now, so there is no HTML to assert on and no injection to
 │     guard against — including what a *full-screen* program does: the alternate screen,
 │     a scroll region, insert/delete of lines and characters, 256-colour and

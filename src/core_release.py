@@ -670,6 +670,7 @@ class AutoInstallJournal:
             return None
         return {"version": version,
                 "attempts": max(0, min(attempts, MAX_AUTO_ATTEMPTS)),
+                "refused": value.get("refused") is True,
                 "at": int(value["at"]) if isinstance(value.get("at"), int)
                       and not isinstance(value.get("at"), bool) else 0}
 
@@ -694,12 +695,14 @@ class AutoInstallJournal:
 
         Every entry naming the running version did what it was written for, and
         is dropped. Returns the versions that did **not** take, so the node can
-        say so rather than quietly trying again."""
+        say so rather than quietly trying again. An attempt the new tree refused
+        before anything restarted (it would not import) never tried to take,
+        and is not reported as having failed to; it still counts."""
         stale = []
         for key, entry in list(self._entries.items()):
             if entry["version"] == running_version:
                 del self._entries[key]
-            else:
+            elif not entry["refused"]:
                 stale.append(entry["version"])
         if stale or not self._entries:
             self._save()
@@ -712,11 +715,15 @@ class AutoInstallJournal:
     def exhausted(self, release_id_hex: str) -> bool:
         return self.attempts(release_id_hex) >= MAX_AUTO_ATTEMPTS
 
-    def record(self, release_id_hex: str, version: str) -> int:
+    def record(self, release_id_hex: str, version: str, *,
+               refused: bool = False) -> int:
         """Note one attempt, on disk, and return how many there have been.
 
         Called **before** the node restarts into it: an attempt written after
-        the exit is an attempt nobody ever counts."""
+        the exit is an attempt nobody ever counts. ``refused`` is an attempt
+        the new tree turned down before any restart — it would not import —
+        which costs an attempt just the same: a release that cannot start here
+        will not start because it was offered again."""
         if not _HEX_ID.fullmatch(release_id_hex or ""):
             return 0
         entry = self._entries.get(release_id_hex)
@@ -724,6 +731,7 @@ class AutoInstallJournal:
         self._entries[release_id_hex] = {
             "version": str(version)[:MAX_VERSION_LEN],
             "attempts": min(attempts, MAX_AUTO_ATTEMPTS),
+            "refused": bool(refused),
             "at": int(time.time()),
         }
         while len(self._entries) > self._max:
@@ -735,6 +743,22 @@ class AutoInstallJournal:
         """Drop one entry — an operator installing by hand is a fresh start."""
         if self._entries.pop(release_id_hex, None) is not None:
             self._save()
+
+    def abandon(self, version: str) -> int:
+        """Give up on every automatic attempt at ``version`` now.
+
+        What the boot guard's rollback calls for: a tree that was started
+        several times and never stayed up has used its chances in one go, and
+        installing it again would only buy the same crash loop a second time.
+        Returns how many entries that closed."""
+        closed = 0
+        for entry in self._entries.values():
+            if entry["version"] == version and entry["attempts"] < MAX_AUTO_ATTEMPTS:
+                entry["attempts"] = MAX_AUTO_ATTEMPTS
+                closed += 1
+        if closed:
+            self._save()
+        return closed
 
     def __len__(self) -> int:
         return len(self._entries)

@@ -2098,11 +2098,13 @@ def _make_handler(console: WebConsole):
         def _resume_from(self, now: int) -> int:
             """Where a reconnecting page left off, from `Last-Event-ID`.
 
-            Clamped to what exists: a header from another run of this console
-            names a sequence this one has never reached, and starting *ahead*
-            of the truth is a stream that never speaks again. An id we are past
-            is fine, and is the point — the next pass answers with everything
-            that moved since."""
+            An id we are past is fine, and is the point — the next pass answers
+            with everything that moved since. An id *ahead* of us comes from
+            another run of this console: the node restarted (an update ends in
+            exactly that), so everything this run has noted is news to that
+            page, and it is answered from the start. Clamping it to `now`
+            instead answered "nothing moved" about a node that had just rebuilt
+            every link it has."""
             raw = self.headers.get("Last-Event-ID")
             if not raw:
                 return now
@@ -2110,7 +2112,7 @@ def _make_handler(console: WebConsole):
                 asked = int(str(raw)[:20])
             except ValueError:
                 return now
-            return max(0, min(asked, now))
+            return 0 if asked > now else max(0, asked)
 
         def _handle_remote_targets(self) -> None:
             if not self._authed():

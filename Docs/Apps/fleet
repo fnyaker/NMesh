@@ -1068,6 +1068,8 @@ accepted only if they answer a `rid` **we** issued, for that kind of action,
 | `SHELL_IDLE_TIMEOUT` | 900 s |
 | `SHELL_INPUT_MAX` | 8192 B per input frame |
 | `MAX_INFLIGHT` | 64 requests tracked on the operator side |
+| `MAX_REQUESTS` / `REQUEST_WINDOW` | 64 signed requests per 10 s from a sender this node granted nothing; a breach is reported to the node at weight 2 |
+| `MAX_OPERATOR_REQUESTS` | 1024 per 10 s from a node a human here granted a capability to (`FleetState.is_operator`), reported at weight 1 — see below |
 | `MAX_OPERATORS` / `MAX_MANAGED` | 64 / 4096 |
 | `MAX_PENDING` | 256 pending requests (TTL 7 days) |
 | `UPDATE_TIMEOUT` / `SCAN_TIMEOUT` | 1800 s / 300 s |
@@ -1092,6 +1094,21 @@ A reply that will not fit one frame is **cut**, never sent whole and dropped:
 key from the front — a log is read from its end, and no fixed ceiling on it
 would do, because under JSON escaping one `ESC` becomes six characters and a
 screen of colour codes is six times its own length on the wire.
+
+**Two ceilings on signed requests, chosen from the ledger.** Every signed frame
+costs an ML-DSA verification before a handler sees it, and node ids are free to
+mint, so a stranger is held to 64 per 10 s. That number was also applied to
+operators, and an operator doing nothing but their job crossed it: a console
+driving this node asks one frame per read and polls for changes, and a file goes
+over in 24 KiB slices, so a few megabytes are a hundred frames in a few seconds.
+Every spent window was reported to the node as a flood — four of them and the
+node being managed held its own operator *suspect*, dropped their traffic and
+let their links go. "My remote console keeps dropping" and "my links are
+unstable" were that. A node this one granted anything is now counted against
+`MAX_OPERATOR_REQUESTS` instead: still a ceiling, still reported, sized for a
+transfer at full speed. Which ceiling applies is read from **our ledger**, keyed
+by the end-to-end session's identity — never from the frame — so a stranger
+cannot claim it, and revoking a grant makes that node a stranger again at once.
 
 The ledger **fails closed**: a corrupt or tampered blob yields an **empty**
 ledger (we forget who we believed, rather than trusting a forged list), and an

@@ -394,13 +394,17 @@ SETTINGS = {
     "update_when_active": (_as_bool, False, True,
                         "Only sweep for updates while somebody is using this "
                         "node (a console, an app, a call)"),
-    # Saying which version this node runs, so somebody who watches it can see
-    # it — a recommendation, pointing at a release id somebody else signed. It
-    # publishes no code and authorises nothing: whoever reads it decides what
-    # their own operator's subscriptions make of it.
-    "recommend_version": (_as_bool, False, True,
-                        "Publish which release id this node runs, so nodes "
-                        "watching it can see the version it settled on"),
+    # Serving the release this node runs, and saying so — on by default, because
+    # a node is meant to stand on its own and carry the mesh's updates onward
+    # rather than leave every download to whoever published. It hands out bytes
+    # a publisher already signed (or that pack to exactly what one signed), so
+    # it authorises nothing and publishes no code of its own: nobody installs
+    # anything from it that their own pins would not accept from anyone else.
+    # It does say which version this node runs; an operator who would rather
+    # not say that turns it off.
+    "recommend_version": (_as_bool, True, True,
+                        "Serve the release this node runs to nodes that ask "
+                        "for it, and say so in the package directory"),
     "update_branch":   (_as_branch, "", True,
                         "Branch whose src/version.py says what the latest "
                         "version is, instead of the published GitHub releases "
