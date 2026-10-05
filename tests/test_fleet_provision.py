@@ -783,10 +783,12 @@ class TestInstallOptions:
     def test_the_two_grants_default_the_way_they_do_for_a_reason(self):
         chosen = fleet_provision.clean_install_options(None)
         # A machine nobody will log into again has to be able to take a security
-        # update; an account that can reach the docker socket is root on that
-        # machine.
+        # update. Docker is left to install.sh's own default (granted on a root
+        # install of a machine that has it) unless somebody said either word.
         assert chosen["allow_update"] is True
-        assert chosen["docker"] is False
+        assert chosen["docker"] is None
+        assert fleet_provision.clean_install_options({"docker": False})["docker"] is False
+        assert fleet_provision.clean_install_options({"docker": "yes"})["docker"] is None
 
     def test_a_path_that_is_not_one_is_dropped_rather_than_escaped(self):
         chosen = fleet_provision.clean_install_options({
@@ -827,6 +829,14 @@ class TestInstallOptions:
 
     def test_nothing_chosen_leaves_the_defaults_alone(self):
         phase = fleet_provision.build_install_phase(stage="s")
+        assert "WANT_DOCKER=''" in phase
+
+    def test_a_refusal_reaches_the_installer_as_a_refusal(self):
+        """Silence would now mean "the default", which on a root install is
+        yes. A no has to be said to install.sh, which also remembers it."""
+        phase = fleet_provision.build_install_phase(stage="s",
+                                                    options={"docker": False})
         assert "WANT_DOCKER=0" in phase
+        assert '[ "$WANT_DOCKER" = "0" ] && ARGS="$ARGS --no-docker"' in phase
         assert "ALLOW_UPDATE=1" in phase
         assert "NODE_FLAGS=''" in phase

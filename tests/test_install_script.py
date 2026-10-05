@@ -139,10 +139,10 @@ class TestServiceUnits:
         assert "Environment=OQS_INSTALL_PATH=/opt/nmesh/_oqs" in out
         assert "ProtectSystem=full" in out
 
-    def test_the_unit_says_nothing_about_docker_unless_asked(self, tmp_path):
+    def test_the_unit_says_nothing_about_docker_unless_granted(self, tmp_path):
         """An account that can reach the docker socket can start a privileged
-        container bind-mounting `/`. That is root on the machine, so it is never
-        a default and never inferred from docker being installed."""
+        container bind-mounting `/`. That is root on the machine, so the unit
+        carries the group only when this run granted it (`settle_docker`)."""
         plain = run_snippet(
             tmp_path,
             'systemd_unit /opt/nmesh /var/lib/nmesh nm "" multi-user.target').stdout
@@ -257,6 +257,59 @@ class TestServiceAccount:
             tmp_path, 'SUDO=; add_to_group nmesh docker || echo NOT_JOINED',
             isolate=True)
         assert "NOT_JOINED" in result.stdout
+
+    # -- docker: on for a root install, off when refused, and the refusal kept --
+
+    _ROOT_ID = ("id", "#!/bin/sh\nif [ \"$1\" = -u ]; then echo 0; else echo root; fi\n")
+    _USER_ID = ("id", "#!/bin/sh\nif [ \"$1\" = -u ]; then echo 1000; else echo me; fi\n")
+    _DOCKER = ("getent", "#!/bin/sh\nexit 0\n")
+    _NO_DOCKER = ("getent", "#!/bin/sh\nexit 2\n")
+
+    def _settle(self, tmp_path, *, asked="false", wanted="false", fakes=(),
+                choices=None):
+        file = tmp_path / "choices"
+        if choices is not None:
+            file.write_text(choices)
+        result = run_snippet(
+            tmp_path,
+            f'SUDO=; SERVICE=nmesh; WANT_DOCKER={wanted}; DOCKER_ASKED={asked}; '
+            'DOCKER_DEFAULTED=false; settle_docker; '
+            'echo "want=$WANT_DOCKER default=$DOCKER_DEFAULTED"',
+            fake_bins=list(fakes), env={"NMESH_CHOICES": str(file)})
+        return result.stdout, (file.read_text() if file.exists() else None)
+
+    def test_a_root_install_manages_docker_by_default(self, tmp_path):
+        """Whoever installs with sudo administers the machine; a node that
+        cannot manage the containers beside it makes the fleet `docker` right
+        a permission to ask for something it cannot do."""
+        out, _ = self._settle(tmp_path, fakes=[self._ROOT_ID, self._DOCKER])
+        assert "want=true default=true" in out
+
+    def test_no_docker_on_the_machine_means_no_grant(self, tmp_path):
+        out, _ = self._settle(tmp_path, fakes=[self._ROOT_ID, self._NO_DOCKER])
+        assert "want=false" in out
+
+    def test_a_user_install_is_never_granted_docker_by_default(self, tmp_path):
+        out, _ = self._settle(tmp_path, fakes=[self._USER_ID, self._DOCKER])
+        assert "want=false default=false" in out
+
+    def test_a_refusal_is_remembered_across_upgrades(self, tmp_path):
+        """Re-running the installer is how a node is upgraded. A default that
+        quietly re-granted root to a node whose operator took it away would make
+        every upgrade a security regression."""
+        out, kept = self._settle(tmp_path, asked="true", wanted="false",
+                                 fakes=[self._ROOT_ID, self._DOCKER])
+        assert "want=false" in out and kept.strip() == "docker=no"
+        out, _ = self._settle(tmp_path, fakes=[self._ROOT_ID, self._DOCKER],
+                              choices=kept)
+        assert "want=false" in out and "refused on an earlier run" in out
+
+    def test_asking_again_overrides_the_refusal(self, tmp_path):
+        out, kept = self._settle(tmp_path, asked="true", wanted="true",
+                                 fakes=[self._ROOT_ID, self._DOCKER],
+                                 choices="docker=no\nother=1\n")
+        assert "want=true default=false" in out
+        assert kept.splitlines() == ["other=1", "docker=yes"]
 
     def test_a_group_that_is_not_there_is_not_there(self, tmp_path):
         """`--docker` on a machine with no docker has to say so rather than
