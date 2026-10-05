@@ -1505,6 +1505,44 @@ from a failure as well.** An error path that skips a check the success path
 makes is a check that does not exist on the day it matters, because the day it
 matters is the day something failed.
 
+## Driving another node: a console that threw its own operator off
+
+"The remote console keeps dropping" and "my links are unstable" turned out to be
+one chain, and every link in it was a reasonable decision on its own.
+
+- **A poll that outlived its `stop()`.** `CHANGES` re-armed itself after each
+  answer. `stop()` cleared the *timer*, but a question already on the relay came
+  back afterwards and armed a fresh one — so every switch between two remote
+  nodes, or a remount while a call was out, left one more loop running. Each
+  run now carries a number and a late answer from an old run arms nothing.
+  **A loop that re-arms from its own callback has to know whether it is still
+  the loop.**
+- **Every read is a signed frame the far node counts.** Fleet held every sender
+  to 64 signed requests per 10 s — the stranger's ceiling — and reported each
+  spent window as a flood. A console page, a node card and the change poll at
+  two seconds were most of that; a second window, the duplicated polls above, or
+  a file of a few megabytes in 24 kB slices were the rest. Four reports and the
+  managed node held its own operator *suspect*: their traffic dropped in
+  silence and their links let go at a random moment — by design, against an
+  adversary. A node a human here granted anything now has a ceiling of its own
+  (`MAX_OPERATOR_REQUESTS`), read from the ledger and never from the frame, and
+  a remote page asks less (5 s floor, 3 s change poll). **Before a limit reports
+  abuse, compute what the product's own heaviest legitimate user sends.**
+- **Two misses in a row is not "gone".** A page asks several things at once,
+  so one link being rebuilt failed two of them in the same second and the
+  context was handed back. It takes 90 seconds with nothing answering now.
+- **A restart is not a refusal.** A node coming back from an update has no
+  sessions, so the next call answered 401 and the page read it as being thrown
+  out. A node that granted `passwordless` is now asked for a fresh session by
+  the same grant, and silence while it is still starting is *unavailable*, not
+  *lost*.
+- **A counter that restarts with the process.** The change counter starts at
+  zero in every run, so a page that reconnected with yesterday's
+  `Last-Event-ID` was answered "nothing moved" (clamped to now), and the remote
+  poll asked "since 5000" of a node at 3. Both now read a counter that went
+  backwards as a restart and replay this run from zero; and a stream that comes
+  back after any gap repaints every view.
+
 ## The console's pages: what a repaint quietly destroys
 
 Four bugs of one family, all invisible until somebody is *using* the page while
@@ -1757,6 +1795,36 @@ before and after.
   named readers (`key_share.accept_offer_id` / `grant_offer_id`) and no literal
   slice in the handler: the parser owns its layout, or the layout gets
   re-derived by hand at each call site and one of them is wrong.
+
+- **A pass written, tested, and called by nothing but its tests.** The
+  subscription sweep, the install a subscription allows and the record that
+  says which version a node runs each had their own tests, and the release loop
+  called none of them — so "install them without asking" on a watched package
+  had never run outside the suite. A test that calls a method directly proves
+  the method; only a test that runs the *loop* proves the feature
+  (`test_the_loop_runs_every_pass`). Same family as "a publish path that only
+  the test suite ever called", higher up this file.
+- **One failure was "never again" for the life of the process.** The pass
+  remembered every release it had *tried*, success or not, and skipped it from
+  then on. On a mesh that flaps, the first download often fails — a holder
+  unreachable for that minute, a link rebuilt under the transfer — and the
+  update then waited for somebody to restart the node by hand. A failure is a
+  back-off now (60 s doubling to an hour), and only a success or the persisted
+  journal's verdict ends the retries.
+- **"Installed cleanly" is not "starts".** The journal catches a tree that
+  never becomes the running version; nothing caught one that becomes it and
+  dies — a missing dependency, a module raising at import. The service manager
+  restarts it for ever and the machine is gone. The swap now runs the new
+  launcher with `--help` before any restart and backs out on failure, and puts
+  the tree on trial so three starts that do not last two minutes put the old
+  tree back (`src/boot_guard.py`). The guard runs from `start.sh` **before**
+  dependencies are installed or imports verified — after them, a broken tree
+  exits through `fail` and the guard is never reached.
+- **A unit that says "something will restart you" has to mean it.** OpenRC's
+  service used `command_background=true`: start-stop-daemon starts a process and
+  forgets it. The unit exported `NMESH_SERVICE_MANAGED=1`, so the node exited
+  after an update to be restarted — by nothing. Every unit written now has a
+  supervisor behind that variable, and a test per unit says which.
 
 ## Miscellaneous
 

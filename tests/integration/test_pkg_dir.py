@@ -493,9 +493,13 @@ class TestARecordSaysNothingAboutTrust:
             # release and offers to serve it, and that is all it says.
             blob = (await stranger.publish_release(
                 _tree(str(tmp_path / "tree"), running)))
-            descriptor = stranger._releases.get(blob["release"])["release"]
-            publisher._releases.offer(descriptor, publisher._identity.verify,
+            signed = stranger._releases.get(blob["release"])
+            publisher._releases.offer(signed["release"], publisher._identity.verify,
                                       publisher._trusts_publisher)
+            # It holds the bytes — a node offers to serve only what it has.
+            publisher._packages.put(blob["release_id"],
+                                    stranger._packages.get(blob["release_id"]),
+                                    signed["sha256"])
             publisher._recommend_version = True
             await publisher._recommend_pass()
             await publisher._publish_package_records()

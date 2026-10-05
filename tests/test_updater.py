@@ -25,6 +25,17 @@ from src.version import __version__, is_newer, parse
 ROOT = Path(__file__).resolve().parent.parent
 
 
+_REAL_PREFLIGHT = updater.preflight
+
+
+@pytest.fixture(autouse=True)
+def _these_trees_start(monkeypatch):
+    """The trees here are a few lines of text standing in for a node, and would
+    never import. Whether a real one starts is :class:`TestTheNewTreeMustStart`'s
+    question, asked on its own."""
+    monkeypatch.setattr(updater, "preflight", lambda root: "")
+
+
 @pytest.fixture(autouse=True)
 def _follow_releases(monkeypatch):
     """Every test here means "a node that follows the published releases".
@@ -585,3 +596,75 @@ class TestArchiveSafety:
         archive = _make_release_tarball({"src/node.py": "x\n", "start.sh": "y\n"})
         source = updater._extract(archive, str(tmp_path / "stage"))
         assert os.path.isfile(os.path.join(source, "start.sh"))
+
+
+class TestTheNewTreeMustStart:
+    """A tree in place is not a tree that runs. The swap asks the new tree to
+    import the way the service starts it, and takes it out again if it will
+    not — on a node still running the old code, which can simply keep it —
+    rather than finding out after the restart, where the only thing left to do
+    is crash again. One that imports goes on trial (`src/boot_guard.py`)."""
+
+    def _install(self, tmp_path):
+        root = tmp_path / "install"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "node.py").write_text("old node\n")
+        (root / "start.sh").write_text("#!/bin/sh\necho old\n")
+        return root
+
+    def _apply(self, monkeypatch, root, launcher, version="9.9.9"):
+        monkeypatch.setattr(updater, "updatable", lambda: (True, ""))
+        monkeypatch.setattr(updater, "preflight", _REAL_PREFLIGHT)
+        return updater.apply_files_sync({
+            "src/node.py": b"new node\n",
+            "start.sh": b"#!/bin/sh\necho new\n",
+            "scripts/nmesh_node.py": launcher.encode(),
+        }, version, root=str(root))
+
+    def test_a_tree_that_will_not_import_is_taken_out_again(self, tmp_path,
+                                                            monkeypatch):
+        root = self._install(tmp_path)
+        with pytest.raises(updater.PreflightError, match="no module named"):
+            self._apply(monkeypatch, root,
+                        "raise SystemExit('no module named shiny_new_dep')")
+        assert (root / "src" / "node.py").read_text() == "old node\n"
+        assert (root / "start.sh").read_text() == "#!/bin/sh\necho old\n"
+        # What the release brought and the old tree never had goes too.
+        assert not (root / "scripts").exists()
+        assert not (root / ".nmesh-trial.json").exists()
+
+    def test_a_tree_that_imports_goes_on_trial(self, tmp_path, monkeypatch):
+        from src import boot_guard
+        root = self._install(tmp_path)
+        self._apply(monkeypatch, root, "import sys\nsys.exit(0)\n")
+        assert (root / "src" / "node.py").read_text() == "new node\n"
+        trial = boot_guard.trial(str(root))
+        assert trial["version"] == "9.9.9" and trial["boots"] == 0
+        assert trial["previous"] == __version__
+
+    def test_a_release_with_nothing_to_start_from_is_refused(self, tmp_path,
+                                                             monkeypatch):
+        root = self._install(tmp_path)
+        monkeypatch.setattr(updater, "updatable", lambda: (True, ""))
+        monkeypatch.setattr(updater, "preflight", _REAL_PREFLIGHT)
+        with pytest.raises(updater.PreflightError, match="nmesh_node.py"):
+            updater.apply_files_sync({"src/node.py": b"x\n",
+                                      "start.sh": b"#!/bin/sh\n"},
+                                     "9.9.9", root=str(root))
+        assert (root / "src" / "node.py").read_text() == "old node\n"
+
+    def test_a_hung_import_is_a_failure_not_a_wait(self, tmp_path, monkeypatch):
+        root = self._install(tmp_path)
+        monkeypatch.setattr(updater, "PREFLIGHT_TIMEOUT", 1.0)
+        with pytest.raises(updater.PreflightError, match="did not finish"):
+            self._apply(monkeypatch, root, "import time\ntime.sleep(30)\n")
+        assert (root / "src" / "node.py").read_text() == "old node\n"
+
+    def test_the_check_is_not_counted_as_a_start(self, tmp_path, monkeypatch):
+        """It runs the launcher, and the launcher counts starts against a tree
+        on trial — this one is not a start."""
+        root = self._install(tmp_path)
+        self._apply(monkeypatch, root,
+                    "import os\nopen('seen', 'w').write("
+                    "os.environ.get('NMESH_BOOT_COUNTED', ''))\n")
+        assert (root / "seen").read_text() == "1"

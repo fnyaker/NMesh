@@ -1598,3 +1598,71 @@ class TestReplyFraming:
                     if isinstance(e, ScanReceived)]
         assert len(received) == 1
         assert received[0].hosts and received[0].truncated > 0
+
+
+class _Reporting(StubClient):
+    """A client that remembers what the guard told the node."""
+
+    def __init__(self):
+        super().__init__()
+        self.reports = []
+
+    async def report_abuse(self, node, weight=1, *, kind=0, reason=""):
+        self.reports.append((node, weight, reason))
+
+
+class TestRequestCeiling:
+    """Who may make this node verify how many signatures.
+
+    An operator doing nothing but their job — a console driving this node, a
+    file going over in 24 kB slices — crossed the stranger's ceiling in seconds,
+    and every spent window was reported: the node they managed ended up holding
+    them suspect and cutting their links. A human granted that node something,
+    so it is counted against a ceiling of its own."""
+
+    def _agent(self):
+        agent = Peer()
+        agent.client = _Reporting()
+        agent.app._guard._client = agent.client
+        return agent
+
+    async def test_a_stranger_is_held_to_the_strangers_ceiling(self):
+        agent, stranger = self._agent(), Peer()
+        allowed = sum(agent.app._request_allowed(stranger.id)
+                      for _ in range(fleet.MAX_REQUESTS + 10))
+        assert allowed == fleet.MAX_REQUESTS
+        await settle()
+        assert [(n, w) for n, w, _ in agent.client.reports] == [(stranger.id, 2)]
+
+    async def test_an_operator_working_at_full_speed_is_not_reported(self):
+        agent, operator = self._agent(), Peer()
+        agent.app.state.add_operator(operator.id.raw.hex(), b"k",
+                                     caps=["manage", "shell"])
+        # A console polling and a few megabytes going over in one window: far
+        # past the stranger's ceiling, well inside the operator's.
+        burst = fleet.MAX_REQUESTS * 8
+        assert burst < fleet.MAX_OPERATOR_REQUESTS
+        assert all(agent.app._request_allowed(operator.id) for _ in range(burst))
+        await settle()
+        assert agent.client.reports == []
+
+    async def test_an_operator_is_still_bounded(self):
+        agent, operator = self._agent(), Peer()
+        agent.app.state.add_operator(operator.id.raw.hex(), b"k", caps=["status"])
+        allowed = sum(agent.app._request_allowed(operator.id)
+                      for _ in range(fleet.MAX_OPERATOR_REQUESTS + 5))
+        assert allowed == fleet.MAX_OPERATOR_REQUESTS
+        await settle()
+        assert [(n, w) for n, w, _ in agent.client.reports] == [(operator.id, 1)]
+
+    async def test_the_allowance_follows_the_ledger_not_the_frame(self):
+        """Revoked is a stranger again, at once."""
+        agent, operator = self._agent(), Peer()
+        hex_id = operator.id.raw.hex()
+        agent.app.state.add_operator(hex_id, b"k", caps=["status"])
+        assert agent.app.state.is_operator(hex_id)
+        agent.app.state.remove_operator(hex_id)
+        assert not agent.app.state.is_operator(hex_id)
+        allowed = sum(agent.app._request_allowed(operator.id)
+                      for _ in range(fleet.MAX_REQUESTS + 1))
+        assert allowed == fleet.MAX_REQUESTS

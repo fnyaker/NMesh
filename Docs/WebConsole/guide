@@ -141,8 +141,18 @@ much smaller claim than an empty list, and it is the true one.
 sends the last id back in `Last-Event-ID`; without honouring it, everything that
 moved while the connection was down is simply dropped — and a page that missed a
 change is a page showing yesterday. An id from another run of the console (one
-naming a sequence this one has never reached) is clamped rather than obeyed: a
-stream told to start ahead of the truth never speaks again.
+naming a sequence this one has never reached) means the node **restarted**, so
+the stream answers from the start of this run: everything it has noted is news
+to that page. It used to be clamped to "now", which answered *nothing moved*
+about a node that had just rebuilt every link it has.
+
+The page does not rely on that alone. Whenever the stream comes back after
+having been down, it repaints every view once and re-reads the moving numbers
+(`EVENTS.dropped`): what moved during the gap was told to nobody. And a stream
+the browser **gave up on** — it reconnects after a network error, never after a
+refusal such as a 503 (too many streams open) or a 401 — is opened again by the
+page, waiting longer each time (5 s doubling to 60 s), instead of leaving the
+page on its timer for the rest of the session.
 
 The `ready` event carries the build and the protocol version, which is where a
 page most often first notices that the node restarted into a new version — the
@@ -223,11 +233,33 @@ never get wrong.
   remote session back and returns here, and the context survives a page reload —
   checked against the console that holds the session before it is believed.
 
-- **A node that stops answering hands the context back.** A session it dropped,
-  or a relay with no session left to it, ends the context at once and says so;
-  silence is marked in the strip (*not answering*) and ends it after three tries
-  in a row. Before, a page driving a node that had gone answered nothing, looked
-  alive and had to be reloaded by hand. And each shared view — the channel's
+- **A node that stops answering hands the context back — once it has really
+  gone.** A session it dropped, or a relay with no session left to it, ends the
+  context at once and says so; silence is marked in the strip (*not answering*)
+  from the first miss and ends the context only after **90 seconds** in which
+  nothing answered (`CHANNEL.LOST_AFTER`). It used to be two misses in a row,
+  and a page asks several things at once — so one link being rebuilt failed two
+  of them in the same second and threw the operator off a node that was back ten
+  seconds later. Before any of this, a page driving a node that had gone
+  answered nothing, looked alive and had to be reloaded by hand.
+
+- **A node restarting keeps being driven.** Its console forgets every session
+  when it comes back, which is what an update ends in. For a node that granted
+  `passwordless`, the operator's console mints a fresh session through the same
+  grant and replays the call (`FleetBridge.remote_call`), at most one attempt
+  every 5 s while the node is still silent; a node that *refuses* a new session
+  ends the old one. A node that wants its password still asks for it.
+
+- **Driving another node costs it something, so the page asks less.** Every
+  read crosses the mesh and is a signed frame the far node verifies and counts.
+  While another node is driven the refresh interval has a floor of 5 s
+  (`REFRESH.REMOTE_MIN`) and the change poll runs every 3 s; a poll that
+  outlived the `stop()` meant to end it — and re-armed itself, so every switch
+  between two remote nodes left one more loop running — is now dropped by its
+  run number. The managed node also counts an operator against a ceiling of its
+  own (see [`../Apps/fleet`](../Apps/fleet), *Bounds*): at the stranger's
+  ceiling, a console doing its job got its operator reported as a flood and cut
+  off. And each shared view — the channel's
   catalogue, the node card — drops what it holds *itself* when the context
   changes, so a switch on `/chat` or `/node` resets as thoroughly as one on the
   console.

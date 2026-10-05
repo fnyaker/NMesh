@@ -163,9 +163,15 @@ From the package that key signed: one press and a confirmation naming the id
 that will be pinned. The key came inside the record and was checked against the
 signature it made, so there is nothing to copy across and nothing to get wrong —
 which was the point of removing the paste-a-hex-key form. Whether their releases
-install automatically is a separate tick in the same dialog, and it starts
-unticked: trusting a publisher and handing them a scheduled restart are two
-decisions.
+install automatically is a separate tick in the same dialog, and **it starts
+ticked**: pinning a key for this node's code is deciding to run what it signs,
+and a node is meant to keep itself current once that is decided rather than
+wait for somebody to press Install on every machine. Unticking it keeps installs
+a press each. The two are still two flags (`code` and `auto`, below) — the
+default only changed which one an operator has to untick — and what makes the
+default safe to offer is everything an unattended install still has to pass:
+newer, verified byte for byte, imports before the restart, stays up after it or
+is put back ([When the new version does not start](#when-the-new-version-does-not-start)).
 
 **What the key is pinned for follows the record it was pinned from**, and the
 node decides that, not the page. From node software, it is a key that may
@@ -586,7 +592,20 @@ not found" about a package this node was holding.
 The sweep also asks the directory **by name** what is offered now
 (`_subscription_pass`), which is the half an announcement cannot cover: a
 release whose announce never reached us, or a node we met long after it filed
-its record.
+its record. That pass — and the one that installs what a subscription allows,
+and the one that serves the version this node runs — were written and tested and
+**never called by anything but the tests**: the release loop ran the install
+pass over what gossip had already delivered, and nothing else. They run on every
+sweep now (`_release_loop`), and the first pass after start looks too.
+
+A key pinned for automatic install is treated as a subscription to this node's
+own software in all but name (`_seek_pinned_releases`): the sweep asks the
+directory for it by name and follows the records whose publication proof is such
+a key to their descriptor — at most `_SEEK_RESOLVE_MAX` per sweep, and never a
+record from any other key, since a name anybody may file under must not buy a
+lookup per record. What it fetches lands in the book, where the install pass and
+every one of its gates take over. An update an operator asked to take on its own
+no longer depends on an announce happening to reach the node.
 
 Of everything filed under that name, the record this node acts on and shows is
 picked by what the operator chose first — a key they pinned, then a publication
@@ -604,21 +623,36 @@ Three settings in `nmesh.conf`, all editable from **Settings → Configuration**
 |---|---|---|
 | `update_check_minutes` | 5 | minutes between sweeps; **0 = never go looking** |
 | `update_when_active` | off | only sweep while somebody is using this node (a console, an app, a call) |
-| `recommend_version` | off | publish which release id this node runs, so nodes watching it can see the version it settled on |
+| `recommend_version` | **on** | serve the release this node runs to whoever asks, and file a record saying so — see [Serving what it runs](#serving-what-it-runs) |
 
 An announcement still wakes the node whatever these say. What they control is
 the node going to look **on its own**, which on a phone is where the battery
 goes: an hourly sweep that skips while the screen is off is a different machine
 from one checking every five minutes in a pocket.
 
-`recommend_version` publishes a record with `FLAG_RECOMMEND`: it points at the
-release id this node runs and carries the **source digest of the tree actually
-running here**. That is a second party saying "this code is what I am
-executing" — the one thing in a supply chain an attacker cannot obtain by
-minting identities. It publishes no code and authorises nothing; whoever reads
-it decides what their own subscriptions make of it. Computed once per version,
-because reading and hashing the tree is not free and the answer cannot change
-while the version does not.
+### Serving what it runs
+
+`recommend_version` is on by default: a node is meant to carry the mesh's
+updates onward, not leave every download to whoever published. It files a hold
+record for the release this node runs — pointing at that release and carrying
+the **source digest of the tree actually running here**, a second party saying
+"this code is what I am executing", the one thing in a supply chain an attacker
+cannot obtain by minting identities.
+
+**The bytes come first**, because the record is a promise that whoever finds it
+can ask this node for them. A node that fetched its release from the mesh holds
+it. One that updated any other way — from GitHub, by hand, from a fresh install
+— packs the tree it runs: the archive is deterministic, so if that tree is the
+signed one it packs to exactly the bytes a descriptor names, and the node now
+holds that release and serves it. A tree that packs to anything else (same
+version number, a local change) is not offered at all: a record whose bytes
+nobody signed would be a lie, and one whose pointer leads nowhere wastes every
+reader's round trip. Reading and packing run off the event loop, once per
+version.
+
+It publishes no code and authorises nothing: whoever installs from this node
+still checks the publisher's signature and their own pins. What it does say is
+which version this node runs; an operator who would rather not turn it off.
 
 ## What the mesh offers
 
@@ -800,10 +834,21 @@ publishers with `auto` on ([`../Apps/fleet`](../Apps/fleet)) — a headless box 
 nobody to sit at a console, so if it is not told at install time it accepts
 nothing, for ever. Pinning and auto-installing stay two separate decisions.
 
-A pass installs at most one release and remembers the release ids it has already
-tried, so a failing one is not retried in a loop. Failures are recorded (visible
-in the console) rather than raised: this loop dying would silently stop the
-updates an operator asked for.
+A pass installs at most one release — **the newest** it may install, because a
+node back after a week away has heard of every version published since, and
+oldest first is one restart per version.
+
+**A failure is tried again, later and later** (`_RELEASE_RETRY_MIN`, 60 s,
+doubling to `_RELEASE_RETRY_MAX`, an hour), and the loop wakes for the retry
+rather than waiting for the sweep. It used to be tried once per process: a holder
+unreachable for the minute the download ran, or a link rebuilt under it, and the
+update sat uninstalled until somebody restarted the node by hand — on an
+unattended machine, never. The bytes are kept once they arrive, so a retry after
+a failure past the download costs no network. A release that installed is not
+tried again in that process: either the node restarts onto it, or there is
+nothing to restart it and the console says so. Failures are recorded (visible in
+the console) rather than raised: this loop dying would silently stop the updates
+an operator asked for.
 
 **What wakes it.** Waiting out a fixed tick was most of why automatic updates
 felt like they did not work: a release could sit for five minutes, then install,
@@ -842,6 +887,62 @@ fresh start, and an abandoned release must not be abandoned for ever. The
 journal is bounded (`MAX_AUTO_JOURNAL`, 8), owner-only, and a corrupt one reads
 as "nothing attempted" — fail-open in the harmless direction only, since the
 count is what bounds it.
+
+Two more ways an attempt is spent. A tree that **would not import** is taken out
+before any restart (below) and recorded `refused`: it counts towards
+`MAX_AUTO_ATTEMPTS` like any other attempt, but the next start does not report
+it as an install that "did not take", because nothing restarted. And a release
+the boot guard **rolled back** is abandoned at once (`AutoInstallJournal.abandon`):
+it was started several times and never stayed up, so it has used its chances in
+one go.
+
+## When the new version does not start
+
+The journal above catches a tree that installs and never becomes the running
+version. It cannot catch the worse case: a tree that becomes the running version
+and **dies** — a module that raises, a dependency this machine does not have, a
+start script that fails on this distribution. The service manager starts it, it
+dies, it is started again, for ever, and a machine nobody is watching is off the
+mesh until somebody walks up to it. Every route that replaces the tree — the
+mesh, GitHub, an operator's press — goes through one swap (`updater._swap_tree`),
+and the swap now ends in two checks.
+
+**Before the restart: does it import?** (`updater.preflight`). The launcher the
+service runs, `scripts/nmesh_node.py`, is run from the new tree with `--help`:
+every module the node is built from is imported, the argument parser is built,
+and it exits before anything is bound or written. A failure — or no answer
+within `PREFLIGHT_TIMEOUT` — takes the new tree straight out again, including
+anything it added that the old tree never had, and the install fails with what
+Python said (`PreflightError`). The node never left the version it runs.
+
+**After the restart: does it stay up?** (`src/boot_guard.py`). The swap puts
+the new tree **on trial** (`.nmesh-trial.json` beside it). Every start counts
+itself against it before anything of the node is imported — `start.sh` before it
+installs dependencies or verifies an import, the launcher for a start `start.sh`
+did not make (a re-exec) — and a node that stays up `HEALTHY_AFTER` (120 s)
+confirms it. A tree started `MAX_TRIAL_BOOTS` (3) times without getting there is
+**put back**: the previous tree, which the swap keeps in `.nmesh-previous`, goes
+back in place, the failed one is kept in `.nmesh-failed` for whoever wants to
+know why, and `start.sh` starts again on the restored tree. The node says so
+once it is up — in the release log and on the notice board — and gives that
+release up.
+
+Three properties keep the guard from becoming the problem:
+
+- **standard library only, loaded by path** — it runs exactly when the new code
+  cannot be trusted to import, and importing it through the package would import
+  the node first;
+- **resumable** — a rollback cut short (power, disk) leaves the trial in place
+  and the next start finishes it;
+- **never the reason a node did not start** — a file it cannot read is no trial,
+  a rollback with nothing to go back to stops counting and says so, and any
+  error lets the start go on.
+
+What it cannot do: bring back a node with no supervisor at all. Without one, a
+node that dies is not started again by anything, so there is no next start to
+count. The import check before the restart is the protection there, and
+`install.sh` writes a supervised unit everywhere it can (OpenRC included, which
+used to start the node and forget it).
 
 ## Console API
 
@@ -895,6 +996,12 @@ describes — so the page never re-derives a rule that lives in Python.
 | `_RELEASE_TRIED_MAX` | 32 | release ids remembered as already attempted |
 | `_RELEASE_FIRST_TICK` | 20 s | before the first automatic pass after start |
 | `_RELEASE_SETTLE` | 3 s | a burst of announces becomes one pass |
+| `_RELEASE_RETRY_MIN` / `_RELEASE_RETRY_MAX` | 60 s / 3600 s | the back-off before a failed install is tried again, doubling |
+| `_SEEK_RESOLVE_MAX` | 4 | directory records one sweep follows to their descriptor looking for a pinned key's release |
+| `_OWN_TREE_TIMEOUT` | 120 s | reading and packing this node's own tree to serve what it runs |
+| `PREFLIGHT_TIMEOUT` | 120 s | for the new tree to import before the swap is undone |
+| `boot_guard.MAX_TRIAL_BOOTS` | 3 | starts a new tree gets to stay up before the previous one is put back |
+| `boot_guard.HEALTHY_AFTER` | 120 s | up this long and the new tree is the tree |
 | `MAX_AUTO_ATTEMPTS` | 2 | automatic installs of a release that never takes |
 | `MAX_AUTO_JOURNAL` | 8 | releases the restart guard remembers attempting |
 | `pkg_dir._MAX_ENTRIES` | 512 | package records this node remembers at all |
@@ -932,9 +1039,11 @@ describes — so the page never re-derives a rule that lives in Python.
   identity key that signs and the file that decides who is trusted.
   [`todo/peer-integrity.md`](../../todo/peer-integrity.md) covers that wider
   problem honestly, including why pure software attestation does not close it.
-- **Rollback to a known-good version.** The previous tree is kept in
-  `.nmesh-previous`, so recovery is a move on the machine itself, not a mesh
-  operation.
+- **A release that starts and misbehaves later.** A tree that will not import,
+  or will not stay up, is put back on its own (above). One that runs for hours
+  and then does something wrong is not something a start can see: the previous
+  tree is kept in `.nmesh-previous`, so going back is a move on the machine
+  itself, not a mesh operation.
 
 ## Tests
 
@@ -950,7 +1059,20 @@ describes — so the page never re-derives a rule that lives in Python.
   which never takes.
 - [`tests/test_updater.py`](../../tests/test_updater.py) — the swap itself:
   paths that reach outside, a failed swap restoring the previous tree, state and
-  virtualenv untouched.
+  virtualenv untouched; a tree that will not import (or hangs importing, or has
+  no launcher) taken straight out again, and one that imports put on trial.
+- [`tests/test_boot_guard.py`](../../tests/test_boot_guard.py) — the trial:
+  every start counted, a tree that never stays up put back (what it added
+  removed, the failed tree kept aside, state untouched), a tree that stays up
+  left alone, a rollback cut short finished by the next start, a trial file it
+  cannot read never stopping a start, and both launchers counting a start once.
+- `TestUnattendedUpdatesThatHoldUp` / `TestServingWhatItRuns` in
+  [`tests/test_release_mesh.py`](../../tests/test_release_mesh.py) — a failure
+  tried again on a doubling wait, the newest release first, a tree that would not
+  start using up its attempts, a rollback said and given up on, the sweep looking
+  for a pinned key's release nobody announced, the loop running every pass, and a
+  node serving the release it runs when its tree packs to the signed bytes — and
+  only then.
 - [`tests/test_equivocation.py`](../../tests/test_equivocation.py) — the proof
   that a publisher signed two programs as one version: what verifies, and the
   much longer list of near-misses that must not (a rebuild, a fork, one record

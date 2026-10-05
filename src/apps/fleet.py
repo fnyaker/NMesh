@@ -155,6 +155,15 @@ MAX_SHELLS = 4                    # concurrent shells this node will host
 MAX_REQUESTS = 64
 REQUEST_WINDOW = 10.0
 MAX_REQUEST_SENDERS = 256         # senders tracked at once (bounded, pruned)
+# The same ceiling for a node a human here granted a capability to. It cannot be
+# the stranger's: a console driving this node asks a frame per read, and a file
+# goes over in 24 kB slices, so an operator doing nothing but their job crossed
+# 64 in a few seconds — and every spent window was reported, so the node they
+# were managing ended up holding them *suspect* and cutting their links. Still a
+# ceiling, still reported; sized for a transfer at full speed, and the CPU it
+# lets one operator spend is a decision the person who granted them made.
+MAX_OPERATOR_REQUESTS = 1024
+MAX_OPERATORS_TRACKED = 64
 SHELL_IDLE_TIMEOUT = 900.0        # a forgotten shell is reaped
 # Bytes of terminal output per frame. A full-screen redraw is tens of kilobytes
 # and used to arrive as eight frames; the packet payload holds 60 kB, so this is
@@ -556,7 +565,10 @@ class FleetApp:
         self._guard = AppGuard(
             client, {"signed requests": Limit(MAX_REQUESTS, REQUEST_WINDOW,
                                               weight=2,
-                                              max_senders=MAX_REQUEST_SENDERS)},
+                                              max_senders=MAX_REQUEST_SENDERS),
+                     "operator requests": Limit(
+                         MAX_OPERATOR_REQUESTS, REQUEST_WINDOW, weight=1,
+                         max_senders=MAX_OPERATORS_TRACKED)},
             kind=ABUSE_FLOOD, spawn=self._spawn)
 
     # -- lifecycle --------------------------------------------------------
@@ -795,7 +807,13 @@ class FleetApp:
         signed commands is; the loop that enforces it and the report that
         follows are not, and both now live in `AppGuard`. Refusing here protects
         this app and nothing else — the same sender walks straight on to the
-        next one — so what makes it cost anything is the node being told."""
+        next one — so what makes it cost anything is the node being told.
+
+        Which ceiling applies is read from our own ledger, never from the frame:
+        ``src`` is the end-to-end session's identity, so a stranger cannot claim
+        an operator's allowance without that operator's key."""
+        if self.state.is_operator(src.raw.hex()):
+            return self._guard.allow("operator requests", src)
         return self._guard.allow("signed requests", src)
 
     def _authorised(self, src: NodeID, capability: str, rid: str) -> bool:
@@ -1141,7 +1159,7 @@ class FleetApp:
         try:
             return await asyncio.wait_for(entry["future"], CONSOLE_TIMEOUT)
         except asyncio.TimeoutError:
-            raise ConsoleProxyError("that node did not answer in time") from None
+            raise ConsoleProxyTimeout("that node did not answer in time") from None
         finally:
             self._console_calls.pop(rid, None)
             self._inflight.pop(rid, None)
@@ -1185,7 +1203,7 @@ class FleetApp:
         try:
             return await asyncio.wait_for(future, CONSOLE_TIMEOUT)
         except asyncio.TimeoutError:
-            raise ConsoleProxyError("that node did not answer in time") from None
+            raise ConsoleProxyTimeout("that node did not answer in time") from None
         finally:
             self._session_calls.pop(rid, None)
             self._inflight.pop(rid, None)
@@ -3121,6 +3139,14 @@ class ConsoleProxyError(Exception):
     Distinct from the remote console answering with a status: "403 from that
     node" and "that node never answered" are different facts, and an operator
     needs to be able to tell them apart."""
+
+
+class ConsoleProxyTimeout(ConsoleProxyError):
+    """Nothing came back at all — as opposed to the node refusing.
+
+    The one of the two worth asking again: a node restarting onto an update
+    is silent for a while and then answers, and a refusal will not change by
+    being repeated."""
 
 
 # What a remote operator may reach through the proxy. Everything under /api/ is

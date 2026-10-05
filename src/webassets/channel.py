@@ -59,35 +59,48 @@ const CHANNEL = {
   // node reads it, so a counter is enough.
   seq: 0,
 
-  // Consecutive answers from the node being managed that never arrived. A
-  // single one is a mesh hop having a bad moment; a run of them is a machine
-  // that has gone, and a page that keeps asking it forever looks alive and
-  // shows nothing — which is what left people reloading the console by hand.
+  // Answers from the node being managed that never arrived. A single one is a
+  // mesh hop having a bad moment; a run of them is a machine that has gone, and
+  // a page that keeps asking it forever looks alive and shows nothing — which
+  // is what left people reloading the console by hand.
   //
-  // Two, not more: each of these costs the relay's full ceiling (25 s) before
-  // it comes back, so the count is also a stopwatch. The strip says "not
-  // answering" from the first one, which is the half an operator reads.
+  // A run in **time**, not only in count. A page asks several things at once,
+  // so one link being rebuilt failed two of them in the same second and threw
+  // the operator off a node that was back ten seconds later — a restart after
+  // an update takes about that long, and so does a route coming back. The
+  // strip says "not answering" from the first miss, which is the half an
+  // operator reads; the context is handed back only once nothing has answered
+  // for `LOST_AFTER`.
   MISSES: 2,
+  LOST_AFTER: 90000,
   misses: 0,
+  failingSince: 0,
 
   // What a refusal from *over there* means for the context we are in.
   //   unauthorized — that node dropped our session; nothing here will work
   //   conflict     — there is no session to that node any more (or no fleet
   //                  app to carry one), which is the same dead end
   //   unavailable  — it did not answer *this time*; said in the strip, and
-  //                  handed back only after `MISSES` in a row
+  //                  handed back only after `MISSES` in a row spanning
+  //                  `LOST_AFTER`
+  // Anything else is an answer, and an answer is a node that is there.
   judge(reply){
     if(!CONTEXT.node) return;
-    if(reply.ok){ this.misses = 0; CONTEXT.trouble(false); return; }
-    if(reply.code === "unauthorized" || reply.code === "conflict"){
-      this.misses = 0;
-      CONTEXT.lost(reply.error || "");
+    if(reply.ok || reply.code !== "unavailable"){
+      if(reply.code === "unauthorized" || reply.code === "conflict"){
+        this.misses = 0; this.failingSince = 0;
+        CONTEXT.lost(reply.error || "");
+        return;
+      }
+      this.misses = 0; this.failingSince = 0;
+      CONTEXT.trouble(false);
       return;
     }
-    if(reply.code !== "unavailable"){ CONTEXT.trouble(false); return; }
     this.misses += 1;
-    if(this.misses >= this.MISSES){
-      this.misses = 0;
+    const now = Date.now();
+    if(!this.failingSince) this.failingSince = now;
+    if(this.misses >= this.MISSES && now - this.failingSince >= this.LOST_AFTER){
+      this.misses = 0; this.failingSince = 0;
       CONTEXT.lost(reply.error || "");
     }else CONTEXT.trouble(true, reply.error || "");
   },
@@ -309,7 +322,10 @@ const CHANNEL = {
   // What a node offers is that node's answer. Registered here rather than
   // reset by whoever switches, so the module that holds it is the module that
   // drops it.
-  forget(){ this.catalogue = null; this.catalogueAt = -1; this.misses = 0; },
+  forget(){
+    this.catalogue = null; this.catalogueAt = -1;
+    this.misses = 0; this.failingSince = 0;
+  },
 
   async operations(){
     if(this.catalogue && this.catalogueAt === CONTEXT.epoch) return this.catalogue;
@@ -339,35 +355,57 @@ CONTEXT.subscribe(() => CHANNEL.forget());
 // question — so it is asked on a cadence rather than not at all, and the page
 // repaints on what moved instead of on a timer that hopes.
 const CHANGES = {
-  EVERY: 2000,
+  // Every question here crosses the mesh and is a signed frame the far node
+  // verifies and counts, so the cadence is the far node's cost as much as ours.
+  EVERY: 3000,
   timer: null,
   seq: 0,
+  // Which run of the loop is the live one. `stop()` can clear a timer but not
+  // a question already on the relay: that question used to come back and
+  // re-arm its own loop, so every switch between two remote nodes left one
+  // more loop running — each one a frame every few seconds against the node
+  // being driven, until it counted the operator as flooding it.
+  run: 0,
 
   start(){
     this.stop();
     if(!CONTEXT.remote) return;      // the stream is live here; nothing to poll
     this.seq = 0;
+    const run = this.run;
     const tick = async () => {
+      if(run !== this.run) return;
       this.timer = null;
       try{
         const data = await this.call();
-        if(data && data.topics && data.topics.length){
+        if(run === this.run && data && data.topics && data.topics.length){
           data.topics.forEach((topic) => EVENTS.pending.add(topic));
           EVENTS.schedule();
         }
       }catch(_){}
-      if(CONTEXT.remote) this.timer = setTimeout(tick, this.EVERY);
+      if(run === this.run && CONTEXT.remote)
+        this.timer = setTimeout(tick, this.EVERY);
     };
     this.timer = setTimeout(tick, this.EVERY);
   },
 
   async call(){
-    const data = await CHANNEL.call("control.changes", {since:this.seq});
-    if(data && typeof data.seq === "number") this.seq = data.seq;
+    const asked = this.seq;
+    const data = await CHANNEL.call("control.changes", {since:asked});
+    if(!data || typeof data.seq !== "number") return data;
+    if(data.seq < asked){
+      // The far node's counter went backwards: it restarted — an update ends
+      // in exactly that. Everything it noted since is news to this page, and
+      // asking from where we were would have answered "nothing" about a node
+      // whose every link had just been rebuilt.
+      this.seq = 0;
+      return this.call();
+    }
+    this.seq = data.seq;
     return data;
   },
 
   stop(){
+    this.run += 1;
     if(this.timer){ clearTimeout(this.timer); this.timer = null; }
   },
 };

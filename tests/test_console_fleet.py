@@ -1254,3 +1254,84 @@ class TestAppApiOverHttp:
             assert status == 200 and body["result"]["sent"] is False
         finally:
             console.stop(); await host.stop_all(); await node.stop()
+
+
+class TestRemoteSessionAcrossARestart:
+    """A node restarting onto an update forgets every console session.
+
+    The call answered 401, the page read it as "that node threw us out", and
+    an operator driving a machine they provisioned — one with no password
+    anybody ever typed — was back on their own node with a password field. The
+    grant minted the first session, so it mints the next one."""
+
+    NODE = "ab" * 20
+
+    def _bridge(self, *, passwordless=True, issue=None):
+        from src.apps import fleet_web
+        from src.apps.fleet import ConsoleProxyError, ConsoleProxyTimeout
+        app = _StubApp()
+        caps = ["manage"] + (["passwordless"] if passwordless else [])
+        app.state.add_managed(self.NODE, caps=caps)
+        asked = []
+
+        async def console_session(_node):
+            asked.append(1)
+            outcome = issue() if issue else "fresh"
+            if outcome == "silent":
+                raise ConsoleProxyTimeout("that node did not answer in time")
+            if outcome == "refused":
+                raise ConsoleProxyError("not authorised for passwordless")
+            return outcome
+
+        app.console_session = console_session
+        bridge = FleetBridge(app)
+        bridge._call = lambda coro, timeout=None: asyncio.run(coro)
+        calls = []
+
+        def raw(_node, token, method, path, body):
+            calls.append(token)
+            if token == "stale":
+                return 401, "application/json", b'{"error":"unauthorized"}'
+            return 200, "application/json", b'{"ok":true}'
+
+        bridge._remote_raw = raw
+        bridge._remote[("s", self.NODE)] = {"token": "stale",
+                                            "at": time.monotonic()}
+        return bridge, asked, calls, fleet_web
+
+    def test_a_passwordless_node_is_driven_on_after_it_restarts(self):
+        bridge, asked, calls, _ = self._bridge()
+        status, _ctype, _body = bridge.remote_call("s", self.NODE, "POST",
+                                                   "/api/control", b"{}")
+        assert status == 200
+        assert calls == ["stale", "fresh"] and asked == [1]
+        assert bridge._remote[("s", self.NODE)]["token"] == "fresh"
+
+    def test_a_node_that_wants_its_password_still_asks_for_it(self):
+        bridge, asked, _calls, _ = self._bridge(passwordless=False)
+        status, _ctype, _body = bridge.remote_call("s", self.NODE, "POST",
+                                                   "/api/control", b"{}")
+        assert status == 401 and asked == []
+        assert ("s", self.NODE) not in bridge._remote
+
+    def test_a_node_still_coming_back_is_unavailable_not_lost(self, monkeypatch):
+        answers = iter(["silent", "fresh"])
+        bridge, asked, calls, fleet_web = self._bridge(
+            issue=lambda: next(answers))
+        status, _c, _b = bridge.remote_call("s", self.NODE, "GET", "/x", None)
+        assert status == 502                       # unavailable: keep the context
+        assert ("s", self.NODE) in bridge._remote
+        # Asked again on a later call, but not on every one: a page asks a lot.
+        status, _c, _b = bridge.remote_call("s", self.NODE, "GET", "/x", None)
+        assert status == 502 and len(asked) == 1
+        monkeypatch.setattr(fleet_web, "REMOTE_REISSUE_EVERY", 0.0)
+        status, _c, _b = bridge.remote_call("s", self.NODE, "GET", "/x", None)
+        assert status == 200 and len(asked) == 2 and calls[-1] == "fresh"
+
+    def test_a_node_that_refuses_a_new_session_ends_the_old_one(self):
+        bridge, _asked, _calls, _ = self._bridge(issue=lambda: "refused")
+        status, _c, _b = bridge.remote_call("s", self.NODE, "GET", "/x", None)
+        assert status == 502
+        assert ("s", self.NODE) not in bridge._remote
+        status, _c, _b = bridge.remote_call("s", self.NODE, "GET", "/x", None)
+        assert status == 409                       # gone: connect again

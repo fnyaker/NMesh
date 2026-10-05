@@ -1415,3 +1415,37 @@ def test_a_transport_opens_on_its_status_then_its_settings():
     assert 'data-panel="status"' in source and 'data-panel="settings"' in source
     # The chosen view survives a redraw, like the fold.
     assert "views[scheme] || \"status\"" in source
+
+
+# ── the control channel's loops ─────────────────────────────────────────────
+CHANNEL_SUITE = pathlib.Path(__file__).with_name("channel_test.js")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the JS")
+def test_the_channel_keeps_one_poll_and_survives_a_restart(tmp_path):
+    """Driving another node: a poll that outlived its `stop()` ran twice, then
+    three times, against a node that counts every frame; a node restarting was
+    answered "nothing moved"; and a link being rebuilt threw the operator off a
+    node that was back seconds later. Run on the code the pages ship."""
+    source = tmp_path / "channel.js"
+    source.write_text(webassets.channel.JS, encoding="utf-8")
+    result = subprocess.run([NODE, str(CHANNEL_SUITE), str(source)],
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+EVENTS_SUITE = pathlib.Path(__file__).with_name("events_test.js")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is needed to run the JS")
+def test_the_change_stream_repaints_after_a_gap_and_reopens_after_a_refusal(tmp_path):
+    """What moved while the stream was down was told to nobody, so coming back
+    repaints everything; and a stream the browser gave up on (a 503, a 401) is
+    opened again instead of leaving the page on its timer for good."""
+    events = webassets.ui.JS.split("const EVENTS = {")[1]
+    events = "const EVENTS = {" + events.split("// ---- the statistics cadence")[0]
+    source = tmp_path / "events.js"
+    source.write_text(events, encoding="utf-8")
+    result = subprocess.run([NODE, str(EVENTS_SUITE), str(source)],
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
