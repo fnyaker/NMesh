@@ -878,7 +878,7 @@ deploy form rather than something to fix later over SSH:
 
 | Option | What it is |
 |---|---|
-| **docker** | that machine's account joins the `docker` group — off by default, and the description says what it is: root on that machine |
+| **docker** | that machine's account joins the `docker` group — ticked by default, as `sudo ./install.sh` grants it on a machine that has docker, and the description says what it is: root on that machine. Unticked, the installer is told `--no-docker` and remembers it across upgrades; left out of the request entirely, `install.sh` decides |
 | **updates** | the one-fixed-command sudo grant (`--no-allow-update` turns it off) |
 | **fleet app** | so the new node can be managed, and can deploy further |
 | install dir / state dir / service name | where it lands, when the defaults are wrong |

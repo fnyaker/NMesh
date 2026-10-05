@@ -294,13 +294,14 @@ FLEET_HTML = """<!doctype html>
                 <code class="inline">install.sh</code> already has. Chosen here because a machine
                 installed from this page is a machine nobody is going to log into afterwards to
                 change its mind.</p>
-              <label class="check"><input id="dep-docker" type="checkbox">
+              <label class="check"><input id="dep-docker" type="checkbox" checked>
                 <span>Let the node manage that machine's <b>docker</b> — its account joins the
                   <code class="inline">docker</code> group</span></label>
-              <p class="muted small">Off by default, and it is not a small tick: an account that
-                can reach the docker socket can start a privileged container bind-mounting
-                <code class="inline">/</code>. That is root on that machine. It is also what the
-                <code class="inline">docker</code> capability needs in order to work at all.</p>
+              <p class="muted small">On by default for a system install of a machine that has
+                docker, like <code class="inline">install.sh</code> run with sudo. It is not a small
+                tick: an account that can reach the docker socket can start a privileged container
+                bind-mounting <code class="inline">/</code> — that is root on that machine. Untick it
+                and the machine is told no, and remembers it across upgrades.</p>
               <label class="check"><input id="dep-update" type="checkbox" checked>
                 <span>Let it run its own system updates (one fixed root command)</span></label>
               <label class="check"><input id="dep-fleet" type="checkbox" checked>

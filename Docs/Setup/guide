@@ -17,7 +17,8 @@ itself after a distro upgrade or a broken venv. Docker is still possible
 ```bash
 ./install.sh                        # installs, enables at boot, runs
 ./install.sh --fleet                # …and enables the fleet app
-./install.sh --docker               # …and lets it manage this machine's docker
+sudo ./install.sh                   # as root it also manages this machine's docker
+./install.sh --no-docker            # …unless told not to (remembered)
 ./install.sh --prefix /srv/nmesh    # choose where it lands
 ./install.sh --no-start             # installs and enables, without running
 ./install.sh --uninstall            # removes the service and the files
@@ -239,16 +240,34 @@ one panel per transport, rendered from what the transport declares. See
 ### Letting the node manage this machine's docker
 
 ```bash
-./install.sh --docker                # the node's account joins the docker group
-./install.sh --no-docker             # takes it back
+sudo ./install.sh                    # a root install: granted when docker is here
+./install.sh --docker                # ask for it explicitly (and remember the yes)
+./install.sh --no-docker             # take it back (and remember the no)
 ```
 
-**Off unless asked for**, and never inferred from docker being installed. It is
-not the same kind of grant as the update one below: that is a single fixed
-command the node cannot rewrite, this is membership of a group whose socket
-starts containers — and a container can bind-mount `/`. An account in `docker`
-is root on the machine, and the installer, the systemd unit and the summary all
-say so where they say it.
+**On by default for a root install** — `sudo ./install.sh`, or the system mode of
+a remote deploy — when the machine has a `docker` group; off for a user install,
+whose account cannot be put in a group without root and should not be. Whoever
+installs with sudo administers the machine, and a node that cannot manage the
+containers it was installed beside makes the fleet `docker` right a permission
+to ask for something it cannot do.
+
+It is still **root**, and it is not the same kind of grant as the update one
+below: that is a single fixed command the node cannot rewrite, this is
+membership of a group whose socket starts containers — and a container can
+bind-mount `/`. So the installer, the systemd unit and the summary all say so
+where they grant it, and a refusal **outlives the run**: re-running the
+installer is how a node is upgraded, and an upgrade that quietly re-granted
+root to a node whose operator took it away would be a security regression with
+every release. The choice is written to `/etc/nmesh/<service>.choices` — root's
+file, outside the tree the node's account owns, because a node able to edit it
+could grant itself what was taken away. `--uninstall --purge` removes it with
+the node. A machine with no docker yet gets nothing; install docker, then
+re-run the installer.
+
+The fleet `docker` capability is a separate grant on top: being able to reach
+the socket lets the node manage docker, and a human on this machine still
+decides which operator may ask it to.
 
 Without it the fleet `docker` capability is permission to ask for something the
 account cannot do. A node in that state reports exactly that — docker is
@@ -257,8 +276,10 @@ running, this account cannot reach its socket, here is the switch — rather tha
 something an operator fixes in a minute.
 
 The same choice is offered where a machine is **installed from another node**:
-*Fleet → Discover & deploy → Install options*. A machine installed from there is
-one nobody will log into afterwards.
+*Fleet → Discover & deploy → Install options*, ticked by default like the local
+installer. A machine installed from there is one nobody will log into
+afterwards, so an untick reaches its installer as `--no-docker` and is
+remembered there.
 
 ### Letting the node run system updates
 
