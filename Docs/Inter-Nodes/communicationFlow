@@ -119,5 +119,6 @@ to obtain the closest node's address, then the packet is routed.
 - It protects against loops caused by a corrupt routing table or a malicious node
 
 **msg_id — deduplication**
-- Each node keeps a cache of recently seen `msg_id`s (CRC32 of header + payload, TTL excluded)
+- Each node keeps a bounded window of the packets it has seen, keyed on its own BLAKE2b id of
+  the content (TTL and msg_id excluded) — never on the header, whose hash is negotiated per link
 - A packet arriving by two different paths → the duplicate is detected and dropped at once

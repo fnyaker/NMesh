@@ -259,6 +259,34 @@ the name to have been said.
 > question.** A new name asked through the old predicate is a feature switched
 > on for every peer that has never heard of it.
 
+## The two ends of a link do not agree at the same moment
+
+`msgid_b2b` changes what a receiver *verifies* — the hash behind a `msg_id` —
+and the obvious design holds both ends to the agreement: send BLAKE2b ids once
+the peer announced the name, verify BLAKE2b ids once we announced it too. That
+loses packets with no error anywhere. Each end learns the other's record when it
+arrives, not when it was sent: A has B's record and starts sending BLAKE2b ids
+while A's own record is still on the wire to B, so B — which still believes A
+silent — verifies SHA-256 and drops everything in between. On a lossy or
+asynchronous medium the gap is not a moment, it is however long the record
+takes.
+
+So the agreement only ever decides what a node **sends**, and the receiver
+accepts either id whatever it believes (`Packet.replay_key`). The sender needs
+the peer to have *said* the name (`peer_announces`, not `peer_speaks` — the
+previous section), because a peer that has not said it may be one that drops the
+new id; the receiver needs nothing, because accepting a second equally strong
+hash costs no safety.
+
+The second trap was the replay window. Keyed on the header, one packet that
+reached a node once down a SHA-256 link and once down a BLAKE2b one was two
+packets — a replay that dedup let through. It keys on the BLAKE2b id the node
+computes itself, whichever header arrived.
+
+> **A negotiated change to what a receiver checks has to be accepted before it
+> is agreed.** And anything keyed on a value the negotiation can change has to
+> be keyed on something it cannot.
+
 ## A `min` in a negotiated pair is a lever anybody can pull
 
 The keepalive accord first took `max` of two floors and `min` of two ceilings,

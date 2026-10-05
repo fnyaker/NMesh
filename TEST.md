@@ -78,6 +78,11 @@ Among other things they check:
   running — every other pair in that file was bundled because the test opened
   the second link by hand, exactly as an operator pressing "retry every
   address" used to have to.
+- **The `msg_id` hash agreed over a real link**
+  (`tests/integration/test_msg_id_hash.py`): over TCP and over UDP, both ends of
+  a fresh link end up sending BLAKE2b ids once the two records have crossed at
+  their own pace, and data — a 50 kB payload among it — arrives intact and in
+  full through the gap.
 - The **management app on a real mesh** (`tests/integration/test_fleet.py`):
   a full enrolment with a human decision followed by an authorised command, an
   un-enrolled operator who gets nothing, an ungranted capability refused,
@@ -199,6 +204,12 @@ tests/
 ├── test_features.py                                   — capability negotiation:
 │     silence means the classic set, a name we do not know is not an offence,
 │     nothing security-critical is negotiable
+├── test_msg_id_hash.py                                — the `msg_id` hash, per
+│     link: a peer that has not said `msgid_b2b` gets the SHA-256 id exactly as
+│     every older build computes it (checked against the formula written out,
+│     not against `Packet`), a receiver accepts either id before it has heard
+│     the announcement, a relay re-heads a packet for an old link, and one
+│     packet down both kinds of link is one entry in the replay window
 ├── test_mlo.py                                        — multi-link operation and
 │     the keepalive accord: which links measure alike enough to carry one node's
 │     traffic together, the reordering that buys, a lossy member benched and
@@ -213,7 +224,8 @@ tests/
 │     as one window whose ceiling anybody could pull down). Plus what a probe
 │     weighs: the addresses ride it only when the peer might not have them, and
 │     a probe that carries none still proves recency — the invariant the old
-│     unconditional merge protected
+│     unconditional merge protected; and the running loss count a link's score
+│     reads per packet, held against a recount
 ├── test_reputation.py / test_app_guard.py             — zero trust: the ledger,
 │     the rate gate, the signed accusation, and above all what hearsay may NOT
 │     do — hearsay alone sanctions nobody (it stops below the *first* threshold,
