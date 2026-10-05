@@ -720,7 +720,7 @@ per follower per second and say nothing.
 
 Two grants, as with the log, and a refusal says which one is missing: the
 operator needs `links` in the ledger, and the machine's own fleet app needs the
-node's `links` grant (Apps page) to read it at all — an app is not trusted with
+node's `readstate.links` permission (the `links` grant, Apps page) to read it at all — an app is not trusted with
 the machine's neighbours because it happens to be fleet.
 
 ### What the operator keeps is a freshness book, not a history

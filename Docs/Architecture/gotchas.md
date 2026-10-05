@@ -1748,6 +1748,25 @@ before and after.
   `{` on an AZERTY keyboard. Text goes through the `input` event of a focused
   field; only non-text keys are read off `keydown`.
 
+## The internal API: a call that waits on the socket it came in on
+
+- **A control call is never awaited inside the connector's read loop.** A call
+  whose operation is modded waits for the mod's `RETURN` — which arrives on the
+  same socket, and is read by the very loop that would be parked awaiting the
+  call. Awaited in place, every modded call from the app that mods it was a 5 s
+  stall ending in the native answer. `CONTROL` is answered from a task, its reply
+  matched by the request's id, and the read loop moves on at once.
+- **A task nobody holds can be collected mid-flight.** `asyncio.create_task`
+  keeps only a weak reference; a fire-and-forget control call or `CALL` answer is
+  added to a set and discarded when done, never left to the garbage collector.
+- **A reply can be larger than a request.** A client accepted frames up to the
+  request ceiling (70 kB) while a control reply may be 512 kB; the first large
+  `node.state` would have ended the connection as a protocol violation. A client
+  reads with `_MAX_REPLY_FRAME`; the node still reads requests with the smaller one.
+- **The shared token is not an identity.** Grants keyed by an app id the client
+  merely *declared* were grants to anyone holding the shared token. Only an app's
+  own token (`token_for`) is answered anything above the normal set.
+
 ## Self-update: installing is not updating
 
 - **A tree written and never started is an update that did not happen.**

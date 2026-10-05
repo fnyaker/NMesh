@@ -84,19 +84,87 @@ Length-prefixed frames (`uint32` big-endian) covering `type(1) | body`.
 | →    | `ABUSE` (0x0F)       | `node_id(20) + weight(1) + kind(1) + reason(utf-8)` | reports a node abusing **this app**. No answer, by design |
 | →    | `ATTENDED` (0x10)    | `flag(1)`                   | is somebody **at** this app right now? No answer, by design |
 | →    | `LOG_WRITE` (0x11)   | `level(1) + topiclen(1) + topic + message(utf-8)` | says one line. No answer, by design |
-| →    | `LOG_QUERY` (0x12)   | a JSON filter               | the node's log ring, newest first — **needs the `logs` grant** |
+| →    | `LOG_QUERY` (0x12)   | a JSON filter               | the node's log ring, newest first — **needs `readstate.logs`** (the `logs` grant) |
 | →    | `LOG_SINCE` (0x13)   | JSON `{seq, run?, …}`       | everything after a sequence number, oldest first — same grant |
 | →    | `LOG_WATCH` (0x14)   | `flag(1) + level(1)`        | subscribe to new lines at or above a floor, or stop — same grant. While any app watches, the node keeps its log |
 | ←    | `LOG_LINES` (0x8F)   | JSON `{lines, matched, returned, seq, more, run}` | the answer to the three above (`lost` and `restarted` on a `LOG_SINCE`, `refused: true` without the grant, `watching` and `run` for a `LOG_WATCH`) |
 | →    | `NOTIFY` (0x15)      | `level(1) + keylen(1) + key + JSON {summary, detail}` | puts one problem on this node's board. No answer, by design |
-| →    | `LINKS` (0x16)       | empty                       | which nodes this one is connected to — **needs the `links` grant** |
+| →    | `LINKS` (0x16)       | empty                       | which nodes this one is connected to — **needs `readstate.links`** (the `links` grant) |
 | ←    | `LINKS_VIEW` (0x92)  | JSON `{links: [...], at}`   | the `LINKS` answer (`refused: true` without the grant) |
 | ←    | `LOG_LINE` (0x90)    | one line as JSON            | pushed to a watching client as it is recorded |
+| →    | `MANIFEST` (0x17)    | a JSON manifest             | what this app asks to be allowed, and the operations it answers ([`../AppPermissions/guide`](../AppPermissions/guide)) |
+| →    | `PERMS_QUERY` (0x18) | empty                       | what does this app hold right now? |
+| ←    | `PERMS` (0x93)       | JSON `{app_id, identified, granted, requested, error?}` | the answer to the two above |
+| →    | `CONTROL` (0x19)     | one control-plane request frame | **the internal API**: any operation the console has, as far as this app was granted — needs this app's own token |
+| ←    | `CONTROL_REPLY` (0x94)| the plane's reply frame    | matched by the request's `id`, not by order |
+| →    | `MOD_HOOK` (0x1A)    | JSON `{op, mode}` or `{op, remove: true}` | stand in front of one of the node's operations — needs `modding` |
+| ←    | `MOD_ACK` (0x95)     | JSON `{ok, error?, hooks}`  | the `MOD_HOOK` answer |
+| ←    | `CALL` (0x96)        | JSON `{call, kind, op, mode?, params, result?}` | the node asks this app: a hook to answer (`kind: "mod"`), or one of its declared operations (`kind: "api"`) |
+| →    | `RETURN` (0x1B)      | JSON `{call, ok, result \| params \| error}` | the answer to a `CALL` — only from the client that was asked |
 
 The first frame **must** be `AUTH` (with the app_id). After that the app sends
 `SEND` frames and receives `RECV` frames from its section as they come. On the
 client side, `ConnectorClient(host, port, token, app_id)` fixes the section;
 `from_env` reads `NMESH_APP_ID` (hex) or falls back to the generic section.
+
+## Two tokens: "a local process" and "this app"
+
+`AUTH` accepts either of two tokens, compared in constant time:
+
+- the connector's **shared** token (`connector.token`) — what every client always
+  used. It says *a local process*, and is answered what every app always had: the
+  normal permissions, and **nothing a person granted to an app**, whatever id the
+  client claims;
+- the app's **own** token (`connector.token_for(app_id)`), derived from a secret the
+  node keeps (`<data>/connector.secret`). It says *this app*, and is the only one
+  answered what that app was granted — its log, its links, the internal API,
+  modding.
+
+The built-in apps connect with their own. An app outside the node gets its token
+from the Apps page (*Permissions → Connector token*, this machine only) or is
+launched with it ([`../ProcessLauncher/guide`](../ProcessLauncher/guide)).
+
+Every frame is checked against what the app may do **now** — a permission taken
+back is taken back on the next frame — and a refused question is answered with the
+empty answer rather than dropped. The table of what each frame needs, the manifest
+and the levels are in [`../AppPermissions/guide`](../AppPermissions/guide). An app
+with no manifest keeps every normal permission: that is every app written before
+manifests existed.
+
+## Driving the node: the internal API (`CONTROL`)
+
+```python
+await client.declare({"name": "statusboard",
+                      "permissions": [{"name": "readstate", "why": "a wall display"}]})
+reply = await client.control("node.state")            # {"ok": true, "result": {...}}
+reply = await client.control("jobs.start", {"op": "node.retry"})
+```
+
+The frame is the control plane's own — the document a console page sends to
+`POST /api/control` — so an app reaches every operation the console has, through the
+same validation, and is refused by the same code with the same words ("node.restart
+needs the control.node permission"). Replies carry the request's `id` and may come
+back in any order: a call is answered on a worker thread, never inside the read
+loop, because a call that waits on a mod's answer would otherwise wait on a frame
+the loop itself has to read. At most `_MAX_CONTROL_INFLIGHT` (4) per client; past
+that, a refusal it can read.
+
+## Answering the node: mods and an app's own operations (`CALL` / `RETURN`)
+
+The node asks an app two kinds of question, and both arrive as a `CALL`:
+
+```python
+client.serve("refresh", lambda params: {"redrawn": True})   # an op from the manifest's `api`
+await client.hook("node.state", "after",                     # needs `modding`
+                  lambda payload: {"result": dict(payload["result"], tagged=True)})
+```
+
+The app answers with `RETURN`, carrying the call's id. Only the client that was
+asked can answer: another app naming the same id is ignored. A question that is not
+answered in time (`_MOD_TIMEOUT`, 5 s; `_API_TIMEOUT`, 10 s) is answered *for* the
+app — a mod falls back to the node's own operation, an API call is refused — and at
+most `_MAX_CALLS` (64) questions wait at once. What a mod may and may not do is in
+[`../AppPermissions/guide`](../AppPermissions/guide#modding).
 
 ## Is somebody at this app? (`ATTENDED`)
 
@@ -152,8 +220,9 @@ worse than no log. Like `ABUSE`, the frame is not answered: a line is cheap, and
 a reply would be a way to read the node's state back. A line written while
 nothing is being kept costs one dropped frame and nothing else.
 
-**Reading needs the `logs` grant**, given per app in the console's Apps page and
-off until an operator turns it on:
+**Reading needs `readstate.logs`** (the `logs` grant): asked for in the app's
+manifest, given per app in the console's Apps page, off until an operator turns
+it on, and answered only to a client holding the app's own token:
 
 ```python
 answer = await client.logs_query(level="warn", contains="handshake")
@@ -216,7 +285,7 @@ answer = await client.links()      # {"links": [{id, pseudo, transport, rtt_ms, 
 Four fields per link and nothing else: an identity, a medium, a latency, an age.
 What an app is answered is the smallest thing that makes the question true.
 
-Behind the **`links` grant**, given per app in the Apps page like `logs` and for
+Behind **`readstate.links`** (the `links` grant), given per app in the Apps page like `logs` and for
 the same reason: who a machine keeps company with is routing metadata about its
 neighbours as much as about it. An app that shows a mesh map needs it; an app
 that sends messages does not. Without it the answer is `{"refused": true}` —
@@ -330,8 +399,9 @@ with nothing anywhere saying why.
 
 ## Security
 
-- **The token is mandatory** (constant-time comparison) before any action;
-  nothing is accepted before `AUTH`.
+- **A token is mandatory** (constant-time comparison) before any action;
+  nothing is accepted before `AUTH`. Only an app's **own** token is answered
+  anything a person granted that app.
 - Frames are **bounded** in size, the number of clients is **capped**.
 - **Loopback by default**; or a **Unix socket** (chmod 0600) for container IPC;
   an `ssl_context` can wrap the TCP listener.

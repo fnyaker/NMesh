@@ -1526,3 +1526,39 @@ def test_the_trace_is_downloaded_from_the_node_on_screen():
     body = webassets.console.CONSOLE_PAGE_JS
     assert 'window.location = "/api/trace/export"' not in body
     assert 'CHANNEL.call("trace.export")' in body
+
+
+# ── app permissions and the internal API ────────────────────────────────────
+
+def test_permissions_are_drawn_from_what_the_node_says():
+    """The switches are rendered from `apps.permissions` — what each app asked
+    for, in the node's own words — never from a list kept in the page."""
+    source = webassets.CONSOLE_PAGE_JS
+    load = source.split("async function loadPermissions(){")[1].split("\n}")[0]
+    assert 'CHANNEL.call("apps.permissions")' in load
+    paint = source.split("function paintPermDialog(){")[1].split("\n}")[0]
+    assert "view.permissions" in paint and "row.why" in paint
+    # A dangerous permission asks before the switch moves.
+    change = source.split('$("perm-body").addEventListener("change"')[1].split("\n});")[0]
+    assert 'row.level === "dangerous"' in change and "confirmAction" in change
+    assert 'CHANNEL.ask("apps.permit"' in change
+
+
+def test_the_mcp_token_is_shown_only_when_asked_for():
+    """The token is the MCP server's whole authority: it is fetched on a press
+    and written as text, never painted with the rest of the card."""
+    source = webassets.CONSOLE_PAGE_JS
+    load = source.split("async function loadMcp(){")[1].split("\n}")[0]
+    assert '"token"' not in load
+    show = source.split('$("mcp-show").addEventListener(')[1].split("\n}));")[0]
+    assert 'mcpCall("token")' in show
+    assert '$("mcp-config").textContent' in show
+    assert 'id="mcp-config" class="mono small" hidden' in webassets.INDEX_HTML
+
+
+def test_the_internal_api_is_the_nodes_own_list():
+    source = webassets.CONSOLE_PAGE_JS
+    assert 'CHANNEL.call("apps.api")' in source
+    for element in ('id="api-rows"', 'id="api-search"', 'data-subtab="api"',
+                    'id="perm-dialog"', 'id="attached-apps"'):
+        assert element in webassets.INDEX_HTML, element
