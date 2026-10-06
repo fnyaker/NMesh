@@ -1719,14 +1719,45 @@ before and after.
   its timeout, so a single dropped datagram stalled everything and the figure
   was the clock rather than the link. Now a sliding window, with a per-probe
   timeout (`_SPEED_PROBE_TIMEOUT`).
-- **Sixteen in flight collapses UDP.** Raising the window to sixteen probes of
-  16 kB (256 kB in one burst) took a loopback UDP link from ~78 MB/s and no loss
-  to 4 MB/s and 80 % lost, while TCP did not notice. The reliable layer under
-  `udp.py` backs its retransmit timer off to two seconds under that burst and
-  never recovers inside a test. The window stays at eight, which runs clean on
-  both media — and the collapse itself is a finding about the UDP transport,
-  not about the test: a medium that cannot take a quarter megabyte at once will
-  show it under any bulk transfer, and this is the reading that says so.
+- **Sixteen in flight collapsed UDP** — see the next section. The speed test
+  found it; the fix is in the transport, not in the test.
+
+## A burst that collapsed the UDP transport
+
+Sixteen 16 kB packets in flight (256 kB at once) took a loopback UDP link from
+~100 MB/s to 4 MB/s with 80 % of a speed test lost; thirty-two took 83 seconds
+to move 20 MB, and sixty-four never finished. TCP did not notice. Three faults
+in `transports/udp.py`, one feeding the next:
+
+- **Nothing paced the sender.** Everything queued went on the wire at once, and
+  the kernel's default socket buffer is 208 kB (`net.core.rmem_default`) — a
+  quarter-megabyte burst plus its echoes overflows it and the kernel drops
+  datagrams silently.
+- **The retransmit timer doubled once per frame lost.** `get_retransmit_frames`
+  doubled the link-wide RTO for *every* expired frame, so a burst of sixteen
+  losses took it from 50 ms to its two-second ceiling in one pass, and every
+  frame after that waited two seconds before being resent. It halved only on an
+  ACK, which a stalled link was not getting.
+- **Past `_MAX_UNACKED`, a frame was sent and forgotten.** `build_frame` tracked
+  a frame only if there was room in the book, and sent it either way. Lost, it
+  was never resent, and the receiver's cursor waited for it for ever with every
+  later frame piling up behind it. A reliable link that silently is not one.
+
+And on the receiving side, one more of the same family: a full decode queue
+**acknowledged** a frame and then dropped it, so a slow reader lost packets the
+sender believed delivered.
+
+The fix is TCP's, minus what a 32-bit SACK cannot carry: a measured timer
+backed off once per timeout of the oldest frame, a congestion window halved
+once per loss event, fast retransmit on three frames past a hole, a send loop
+that waits for room rather than overrunning or forgetting, and a reader that
+refuses before it acknowledges. Same wire format, so old and new nodes still
+talk. After it, the same bursts run at 65–90 MB/s with no retransmit at all.
+`tests/test_udp_transport.py::TestABurstDoesNotCollapseTheLink` holds each
+fault, and every one of its tests fails on the old transport.
+
+> A test that is lowered until it passes has measured the test. When a
+> measurement shows a medium falling over, fix the medium — and say so.
 
 ## A loop over blocks that assumes every block is the same
 

@@ -364,7 +364,7 @@ class BaseServer(ABC):
     # -- the datagram capabilities the punch path asks for ------------------
     # NAT traversal needs four things no stream medium can give, and they are
     # declared here rather than reached for, so the core can ask a medium what
-    # it can do instead of asking whether it is UDP. See CLAUDE.md §3: this is
+    # it can do instead of asking whether it is UDP. See AGENTS.md §3: this is
     # the exception, written down as an interface rather than as a private
     # member somebody had to know about.
     #

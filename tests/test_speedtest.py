@@ -1,7 +1,7 @@
 """
 Measuring a link by loading it — and the refusals that make that safe.
 
-`CLAUDE.md` names speed a principle and quotes a figure to beat, and nothing in
+`AGENTS.md` names speed a principle and quotes a figure to beat, and nothing in
 this project measured one. Everything else here measures a link by *watching*
 it: round trips, loss, whatever bytes happened to flow. That answers "is it
 alive" and never "how fast is it".
@@ -158,7 +158,7 @@ class TestTheAnsweringSideKeepsItsOwnCeiling:
             await node.stop()
 
     async def test_the_ceiling_is_per_identity_and_a_reconnect_sheds_nothing(self):
-        """`CLAUDE.md`: counted per identity, not per link — "a peer that
+        """`AGENTS.md`: counted per identity, not per link — "a peer that
         reconnects to shed an exhausted count is the whole point of counting"."""
         node = await _node()
         try:

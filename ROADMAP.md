@@ -1,6 +1,6 @@
 # NMesh — Roadmap
 
-Guiding priorities: see `CLAUDE.md`. The order is non-negotiable:
+Guiding priorities: see `AGENTS.md`. The order is non-negotiable:
 **security > solidity > flexibility > speed**, with minimal dependencies.
 
 ## Done

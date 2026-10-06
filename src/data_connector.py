@@ -26,7 +26,7 @@ before ``node.send_data``; inbound DATA is demultiplexed by that prefix so a
 client only ever sees its own section's traffic. Management traffic never rides
 the DATA plane, so it is structurally outside every app section.
 
-Security (see CLAUDE.md): a token (constant-time compare) gates every action;
+Security (see AGENTS.md): a token (constant-time compare) gates every action;
 nothing is accepted before AUTH. Frames are size-capped and the client count is
 bounded. A message whose section header is missing/short is dropped, never
 delivered. Bind to loopback by default, or to a Unix socket (chmod 0600) for
@@ -360,7 +360,7 @@ class DataConnector:
     async def start(self) -> None:
         if self._unix_path:
             # 0600 from the moment it exists, not by a chmod afterwards: the
-            # same window CLAUDE.md rejects for the identity file. A umask
+            # same window AGENTS.md rejects for the identity file. A umask
             # around the bind is the only way to get it — a socket's mode is set
             # when it is created.
             previous = os.umask(0o177)

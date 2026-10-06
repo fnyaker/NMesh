@@ -15,7 +15,7 @@ inside `node.py`: hole punching, reachability, keepalive.
 - `src/transports/registry.py` is the single place the node declares which media
   it speaks (`BUILT_IN`), and `register_all()` is how they reach a manager. The
   core still names no concrete transport *for its own operation* — the two
-  bounded exceptions are in `CLAUDE.md` §3 and checked by the suite.
+  bounded exceptions are in `AGENTS.md` §3 and checked by the suite.
 
 The transports live in one package so that everything a new medium must satisfy
 is in a directory somebody can read in an evening; the old flat import paths
@@ -148,7 +148,8 @@ and one that implements the bare minimum.
 Current implementations: TCP reports the write buffer's fill (a number that
 stays high means that peer is not draining, which no packet counter shows) and
 `TCP_NODELAY`; UDP reports retransmits, reorderings, unacknowledged frames, the
-current RTO and missed keepalives.
+current RTO, the smoothed round trip, the congestion window and what is in
+flight against it, and missed keepalives.
 
 ## Link quality (`metrics.LinkQuality`)
 
@@ -576,6 +577,40 @@ UDP is connectionless and unreliable → a **reliability layer**:
 - Frame: `NUDP` (4-byte magic) + seq(4) + ack(4) + sack(4) + flags(1) +
   payload_len(2) + payload. Cumulative ACK + SACK, retransmission with backoff
   (`_RTO_*`), bounded reordering, keepalive (25 s), all bounded.
+- **The sender paces itself; the wire format did not change**, so a node with
+  this layer and one without still talk. Four rules, each one a collapse it
+  ended (`gotchas.md`, "A burst that collapsed the UDP transport"):
+  - the retransmit timer is **measured** (RFC 6298: smoothed round trip plus
+    four deviations, floored at `_RTO_MIN`, `_RTO_INITIAL` before the first
+    sample, never timed off a resent frame) and **backs off once per timeout of
+    the oldest frame** — never once per frame lost;
+  - a **congestion window** in bytes (`_CWND_*`): slow start from 64 kB, one
+    `_CWND_STEP` per round trip past the threshold, **halved once per loss
+    event** — a loss among frames sent before the last reduction is the same
+    event — and dropped to its floor on a timeout. What a timeout resends at
+    once is bounded by the window too;
+  - **fast retransmit**: a hole with `_DUP_THRESHOLD` selectively acknowledged
+    frames above it is resent at once, not after the timer;
+  - **never a frame untracked**: the send loop waits for room
+    (`can_send`) below both the window and `_MAX_UNACKED`, woken by the ACK that
+    frees it. `send()` waits up to `_SEND_WAIT` for room in the queue instead of
+    refusing the packet.
+- **A reader that is behind refuses a frame before acknowledging it.** The
+  decode queue used to accept, acknowledge, then drop past its bound — a packet
+  lost on a link that promises not to, invisible to both ends. Now the sender
+  keeps it, resends it, and reads the refusal as a loss, which slows it down:
+  backpressure, the way TCP's window gives it. The queue may pass its bound only
+  by the reorder buffer a gap-filling frame releases, which is bounded too.
+- Socket buffers are asked for `_SOCK_BUFFER` (4 MB), best effort: the kernel
+  caps them at `net.core.rmem_max`, and the default of 208 kB is exactly what a
+  256 kB burst overflowed.
+- **These signals ride on the unauthenticated frame header** (`BUGSVULNS.MD`
+  finding 13, still partly open). Somebody who can spoof the peer's address
+  and guess the 32-bit cursor can forge a SACK pattern that triggers one fast
+  retransmit per frame (each frame at most once) and halves the window — a
+  slowdown. That is no wider than what the same forger could already do with a
+  forged cumulative ACK, which drops frames from the book outright; closing
+  either means authenticating the header, the design change finding 13 names.
 - A **modular** receive window (RFC 1982) around the delivery cursor: in order →
   delivered; ahead → a bounded buffer (`_MAX_REORDER`); behind → a duplicate,
   re-ACK. No set of seen sequence numbers (bounded state whatever a hostile peer
@@ -646,7 +681,7 @@ writes (`sess-` + 16 hex characters, `_SESSION_RE`) is not a session at all.
 ## NAT hole punching (in `node.py`)
 
 > This is the one place the core knows a concrete medium, and it is declared as
-> such in `CLAUDE.md` §3 rather than admitted in a heading. A hole is punched
+> such in `AGENTS.md` §3 rather than admitted in a heading. A hole is punched
 > through a stateful datagram NAT by sending from the very socket the listener
 > owns; there is no transport-agnostic way to say that.
 > `tests/test_medium_agnostic.py` holds the exception to exactly UDP and the

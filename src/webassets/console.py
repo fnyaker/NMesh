@@ -3466,7 +3466,7 @@ function paintTransportLive(state){
     // (`node._transport_details`), so a page testing `scheme !== "udp"` was
     // deciding for itself something the node had already answered — and it was
     // the one hardcoded transport left in this interface. The medium describes
-    // itself; the page interprets nothing (`CLAUDE.md` §3).
+    // itself; the page interprets nothing (`AGENTS.md` §3).
     // …and only in a block that carries the controls. Every block runs this,
     // and the tcp one has no port field: reading through it threw, and the
     // throw ended the loop before the blocks after it were painted.

@@ -23,7 +23,7 @@ what is held to a number is in the suite itself.)
 
 ## The charter, as tests
 
-`CLAUDE.md` is the specification, and a test written *from the code* only proves
+`AGENTS.md` is the specification, and a test written *from the code* only proves
 the code agrees with itself. These are written from its sentences, so the day
 one fails the argument is about the rule:
 

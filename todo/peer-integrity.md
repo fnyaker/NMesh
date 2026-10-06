@@ -185,4 +185,4 @@ than a node that leaks.
 
 Points 1→4 cover most of what is achievable; 5→6 raise the cost for the
 attacker; 7 is the only one that would aim at a real proof, and it falls outside
-the stdlib-only perimeter set by `CLAUDE.md`.
+the stdlib-only perimeter set by `AGENTS.md`.

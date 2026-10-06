@@ -7,7 +7,10 @@ reliable, in-order delivery. This transport bridges that gap with a lightweight
 reliability layer on top of asyncio datagram sockets:
 
 - Sequence numbers + cumulative/selective ACKs
-- Retransmission with exponential backoff
+- Retransmission on a timer measured from the link's own round trips
+  (RFC 6298), backed off once per timeout rather than once per frame
+- A congestion window (slow start, then additive increase, halved on loss)
+  and a hard flow-control window: a frame is never sent untracked
 - Reordering buffer (bounded)
 - Keepalive frames to maintain NAT mappings
 
@@ -19,7 +22,7 @@ through a dispatch table keyed by ``(ip, port)``. Incoming datagrams from an
 unknown source create a new ``UDPTransport`` and trigger
 ``on_new_connection`` — exactly like a TCP accept loop.
 
-Robustness (see CLAUDE.md): every buffer is bounded, every frame is
+Robustness (see AGENTS.md): every buffer is bounded, every frame is
 structurally validated, and hostile datagrams are counted and dropped — never
 crashing the receive loop.
 """
@@ -68,8 +71,29 @@ _MAX_REORDER = 256          # max out-of-order frames buffered
 _MAX_REORDER_BYTES = 2 * 1024 * 1024    # out-of-order frames held, in bytes
 _MAX_DECODED_BYTES = 2 * 1024 * 1024    # decoded packets waiting for receive()
 _MAX_SEND_QUEUE = 128       # max packets waiting to be framed and sent
-_RTO_MIN = 0.050            # initial retransmit timeout, seconds
+# How long send() waits for room in that queue before calling the link stuck.
+# Waiting, not failing: a full queue is a link that is busy, and refusing the
+# packet outright turned every burst into an error at the caller.
+_SEND_WAIT = 10.0
+_RTO_MIN = 0.050            # floor of the retransmit timeout, seconds
+_RTO_INITIAL = 0.200        # before the first round trip has been measured
 _RTO_MAX = 2.0              # max retransmit timeout after backoff
+# The congestion window, in bytes of frames in flight. It starts small, doubles
+# every round trip that loses nothing (slow start), grows by one step per round
+# trip past the threshold, and halves on a loss — once per window, not once per
+# frame lost. Sending everything queued at once is what overflowed a 208 kB
+# socket buffer and turned one burst into a two-second stall.
+_CWND_INITIAL = 64 * 1024
+_CWND_MIN = 32 * 1024
+_CWND_MAX = 8 * 1024 * 1024
+_CWND_STEP = 16 * 1024      # congestion-avoidance growth per round trip
+# Selectively acknowledged frames above a hole that make the hole a loss rather
+# than a reordering (TCP's three duplicate ACKs).
+_DUP_THRESHOLD = 3
+# What the socket asks the kernel for. Best effort: the kernel caps it at
+# net.core.rmem_max / wmem_max, and the window above is what actually keeps a
+# burst inside whatever buffer it grants.
+_SOCK_BUFFER = 4 * 1024 * 1024
 _RTX_CHECK = 0.020          # retransmit check interval
 _KEEPALIVE_INTERVAL = 25.0  # NAT mapping refresh, seconds
 # Dead-link horizon: 3 missed keepalives, so it MUST exceed both this interval
@@ -102,6 +126,36 @@ def _uri(scheme: str, host: str, port: int) -> str:
     return f"{scheme}://[{host}]:{port}" if ":" in host else f"{scheme}://{host}:{port}"
 
 
+class _Sent:
+    """One frame in flight: what to resend, when, and whether its round trip
+    can still be trusted as a measurement (Karn: never time a retransmit)."""
+
+    __slots__ = ("frame", "deadline", "sent_at", "resent", "fast")
+
+    def __init__(self, frame: bytes, deadline: float, sent_at: float) -> None:
+        self.frame = frame
+        self.deadline = deadline
+        self.sent_at = sent_at
+        self.resent = False
+        self.fast = False
+
+
+def _grow_buffers(transport) -> None:
+    """Ask for larger socket buffers. Never fatal: the kernel may refuse or cap
+    it, and the congestion window copes with whatever it grants."""
+    try:
+        sock = transport.get_extra_info("socket")
+        if sock is None:
+            return
+        for option in (socket.SO_RCVBUF, socket.SO_SNDBUF):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, option, _SOCK_BUFFER)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 class _ReliableLink:
     """
     Reliability state for one direction of a UDP transport.
@@ -120,10 +174,27 @@ class _ReliableLink:
         # sequence, so the real peer's next frame looked like a duplicate and
         # was dropped. Randomising costs nothing and removes the guess.
         self._send_seq: int = int.from_bytes(os.urandom(4), "big")
-        self._unacked: dict[int, tuple[bytes, float]] = {}  # seq → (frame, rto_deadline)
+        self._unacked: dict[int, _Sent] = {}   # seq → frame in flight, in order
+        self._inflight: int = 0                # bytes of those frames
         self._send_queue: asyncio.Queue[Packet | None] = asyncio.Queue(_MAX_SEND_QUEUE)
         self._send_event: asyncio.Event = asyncio.Event()
-        self._rto: float = _RTO_MIN
+        # Set when an ACK frees room in the window, so a send loop parked on a
+        # full window wakes the moment it can go rather than on a timer.
+        self._room: asyncio.Event = asyncio.Event()
+        # Round-trip estimate (RFC 6298). `_rto` is what a frame waits now: the
+        # estimate times the backoff, which doubles once per timeout of the
+        # oldest frame and resets on the next clean measurement.
+        self._srtt: float | None = None
+        self._rttvar: float = 0.0
+        self._rto_base: float = _RTO_INITIAL
+        self._backoff: int = 1
+        self._rto: float = _RTO_INITIAL
+        # Congestion control. `_recover` is the first sequence sent after the
+        # last reduction: a loss among frames sent before it belongs to the
+        # same event and does not halve the window a second time.
+        self._cwnd: float = float(_CWND_INITIAL)
+        self._ssthresh: float = float(_CWND_MAX)
+        self._recover: int = self._send_seq
 
         # Receive side. Set from the first frame that arrives, so the peer's
         # random initial sequence is adopted rather than assumed to be zero.
@@ -155,16 +226,33 @@ class _ReliableLink:
         except asyncio.QueueFull:
             return False
 
+    def can_send(self, size: int) -> bool:
+        """Is there room in the window for a frame of ``size`` bytes?
+
+        Always yes for the first frame in flight, so a single frame larger
+        than the congestion window still goes. Never past `_MAX_UNACKED`
+        frames: a frame sent without being tracked is a frame nobody will ever
+        resend, and the receiver's cursor then waits for it for ever — the
+        reliable link silently stops being one."""
+        if not self._unacked:
+            return True
+        return (len(self._unacked) < _MAX_UNACKED
+                and self._inflight + size <= self._cwnd)
+
     def build_frame(self, packet: Packet) -> bytes:
-        """Build a data frame for the given packet and track it for retransmit."""
+        """Build a data frame for the given packet and track it for retransmit.
+
+        Always tracked. The window is the send loop's to respect
+        (`can_send`); this never drops a frame from the book to make room."""
         payload = packet.pack()
         seq = self._send_seq
         self._send_seq = (self._send_seq + 1) & 0xFFFFFFFF
         ack, sack = self._build_ack()
         header = _FRAME.pack(seq, ack, sack, FLAG_DATA, len(payload))
         frame = _MAGIC + header + payload
-        if len(self._unacked) < _MAX_UNACKED:
-            self._unacked[seq] = (frame, time.monotonic() + self._rto)
+        now = time.monotonic()
+        self._unacked[seq] = _Sent(frame, now + self._rto, now)
+        self._inflight += len(frame)
         return frame
 
     def build_keepalive(self) -> bytes:
@@ -205,13 +293,19 @@ class _ReliableLink:
                 sack |= (1 << (offset - 1))
         self._sack = sack
 
-    def process_ack(self, ack: int, sack: int) -> None:
+    def process_ack(self, ack: int, sack: int) -> list[bytes]:
         """Process incoming ACK + SACK, removing acknowledged frames.
 
         Cumulative ACK means all frames with seq <= ack have been received.
         We use unsigned wraparound distance: a frame s is cumulatively ACKed
         if the forward distance (ack - s) mod 2^32 is small (< _MAX_UNACKED).
+
+        Returns the frames to resend *now*: a hole with `_DUP_THRESHOLD`
+        selectively acknowledged frames above it is a loss, and waiting out the
+        timer for it would idle the whole window behind one frame.
         """
+        now = time.monotonic()
+        acked = 0
         # Sequence numbers are issued in order, so `_unacked` is in order too:
         # the cumulative ack clears a *prefix*. Walking the whole window (and
         # copying its key list) on every incoming frame was O(window) per
@@ -219,30 +313,119 @@ class _ReliableLink:
         for s in list(self._unacked.keys()):
             if ((ack - s) & 0xFFFFFFFF) >= _MAX_UNACKED:
                 break
-            del self._unacked[s]
+            acked += self._acknowledge(self._unacked.pop(s), now)
 
         # Selective ACK: bits indicate seqs received above the cumulative ack
         base = (ack + 1) & 0xFFFFFFFF
-        for i in range(32):
-            if sack & (1 << i):
-                seq = (base + i) & 0xFFFFFFFF
-                self._unacked.pop(seq, None)
+        if sack:
+            for i in range(32):
+                if sack & (1 << i):
+                    entry = self._unacked.pop((base + i) & 0xFFFFFFFF, None)
+                    if entry is not None:
+                        acked += self._acknowledge(entry, now)
 
-        # Reset RTO on successful ACK
+        if acked:
+            self._grow(acked)
         if not self._unacked:
-            self._rto = _RTO_MIN
-        elif self._rto > _RTO_MIN:
-            self._rto = max(_RTO_MIN, self._rto * 0.5)
+            self._backoff = 1
+            self._rto = self._rto_base
+        if acked or not self._unacked:
+            self._room.set()
+        return self._fast_retransmit(base, sack, now) if sack else []
+
+    def _acknowledge(self, entry: _Sent, now: float) -> int:
+        """Retire one frame; time it if its round trip means anything."""
+        self._inflight -= len(entry.frame)
+        if not entry.resent:
+            self._sample(now - entry.sent_at)
+        return len(entry.frame)
+
+    def _sample(self, rtt: float) -> None:
+        """RFC 6298, with a floor of `_RTO_MIN` rather than a second: a mesh
+        link across a room must not wait a second to resend."""
+        rtt = max(0.0, rtt)
+        if self._srtt is None:
+            self._srtt, self._rttvar = rtt, rtt / 2
+        else:
+            self._rttvar = 0.75 * self._rttvar + 0.25 * abs(self._srtt - rtt)
+            self._srtt = 0.875 * self._srtt + 0.125 * rtt
+        self._rto_base = min(_RTO_MAX, max(
+            _RTO_MIN, self._srtt + max(_RTX_CHECK, 4 * self._rttvar)))
+        self._backoff = 1
+        self._rto = self._rto_base
+
+    def _grow(self, acked: int) -> None:
+        if self._cwnd < self._ssthresh:
+            self._cwnd += acked                              # slow start
+        else:
+            self._cwnd += acked * _CWND_STEP / self._cwnd    # one step per RTT
+        self._cwnd = min(self._cwnd, float(_CWND_MAX))
+
+    def _loss(self, seq: int, timeout: bool) -> None:
+        """One congestion event: halve the window, once per window of frames.
+
+        A loss of a frame sent before the last reduction is the same event
+        seen again — a burst that lost twenty frames lost them to one queue
+        overflowing, and halving twenty times is what used to collapse the
+        link. A timeout of the oldest frame is the stronger signal and drops
+        the window to its floor, as TCP does."""
+        if ((seq - self._recover) & 0xFFFFFFFF) >= 0x80000000:
+            return                    # sent before the last reduction
+        self._ssthresh = max(self._cwnd / 2, float(_CWND_MIN))
+        self._cwnd = float(_CWND_MIN) if timeout else self._ssthresh
+        self._recover = self._send_seq
+
+    def _fast_retransmit(self, base: int, sack: int, now: float) -> list[bytes]:
+        frames: list[bytes] = []
+        above = bin(sack).count("1")
+        for i in range(32):
+            if above < _DUP_THRESHOLD:
+                break
+            if sack & (1 << i):
+                above -= 1
+                continue
+            seq = (base + i) & 0xFFFFFFFF
+            entry = self._unacked.get(seq)
+            if entry is None or entry.fast:
+                continue
+            entry.fast = entry.resent = True
+            entry.deadline = now + self._rto
+            self._loss(seq, timeout=False)
+            frames.append(entry.frame)
+        self.retransmits += len(frames)
+        return frames
 
     def get_retransmit_frames(self) -> list[bytes]:
-        """Return frames that have exceeded their RTO deadline for retransmit."""
+        """Return frames that have exceeded their RTO deadline for retransmit.
+
+        The timer backs off once per timeout of the **oldest** frame — the one
+        TCP keeps its single timer on — never once per frame: doubling for
+        every frame of a lost burst took the timeout from 50 ms to its two
+        second ceiling in one pass, and every frame after it then waited two
+        seconds. What is resent at once is bounded by the congestion window
+        too; the rest waits its turn rather than refilling the queue that has
+        just overflowed."""
+        if not self._unacked:
+            return []
         now = time.monotonic()
+        oldest = next(iter(self._unacked))
+        expired = [(seq, entry) for seq, entry in self._unacked.items()
+                   if now >= entry.deadline]
+        if not expired:
+            return []
+        if expired[0][0] == oldest:
+            self._loss(oldest, timeout=True)
+            self._backoff = min(self._backoff * 2, 64)
+            self._rto = min(_RTO_MAX, self._rto_base * self._backoff)
         frames: list[bytes] = []
-        for seq, (frame, deadline) in list(self._unacked.items()):
-            if now >= deadline:
-                self._unacked[seq] = (frame, now + min(self._rto * 2, _RTO_MAX))
-                self._rto = min(self._rto * 2, _RTO_MAX)
-                frames.append(frame)
+        budget = max(self._cwnd, float(len(expired[0][1].frame)))
+        for seq, entry in expired:
+            entry.deadline = now + self._rto
+            if budget < len(entry.frame) and frames:
+                continue              # deferred to the next round, not lost
+            budget -= len(entry.frame)
+            entry.resent = True
+            frames.append(entry.frame)
         self.retransmits += len(frames)
         return frames
 
@@ -315,6 +498,12 @@ class _ReliableLink:
         # drop, and re-ACK the current window so a lossy sender can move on.
         self._schedule_ack()
         return []
+
+    def note_arrival(self) -> None:
+        """A frame arrived that will not be processed (the reader is behind).
+        The link is still alive; only the data waits for a retransmit."""
+        self._last_recv_time = time.monotonic()
+        self._keepalive_misses = 0
 
     def needs_ack(self) -> bool:
         return self._ack_pending
@@ -445,6 +634,9 @@ class UDPTransport(BaseTransport):
             "unacked": len(link._unacked),
             "reorder buffer": len(link._reorder),
             "rto ms": round(link._rto * 1000, 1),
+            "srtt ms": None if link._srtt is None else round(link._srtt * 1000, 2),
+            "window kB": round(link._cwnd / 1024),
+            "in flight kB": round(link._inflight / 1024),
             "keepalive misses": link._keepalive_misses,
             "undecodable": self.undecodable,
         }
@@ -473,6 +665,7 @@ class UDPTransport(BaseTransport):
             remote_addr=(host, port),
         )
         self._sock = transport
+        _grow_buffers(transport)
         self._remote = (host, port)
         self._owns_socket = True
         self._start_tasks()
@@ -530,8 +723,19 @@ class UDPTransport(BaseTransport):
         if len(payload) != payload_len:
             return  # truncated or mismatched
 
-        # Process ACK info
-        self._link.process_ack(ack, sack)
+        # Process ACK info, and resend at once what it shows was lost.
+        for frame in self._link.process_ack(ack, sack):
+            self._send_raw(frame)
+
+        # A reader that has fallen behind refuses the frame *before* it is
+        # acknowledged, so the sender keeps it and resends it later — and sees a
+        # loss, which is what slows it down. Taking it, acknowledging it and
+        # then dropping it because the queue was full lost a packet on a link
+        # that promises not to, with no one on either side able to tell.
+        if (payload and flags & FLAG_DATA
+                and self._decoded_bytes + len(payload) > _MAX_DECODED_BYTES):
+            self._link.note_arrival()
+            return
 
         # Every frame is handed over, not only the ones carrying data: an idle
         # link sends nothing but keepalives, and `process_incoming` is where an
@@ -554,11 +758,13 @@ class UDPTransport(BaseTransport):
                     # than one that has mysteriously gone quiet.
                     self.undecodable += 1
                     continue
-                # Dropped, not awaited: this runs inside datagram_received, a
-                # synchronous protocol callback that must never block. UDP
-                # offers no delivery guarantee, so a consumer that has fallen
-                # this far behind loses packets rather than memory.
-                if self._decoded_bytes + len(raw) > _MAX_DECODED_BYTES:
+                # Never reached from the check above for the frame itself, but a
+                # frame that fills a gap also releases the reorder buffer behind
+                # it. Those were acknowledged when they arrived, so they are
+                # delivered rather than dropped: the queue may pass its bound by
+                # at most the reorder buffer's, which is bounded too.
+                if (self._decoded_bytes + len(raw)
+                        > _MAX_DECODED_BYTES + _MAX_REORDER_BYTES + _MAX_PAYLOAD):
                     continue
                 self._decoded.append(packet)
                 self._decoded_bytes += len(raw)
@@ -584,8 +790,15 @@ class UDPTransport(BaseTransport):
             raise ConnectionError("udp transport closed")
         if self._sock is None or self._remote is None:
             raise ConnectionError("udp transport not connected")
-        if not self._link.enqueue(packet):
-            raise ConnectionError("udp send queue full")
+        if self._link.enqueue(packet):
+            return
+        try:
+            async with asyncio.timeout(_SEND_WAIT):
+                await self._link._send_queue.put(packet)
+        except TimeoutError:
+            raise ConnectionError("udp send queue full") from None
+        if self._closed:
+            raise ConnectionError("udp transport closed")
 
     async def _send_loop(self) -> None:
         """Background task: dequeue packets and send them as reliable frames."""
@@ -597,6 +810,20 @@ class UDPTransport(BaseTransport):
             except asyncio.TimeoutError:
                 continue
             if packet is None:
+                break
+            # Wait for the window rather than overrun it. Woken by the ACK that
+            # makes room; the timeout only re-reads `_closed`.
+            size = len(_MAGIC) + _FRAME_SIZE + HEADER_SIZE + len(packet.payload)
+            while not self._closed and not self._link.can_send(size):
+                self._link._room.clear()
+                if self._link.can_send(size):
+                    break
+                try:
+                    async with asyncio.timeout(0.5):
+                        await self._link._room.wait()
+                except TimeoutError:
+                    pass
+            if self._closed:
                 break
             frame = self._link.build_frame(packet)
             self._send_raw(frame)
@@ -761,6 +988,7 @@ class UDPServer(BaseServer):
             local_addr=(host, port),
         )
         self._sock = transport
+        _grow_buffers(transport)
 
     def reachability(self, uri: str, ctx: dict) -> list[dict]:
         from ..ip_utils import ip_reachability

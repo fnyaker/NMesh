@@ -16,7 +16,7 @@
 > fix; that is what makes the Status line readable.
 >
 > Severity is about what an adversary gains, in the threat model of
-> `CLAUDE.md`: the network, the peers and the transports are hostile, and an
+> `AGENTS.md`: the network, the peers and the transports are hostile, and an
 > authenticated peer may still be an adversary.
 
 > **Baseline.** Every finding below was present in a tree whose unit suite was
@@ -487,7 +487,7 @@ its expectations before changing the table's lifetime.
   filling the gap. Multiply by `_MAX_PEERS_UDP = 128`.
 
 **Impact** — memory exhaustion from an unauthenticated source, which is exactly
-what `CLAUDE.md` §2 ("bounds everywhere", "no memory exhaustion") rules out.
+what `AGENTS.md` §2 ("bounds everywhere", "no memory exhaustion") rules out.
 The reorder case is the cheaper one for the attacker: no session, no handshake,
 just datagrams with the right magic.
 
@@ -1174,7 +1174,7 @@ while len(self._release_sources) > _RELEASE_SOURCES_MAX: # releases tracked: als
 release" and is used for both axes. The outer table therefore remembers sources
 for only 8 releases — which is a bound, so nothing overflows, but it is not the
 bound anyone reading the constant would expect. This is the "name the thing,
-then count the thing" rule in `CLAUDE.md`: one constant, two meanings.
+then count the thing" rule in `AGENTS.md`: one constant, two meanings.
 
 **Fixing it** — a second, named constant for the number of releases tracked.
 
@@ -1252,7 +1252,7 @@ declaring `total = 262 144` lets the sender push
 
 **Impact** — the cheapest and largest memory-exhaustion path in the tree: a
 peer with a chat session kills the node (and, on a shared host, the machine)
-with a few hundred megabytes of traffic. `CLAUDE.md` §2: "Bounds everywhere.
+with a few hundred megabytes of traffic. `AGENTS.md` §2: "Bounds everywhere.
 Every queue, cache, buffer and counter has a hard limit."
 
 **Fixing it without breaking something** — three bounds, all cheap:
@@ -1512,7 +1512,7 @@ concurrent links.
 exist. The practical risk is low (a code is 10 characters from a 62-character
 alphabet, and a seeded code is 64 bits), so this is a defence-in-depth gap
 rather than a break — but it is also documentation that lies, which
-`CLAUDE.md` treats as a bug in its own right.
+`AGENTS.md` treats as a bug in its own right.
 
 **Fixing it without breaking something** — call `self._invite.record_failure()`
 alongside the per-peer counter in `_handle_invite`, so the manager's lockout
@@ -1601,7 +1601,7 @@ unauthenticated `POST /api/chat/file` requests hold N × 64 MiB.
 
 **Impact** — memory exhaustion of the management plane by anyone who can reach
 the port. The console binds to loopback by default, which limits it to local
-users and to whatever the operator exposed deliberately; `CLAUDE.md` says the
+users and to whatever the operator exposed deliberately; `AGENTS.md` says the
 local machine is in the threat model too.
 
 **Fixing it without breaking something** — check `_authed()` before reading a
@@ -1623,7 +1623,7 @@ and memory lever as much as a throttle bypass. Guard both fields with a lock
 
 **Related, same file** — `_build_ssl_context` writes the console's TLS private
 key with `open(key_path, "wb")` and then `os.chmod(..., 0o600)`. That is the
-window `CLAUDE.md` explicitly rejects for the identity file ("created 0600 at
+window `AGENTS.md` explicitly rejects for the identity file ("created 0600 at
 open time — not a `chmod` afterwards"). Use `os.open(..., O_CREAT|O_WRONLY, 0o600)`
 as `console_auth.write` and `crypto.save` already do. The same pattern appears
 in `DataConnector.start`, which binds a Unix socket and then chmods it to 0600.
@@ -2501,7 +2501,7 @@ Measured against liboqs 0.16.0:
 ```
 
 **Impact** — 268 bytes per handshake, and a peer decides how often to hand us
-one. That is slow, but it is the shape `CLAUDE.md` rules out: *nothing that can
+one. That is slow, but it is the shape `AGENTS.md` rules out: *nothing that can
 grow without end under an attacker's pressure*. Reconnecting in a loop grows a
 long-lived relay by a quarter of a gigabyte per million handshakes, and nothing
 reclaims it short of a restart. `free()` is also what calls `OQS_MEM_cleanse` on
@@ -2664,7 +2664,7 @@ Not a priority ranking by severity alone — by "what does fixing this unlock".
    cost of the query-plane DoS levers by a large factor.
 
 Each of these touches behaviour described in `Docs/Architecture/`. Per
-`CLAUDE.md`, the document changes in the same commit as the code — in
+`AGENTS.md`, the document changes in the same commit as the code — in
 particular `protocol.md`'s gate order (for **3**), `security.md`'s invitation
 lockout (for **32**) and its handshake section (for **1**), `transports.md` for
 the UDP findings, and a new `gotchas.md` entry for anything that turns out to
