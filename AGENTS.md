@@ -262,6 +262,51 @@ The project — code, comments, documentation, commit messages — is written in
 
 ## Working notes
 
+### Mistakes agents have made — read before you start
+
+Every mistake an agent makes here is written down in this list, in the same
+commit as the work, with the rule that would have prevented it. Not the bugs
+found in the code — those go to `gotchas.md` and `BUGSVULNS.MD` — but the
+agent's own slips: a wrong claim, a misplaced edit, a fix applied to half its
+scope. Add yours.
+
+- **A conclusion drawn from a metric that cannot carry it.** An agent reported
+  "spurious retransmit timeouts" on a UDP link because its probes showed 0 %
+  loss. Probes ride the reliable layer: a lost probe is resent and arrives late,
+  so they show 0 % whatever the wire loses. The timeouts were real loss,
+  recovered as designed; the claim was retracted. → Before reading a figure as
+  evidence, say what produces it and what it cannot see.
+- **A fix applied to one of two places that compute the same thing.** Link-local
+  addresses were filtered out of `expand_listen_uri` and left in
+  `ip_reachability` — both publish this node's addresses. Only inspecting the
+  live node after the deploy showed it (BUGSVULNS 57). → Before fixing a rule,
+  grep every producer of the quantity, not only the one the bug was seen in,
+  and put the rule in one helper both call.
+- **A test class inserted in the middle of another.** Text inserted after an
+  existing method's last line landed inside its class, so the methods below it
+  silently became the new class's. The suite stayed green, which is why it went
+  unnoticed until `-k NewClass` collected 7 tests instead of 4. → Insert at a
+  class boundary, and check `-k` collects exactly the tests you wrote.
+- **An assertion outside the patch it depends on.** `facts.update_granted` is
+  computed when read, and the assertion sat after the `with mock.patch(...)`
+  block, so it read the real host again. → Everything that reads a patched
+  premise goes inside the `with`.
+- **A stale `.pyc` taken for a failing test** after `git stash pop` — see
+  *Verifying a fix actually guards something*. Clear `__pycache__` after every
+  stash round trip.
+- **A history comment in the code** ("this side once set bit i for…"), which
+  the charter forbids; caught on self-review. History belongs in `gotchas.md`;
+  a comment states the constraint.
+- **A sweep proposed before its exemptions were known.** The first idea for the
+  double-accepted UDP link was to reap every unauthenticated link on a timer;
+  `relay_only` links and a relay's joiner link are unauthenticated on purpose
+  for as long as a relayed join lives, and it would have cut them. Caught before
+  coding. → Before broadening a sweep, list every holder of the state it reaps.
+- **An empty log answer read as "nothing happened".** After a restart the log
+  ring is off (no hold survives one — `logging.md`), so a query returns nothing
+  whatever happened. → `logs.status` first; an answer from a ring that is not
+  running is no evidence of absence.
+
 ### Running the tests (read this before trusting "green")
 
 `pyproject.toml` sets:

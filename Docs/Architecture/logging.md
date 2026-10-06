@@ -50,6 +50,14 @@ when the last hold goes:
 | `trace` | `trace.set start` | `trace.set stop`, **and the trace running out on its own** (`Trace.on_stop`) |
 | `watch` | the first app subscribing over the connector (`_LOG_WATCH`) — which is how a fleet console following this machine reads it | the last subscriber leaving, or its socket dying |
 
+**No hold survives a restart, the operator's included — on purpose.** The
+ring and its holds live in memory, and a node restarts every time it updates,
+so an operator who started recording finds it stopped after the next update
+(`running: false`, `held_by: []`). That is the decision, not an oversight:
+keeping the log is a thing somebody chooses to do now, and a choice written to
+disk would keep every line of a machine for as long as nobody remembered to
+take it back. Start it again after a restart if you still want it.
+
 Every status says who holds it (`held_by`), so a *Stop* that leaves the ring
 running says why instead of looking broken. Three things went wrong before this,
 and each was one switch doing another's job: stopping a trace stopped a log an

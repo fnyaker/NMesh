@@ -1480,3 +1480,26 @@ class TestOpeningTheSecondLink:
             except (asyncio.CancelledError, Exception):
                 pass
         assert len(tried) <= 2, len(tried)
+
+
+class TestAMemberSaysWhereItGoes:
+    """A bundle member's ``remote`` was what we *dialled*, so a link the far
+    end opened — a UDP link accepted on our listener — showed ``null`` under a
+    label that promised the far end."""
+
+    async def test_an_accepted_link_shows_its_far_end(self):
+        node = _node()
+        _ready(node, "fake", "udp")
+        node.note_awake("test")
+        dialled = _link(node, uri="fake://a:1", mean_ms=10.0, probes=50)
+        accepted = _link(node, uri="udp://a:2", mean_ms=10.0, probes=50)
+        accepted.remote_addr = None
+        accepted.is_client_side = False
+        accepted.transport.endpoints = lambda: {"local": "udp://0.0.0.0:9001",
+                                                "remote": "udp://9.9.9.9:9001"}
+        node._update_bundles()
+        members = node.mlo_status()["bundles"][0]["members"]
+        assert sorted(m["remote"] for m in members) == \
+            ["fake://a:1", "udp://9.9.9.9:9001"]
+        assert dialled.remote_addr == "fake://a:1"
+        await node.stop()

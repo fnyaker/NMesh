@@ -879,7 +879,8 @@ arrived on it*. The gossip path simply never applied it.
 
 - **Two audiences, two proofs** (`ip_utils.ip_reachability`). A `lan`
   descriptor is confirmed by any inbound authenticated link: the listener
-  works. A `world` descriptor is a claim about the NAT, and only a connection
+  works. A link-local address is no audience at all and gets no descriptor
+  (`advertisable_ips`). A `world` descriptor is a claim about the NAT, and only a connection
   from **off our own networks** supports it — `node._off_our_networks`, which is
   a globally-routable source address and nothing subtler. A relayed link is
   never evidence about a listener: nothing was opened to us.
