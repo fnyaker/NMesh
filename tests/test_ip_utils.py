@@ -54,8 +54,18 @@ class TestExpand:
         assert out == ["tcp://1.2.3.4:9000", "tcp://203.0.113.5:9000"]
 
     def test_ipv6_bracketed(self):
-        out = expand_listen_uri("tcp://[::]:9000", ["fe80::1"])
-        assert out == ["tcp://[fe80::1]:9000"]
+        out = expand_listen_uri("tcp://[::]:9000", ["fd00::1"])
+        assert out == ["tcp://[fd00::1]:9000"]
+
+    def test_link_local_is_not_advertised(self):
+        """Meaningless without this machine's zone id: a dialler can only fail."""
+        out = expand_listen_uri("tcp://[::]:9000",
+                                ["fe80::1", "fe80::2%eth0", "169.254.3.4", "fd00::1"])
+        assert out == ["tcp://[fd00::1]:9000"]
+
+    def test_a_concrete_link_local_listen_uri_is_the_operators_word(self):
+        assert expand_listen_uri("tcp://[fe80::1]:9000", ["1.2.3.4"]) \
+            == ["tcp://[fe80::1]:9000"]
 
     def test_concrete_unchanged(self):
         assert expand_listen_uri("tcp://192.168.1.5:9000", ["1.2.3.4"]) \

@@ -318,13 +318,19 @@ class TestUpdateGrant:
             assert facts.update_granted is True
 
     def test_without_the_grant_it_falls_back_to_the_package_manager(self):
+        """Pinned, like its neighbour: on a machine that has the grant installed
+        — a developer's, running a node — the real wrapper was found."""
+        from unittest import mock
         from src.apps import fleet_host
         facts = fleet_host.HostFacts(
             escalation="sudo", package_manager="apt",
             plan={"refresh": ["apt-get", "update"], "upgrade": ["apt-get", "-y", "upgrade"]})
-        plan = fleet_host.update_plan(facts)
-        assert plan and plan[0][0] == "sudo"
-        assert facts.update_granted is False
+        with mock.patch("os.path.exists",
+                        lambda p: p != fleet_host.UPDATE_WRAPPER and os.path.lexists(p)), \
+             mock.patch("os.geteuid", lambda: 1000):
+            plan = fleet_host.update_plan(facts)
+            assert plan and plan[0][0] == "sudo"
+            assert facts.update_granted is False
 
 
 class TestNoNewPrivileges:

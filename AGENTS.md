@@ -314,6 +314,13 @@ git stash pop -q
 pytest <new tests> -q      # must PASS here
 ```
 
+Clear `__pycache__` after the pop (`find src tests -name __pycache__ -prune
+-exec rm -rf {} +`) when a stashed edit kept the file's size — a version bump
+is the usual one. `git stash pop` rewrites the file within the same second, and
+a `.pyc` is trusted on mtime-in-seconds plus size: the suite then ran the
+*stashed* `src/version.py` and failed `test_matches_pyproject` on a tree whose
+two version files agreed.
+
 Beware the **vacuous guard**: a test that passes on the buggy revision tests
 nothing. Example encountered: a `_peer_scheme` guard using a manager that already
 registered `udp` — `scheme_of` answered first and the fallback under test never
@@ -442,6 +449,14 @@ Audit scope for this class: anything captured at **import** from `sys.argv`,
 `sys.executable`, `os.getcwd()`, `os.environ` or `__main__`, then asserted on.
 `-n 0` is the cheap way to find it — if a test's verdict changes between `-n 0`
 and `-n auto`, it is reading the runner, not the code.
+
+The **host** is a premise of the same kind, and CI's container hides it as well
+as the runner did. Two tests failed only on a developer machine that runs a
+node: `test_without_the_grant_it_falls_back_to_the_package_manager` found the
+real `/usr/local/lib/nmesh/nmesh-update` (its neighbour pinned `os.path.exists`,
+it did not), and `test_termux_with_services_has_a_service_manager` put the
+host's `/usr/bin` on `PATH`, so a booted systemd answered before the phone was
+asked about. Pin the file test; isolate the `PATH` (`run_snippet(isolate=True)`).
 
 ### `register_all`: one bad entry must cost only itself
 

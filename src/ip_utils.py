@@ -310,7 +310,13 @@ def expand_listen_uri(uri: str, local_ips: list[str], extra: list[str] = ()) -> 
     """Expand a listen URI into advertisable URIs.
 
     A wildcard host becomes one URI per local address (plus ``extra``, e.g. a
-    discovered public address). A concrete host is returned unchanged."""
+    discovered public address). A concrete host is returned unchanged.
+
+    Link-local addresses (``fe80::/10``, ``169.254/16``) are left out: one is
+    only meaningful with the zone of the interface it sits on, which is this
+    machine's and not the dialler's, so a peer handed ``tcp://[fe80::…]`` can
+    only fail to connect — once per address, and a host running containers
+    has one per virtual interface."""
     parsed = _validate_uri(uri)
     if parsed is None:
         return []
@@ -324,11 +330,20 @@ def expand_listen_uri(uri: str, local_ips: list[str], extra: list[str] = ()) -> 
     out: list[str] = []
     seen: set[str] = set()
     for ip in list(local_ips) + list(extra):
+        if _is_link_local(ip):
+            continue
         u = f"{scheme}://{_fmt_host(ip)}:{port}"
         if u not in seen:
             seen.add(u)
             out.append(u)
     return out
+
+
+def _is_link_local(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip.split("%", 1)[0]).is_link_local
+    except ValueError:
+        return False
 
 
 def is_global_ip(ip: str) -> bool:

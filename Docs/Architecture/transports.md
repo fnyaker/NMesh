@@ -626,6 +626,13 @@ UDP is connectionless and unreliable → a **reliability layer**:
     once is bounded by the window too;
   - **fast retransmit**: a hole with `_DUP_THRESHOLD` selectively acknowledged
     frames above it is resent at once, not after the timer;
+  - **SACK bit `i` is sequence `ack + 1 + i`**, on both sides. Bit 0 is the
+    hole the receiver's cursor waits on, so a receiver never sets it; what sits
+    from `ack + 2` to `ack + 32` is what the bitmap can name. The receiver used
+    to set bit `i` for `ack + 2 + i`, so a sender retired the missing frame as
+    delivered whenever a later one arrived (`gotchas.md`, "A SACK one bit
+    off"). The meaning is the one senders always read, so a fixed receiver is
+    right with every sender, old or new;
   - **never a frame untracked**: the send loop waits for room
     (`can_send`) below both the window and `_MAX_UNACKED`, woken by the ACK that
     frees it. `send()` waits up to `_SEND_WAIT` for room in the queue instead of

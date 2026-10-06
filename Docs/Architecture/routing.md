@@ -634,6 +634,11 @@ B↔C is Wi-Fi…").
   two nodes behind one public IP used to make the same claim and then tear each
   other's entry down over it — see
   [`transports.md`](transports.md#our-own-public-address-is-proved-not-guessed).
+  **Link-local addresses are never expanded** (`fe80::/10`, `169.254/16`): one
+  means something only with this machine's zone id, so a peer handed it could
+  only fail to dial — once per address, and a host running containers has one
+  per virtual interface. A concrete link-local listen URI is the operator's
+  word and is kept.
 - The **PING carries `advertised_uris`**; `_handle_ping` does
   `_routing.add(src, valid_uris, dsa_pub)` (a merge) and answers PONG.
   `_validate_uri` filters before adding ("reject by default").
