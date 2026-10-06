@@ -1907,6 +1907,41 @@ heterogeneous blocks, ask the block, not the snapshot.**
   merely *declared* were grants to anyone holding the shared token. Only an app's
   own token (`token_for`) is answered anything above the normal set.
 
+## A package seen on a node's page that could not be fetched
+
+Reported from a console driving another node: the package is listed on the
+publishing node's page, opening it fails, and the update check beside it is
+refused "by an old message". Three faults, one feeding the next.
+
+- **The descriptor was only asked of strangers.** Publishing keeps the signed
+  descriptor in the publisher's own store and nowhere else until the directory
+  sweep replicates it (`_DIR_REPUBLISH`, 15 min); the record pointing at it
+  travels at once. `dht_get` asks the nodes closest to the key — never the node
+  that had just signed "I hold this and I serve it". So the record resolved to
+  nothing, and each attempt spent up to six sequential `_DHT_QUERY_TIMEOUT`s
+  finding out. `_descriptor_for` asks the record's holders first.
+- **Opening a package was a job.** The card mounted with `packages.describe`
+  (background, 60 s ceiling) to fetch a descriptor it never drew. From a console
+  at a distance every background operation is a job, and such a console may run
+  **two** at once (`MAX_RUNNING_REMOTE`), each holding its slot until it ends —
+  open page or not. One package opened, "Ask the network" pressed, and the
+  update check was refused. The card now reads the record (`packages.entry`,
+  inline); downloading and installing fetch what they need when pressed.
+- **Every refusal said less than it knew.** The card said "Package not found"
+  whatever had failed; the download said "no such package" about a package on
+  screen, or "the node did not answer" once its 60 s ran out; the job refusal
+  named nothing it was waiting on. Each now says what it is: no such record, or
+  nobody holding it sent it; and which jobs hold the slots, for how long more.
+
+Two smaller ones on the same page: switching the node being driven dropped the
+offer from the last check but not its words, so "0.4.57 is available" and an
+**Install** button that did nothing stood under the new node's name; and
+"Installed X — restart the node to run it" stayed up when the node was already
+running X.
+
+> A page that starts work it does not need spends a budget somebody else on the
+> page needs. Count what a click costs *from a distance*, not only here.
+
 ## Self-update: installing is not updating
 
 - **A tree written and never started is an update that did not happen.**

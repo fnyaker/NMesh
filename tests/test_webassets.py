@@ -1562,3 +1562,43 @@ def test_the_internal_api_is_the_nodes_own_list():
     for element in ('id="api-rows"', 'id="api-search"', 'data-subtab="api"',
                     'id="perm-dialog"', 'id="attached-apps"'):
         assert element in webassets.INDEX_HTML, element
+
+
+# ── opening a package from a console driving another node ──────────────────
+
+def test_opening_a_package_reads_the_record_and_starts_no_job():
+    """The card drew nothing from the descriptor it fetched, and fetching it
+    made opening a package a *job* on a node driven from elsewhere — up to a
+    minute of the two such a console may run at once, spent before anything was
+    drawn, with the update check beside it refused for want of a slot."""
+    view = _package_view_js()
+    assert '"packages.describe"' not in view
+    read = view.split("async read(id){", 1)[1].split("\n  },", 1)[0]
+    assert '"packages.entry"' in read
+
+
+def test_a_card_that_cannot_be_read_says_why():
+    """"Package not found" was the only thing a failure could say, whatever had
+    gone wrong."""
+    mount = _package_view_js().split("async mount(container, id, options){", 1)[1]
+    mount = mount.split("\n  },", 1)[0]
+    assert "const {row, error} = await this.read(id)" in mount
+    assert "error ||" in mount
+
+
+def test_switching_nodes_clears_what_was_said_about_the_last_ones_update():
+    """The offer was dropped on a switch and its words were not: the last
+    machine's "is available" stood under this one's name, with an Install
+    button that — its offer gone — did nothing."""
+    reset = webassets.APP_JS.split("CONTEXT.subscribe(() => {\n  STATE = null", 1)[1]
+    reset = reset.split("\n});", 1)[0]
+    for line in ('setMessage("update-status", "")',
+                 '$("update-apply").hidden = true',
+                 '$("update-notes").hidden = true'):
+        assert line in reset, line
+
+
+def test_installed_restart_to_run_it_is_said_only_while_true():
+    body = webassets.APP_JS.split("async function refreshReleases(){", 1)[1]
+    body = body.split("\n}", 1)[0]
+    assert "last.version !== data.current" in body

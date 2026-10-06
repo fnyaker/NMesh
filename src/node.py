@@ -10641,7 +10641,7 @@ Hints come first (the ``have`` byte on an announce, from an
             if _HEX_PKG.fullmatch(record_id_hex or "") else None
         if entry is None or entry["release"] == b"\x00" * 20:
             return None, None
-        raw = await self.dht_get(entry["release"])
+        raw = await self._descriptor_for(entry)
         if raw is None:
             return None, None
         if entry["kind"] == _PKG_CORE:
@@ -10672,6 +10672,40 @@ Hints come first (the ``have`` byte on an announce, from an
                 "name": doc["name"], "app_id": doc["app_id"].hex(),
                 "publisher_id": _pkg_identity_id(doc["author"]).hex(),
                 "publisher": doc["author"].hex()}, None
+
+    async def _descriptor_for(self, entry: dict) -> bytes | None:
+        """The signed descriptor a record points at, asked of **whoever said
+        they hold it** before anybody else.
+
+        A record is a node signing "I hold this release and I serve it", and
+        every node that files one keeps the descriptor in its own store first
+        (publishing keeps it *only* there until the directory sweep replicates
+        it, which is up to `_DIR_REPUBLISH` later). `dht_get` asks the nodes
+        closest to the key and nobody else — so a package listed on a node's
+        page pointed at a descriptor that node had and nobody was asking it
+        for, and the package could be seen and not fetched for a quarter of an
+        hour after every publication. The holders are asked first, a bounded
+        few; the DHT is what is left.
+
+        Nothing here is believed on who said it: a value is kept only if it
+        hashes to the key the record signed."""
+        key = entry["release"]
+        local = self._dht_store.get(key)
+        if local is not None:
+            return local
+        holders = [NodeID(entry["node_id"])]
+        for other in self._package_book.holders(key):
+            node_id = NodeID(other["node_id"])
+            if node_id not in holders:
+                holders.append(node_id)
+        for node_id in holders[:_DESCRIPTOR_HOLDERS_ASKED]:
+            if node_id == self._id:
+                continue
+            value = await self._dht_find_value_at(node_id, key)
+            if value is not None and _content_key(value) == key:
+                self._dht_store.put(key, value)
+                return value
+        return await self.dht_get(key)
 
     async def package_descriptor(self, record_id_hex: str):
         """What a page may read about the release a record points at.
