@@ -28,6 +28,9 @@ from ..params import param
 # Both are answers about state this process already holds — no loop, no file, no
 # network — so their ceilings are the smallest thing in the plane.
 _QUICK = 5.0
+# A sequence number, not a count somebody asks for: the shared ceiling on a
+# count (a million) would refuse a follower on a node that has simply run long.
+_SEQ_MAX = 2 ** 53
 
 
 class ControlModule:
@@ -39,7 +42,8 @@ class ControlModule:
         operation("catalogue", "Every operation reachable from here",
                   remote=True, timeout=_QUICK, wants_origin=True),
         operation("changes", "What has moved since a sequence number",
-                  [param("since", "count", required=False, default=0)],
+                  [param("since", "count", required=False, default=0,
+                         limit=_SEQ_MAX)],
                   remote=True, timeout=_QUICK),
     )
 

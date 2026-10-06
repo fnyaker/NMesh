@@ -3116,3 +3116,18 @@ its `finally` stopped it and said nothing.
 when `_MAX_UNAUTH_PEERS` is reached. DTrump also publishes no version, so it may
 run a release older than either guard; the far end's cause is not known.
 
+---
+
+## 67 — low — A log could not be filtered by time, nor followed past a million
+
+> **Status — fixed.** `since_time` / `until_time` declare a ceiling fit for a
+> unix time, and the sequence numbers (`logs.since`, `logs.query before_seq`,
+> `control.changes since`) one fit for a counter. Tests:
+> `tests/test_control_logs.py::TestReadingItFromAConsole`.
+
+**What happens** — every `count` without its own `limit` is held to
+`app_api.MAX_COUNT` = 10⁶. A unix time is ~1.79 × 10⁹, so `logs.query
+--since_time …` was refused for any real date (seen over MCP), and a node that
+had written a million log lines, or moved a million changes, would have refused
+the console following it.
+
