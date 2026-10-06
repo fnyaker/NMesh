@@ -376,10 +376,9 @@ class _ReliableLink:
         path is. A duplicate ACK at either step says a frame really is missing,
         and the rest of the window is resent as before.
 
-        Without this a path that grew slower than the timer was resent whole
-        on every timeout, no frame could be timed, and the estimate stayed on
-        the idle round trip while the timer backed off to its ceiling: 30 ms
-        measured, 1.6 s waited, on a link a speed test had just filled."""
+        Resending the whole window instead leaves nothing that may be timed,
+        so on a path grown slower than the timer the estimate keeps the idle
+        round trip while the timer backs off to its ceiling."""
         if not advanced:
             if sack:
                 self._frto_lost(now)
@@ -422,8 +421,8 @@ class _ReliableLink:
         link across a room must not wait a second to resend.
 
         The only thing that brings a backed-off timer back down. A window that
-        merely emptied says nothing about the path: resetting there put the
-        timer back on the very estimate that had just fired too early."""
+        merely emptied says nothing about the path, and resetting there would
+        put the timer back on the estimate that had just fired too early."""
         rtt = max(0.0, rtt)
         if self._srtt is None:
             self._srtt, self._rttvar = rtt, rtt / 2
@@ -491,9 +490,9 @@ class _ReliableLink:
         A first timeout resends the oldest frame **alone** and leaves the rest
         to the ACKs that follow (`_frto_step`). A frame of a loss event already
         being recovered running out its timer is that recovery, not a new
-        timeout: it neither counts nor backs off again, or the frames a window
-        too small to resend at once had to hold back doubled the timer once
-        per round until it sat at its ceiling."""
+        timeout: it neither counts nor backs off again — the frames a window too
+        small to resend at once holds back come due a round later, and counting
+        each round would walk the timer to its ceiling on one loss."""
         if not self._unacked:
             return []
         now = time.monotonic()

@@ -281,10 +281,11 @@ _SPEED_MAX_PER_WINDOW  = 1200              # …in echoes, per identity, per win
 # echo lands, so the link is never idle waiting for the slowest of a batch.
 # It starts at eight and opens by one per echo, up to the ceiling, until the
 # round trip under load passes twice the one at rest plus the slack (a queue is
-# filling, so the link is full) or a probe is lost (then it halves). A fixed
-# eight measured the same as more on loopback, where a round trip is nothing,
-# and capped a 130 ms path at about 1 MB/s. (Sixteen once collapsed the UDP
-# transport outright; see `gotchas.md`.) The ceiling is 1 MB in flight.
+# filling, so the link is full) or a probe is lost (then it halves): a fixed
+# window is a ceiling on what the test can read, eight probes per round trip,
+# about 1 MB/s at 130 ms. The ceiling is 1 MB in flight. A burst that large is
+# what the UDP transport has to hold (`gotchas.md`, "A burst that collapsed the
+# UDP transport").
 _SPEED_INFLIGHT        = 8
 _SPEED_INFLIGHT_MAX    = 64
 _SPEED_QUEUE_SLACK_MS  = 5.0

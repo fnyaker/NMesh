@@ -344,6 +344,37 @@ class TestTheGate:
         assert raised.value.code == "bad_request"
 
 
+class TestAnAppMovesWhatItsPermissionsAllow:
+    """The guide says `readstate.updates` and `control.updates` cover
+    transfers, and every kind was closed to every app anyway: a kind's reach
+    is a distance, and an app on this machine is at none. `transfer.kinds`
+    over MCP was an empty list whatever the app had been granted."""
+
+    @staticmethod
+    def _kinds(*granted):
+        book = PermissionBook()
+        book.declare(APP, _manifest(*granted))
+        for permission in granted:
+            book.set_grant(APP, permission, True)
+        plane = _plane_for(book)
+        return plane, {entry["name"] for entry in plane.call(
+            "transfer.kinds", origin=Origin.app(APP))["kinds"]}
+
+    def test_reading_offers_what_comes_down(self):
+        _plane, kinds = self._kinds("readstate.updates")
+        assert kinds == {"package"}
+
+    def test_control_offers_what_goes_up_as_well(self):
+        _plane, kinds = self._kinds("readstate.updates", "control.updates")
+        assert kinds == {"package", "app", "release"}
+
+    def test_without_control_nothing_goes_up(self):
+        plane, _kinds = self._kinds("readstate.updates")
+        with pytest.raises(ControlError) as raised:
+            plane.call("transfer.offer", {"kind": "app"}, origin=Origin.app(APP))
+        assert raised.value.code == "refused"
+
+
 class _Hook:
     def __init__(self, mode, answer=None, raises=None, app_hex=OTHER):
         self.mode, self._answer, self._raises = mode, answer, raises

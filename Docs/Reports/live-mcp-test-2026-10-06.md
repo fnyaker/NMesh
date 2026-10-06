@@ -110,3 +110,21 @@ Every read tool answers: `node_state`, `node_list`, `transports_options`,
 3. The inbound zombie (4).
 4. `logs_query` dates and the speedtest bounds (5, 6).
 5. `releases_overview` size and the minor items (7, 8).
+
+## Follow-up (0.4.62)
+
+Items 1 to 6 and 8 were then worked on, in that order. What the live node's log
+showed while doing so changed two of the diagnoses above.
+
+| Item | Outcome | BUGSVULNS |
+|---|---|---|
+| 1. UDP under load | The log showed `srtt` 29 ms beside `rto` 1 600 ms: a timeout resent the whole window, so nothing could be timed. Fixed with F-RTO; the higher `_RTO_MIN` proposed above was measured and **rejected** (it costs 20–45 % on a lossy path). IP fragmentation of large frames is the other suspect and stays open. | 61, 63 |
+| 1b. Found on the way | A two-hour suspend left links its peers had dropped, black-holing traffic for 96 s. Fixed: links end on waking from a long sleep. | 62 |
+| 2. Link churn | The dialler was found: node c0ffee00 shares a public IP with two others, and each `WRONG_ADDRESS_TTL` (600 s) bought a handshake and a whole redundant link. Fixed. | 64 |
+| 3. Silent link ends | The dial's clean-up of that same churn. Fixed, with the two other silent paths. | 65 |
+| 4. The inbound zombie | Fixed: an accepted link with no packet by the handshake deadline is ended. | 66 |
+| 5. `logs_query` dates | Fixed, with the sequence numbers that had the same ceiling. | 67 |
+| 6. Speed test ceiling | Fixed: the window opens with the link; `bundle` measures every direct member at once. | 68 |
+| 7. `releases_overview` size | Not done. | — |
+| 8. Minor | All three fixed. | 69 |
+

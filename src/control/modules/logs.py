@@ -42,10 +42,9 @@ from ..plane import operation
 # range can hold an answer — a handful, not the ring.
 _QUICK = 5.0
 _READ = 10.0
-# The time filters are unix seconds, so the shared ceiling on a count (a
-# million) refused every real one: a filter that could only name 1970. Clamped
-# here instead, past any date this ring can hold. Sequence numbers likewise: a
-# busy node writes a million lines, and a follower past that was refused.
+# The time filters are unix seconds (~1.8e9) and the sequence numbers grow for
+# as long as the node runs, so neither fits the shared ceiling on a count (a
+# million). Clamped to bounds of their own, past any value this ring can hold.
 _LATEST = 2 ** 33
 _SEQ_MAX = 2 ** 53
 

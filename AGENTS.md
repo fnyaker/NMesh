@@ -340,6 +340,12 @@ scope. Add yours.
   valid measurement and rightly brings the timer down. → Assert the property
   the test is named for (no new timeout, no extra backoff), not every field
   that happens to hold still on the path you imagined.
+- **History comments, a third time.** Ten docstrings and comments in one
+  branch told the incident ("seen live", "a laptop woken after two hours",
+  "used to") instead of the constraint, after two entries above saying not to.
+  Caught on the pre-commit reread. → Write the incident in `gotchas.md` and
+  `BUGSVULNS.MD` *first*; then the code comment has somewhere to point and only
+  the rule left to say.
 - **An empty log answer read as "nothing happened".** After a restart the log
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not

@@ -1033,6 +1033,12 @@ once the link authenticates, beside the capability record:
 | `keepalive_slow_min_ms` | the fastest I want to be probed when nothing is happening | 15 s |
 | `keepalive_slow_max_ms` | the slowest I can be probed before I stop believing the link | 20 s |
 
+A peer's four arriving out of order are sorted (and judged, `well_formed`).
+An operator's through `network.mlo` are **refused** instead, naming the order —
+they used to be swapped without a word. `config.save` still sorts and reports
+what it stored (`adjusted`), and the start-up path sorts and logs it, because a
+node that will not start over a hand-edited file is worse.
+
 Both ends then apply `mlo.accord` to the two declarations and get the same
 answer, so **nothing is exchanged to settle it** and there is no state where one
 end thinks something was agreed and the other does not (the same trick as the
@@ -1360,6 +1366,13 @@ Two rules pick the address (`_mlo_second_address`), and neither is a preference:
   transport.
 - **A medium that declares `mlo`.** Exactly what the link we hold had to prove:
   the second link is probed ten times a second too.
+
+Among the addresses that pass both, one that has **failed since the last
+success** goes behind every one that has not (the failures ride the backoff
+book, bounded at `_MAX_ADDRESSES` per identity); once all have failed it starts
+round again. Always taking the first sent a live node back to one private
+address of a peer's, unreachable from here, at every backoff, and never to the
+peer's other address of the same medium.
 
 And the bounds are the ones every other dial in the node obeys: it dials only
 addresses **already known for that identity** (like the retry loop and the
