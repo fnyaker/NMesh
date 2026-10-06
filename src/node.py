@@ -2747,8 +2747,11 @@ class MeshNode:
             # Where this member goes. For a path that is the neighbour it goes
             # through, said as an id rather than an address: a first hop is a
             # node, and printing its socket would be printing the wrong thing.
+            # For a link, the far end its transport reports — `remote_addr` is
+            # what we *dialled*, and an accepted link dialled nothing.
             "remote": (member.via.raw.hex() if routed_path
-                       else member.remote_addr),
+                       else medium.endpoints(member.transport).get("remote")
+                       or member.remote_addr),
             "via": member.via.raw.hex() if routed_path else None,
             "mean_ms": None if recent_ms is None else round(recent_ms, 1),
             "loss": None if recent_loss is None else round(recent_loss, 3),

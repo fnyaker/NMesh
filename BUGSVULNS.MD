@@ -144,6 +144,9 @@ like the regression.
 | 54 | **high** | The UDP SACK was one bit off: a lost frame was retired as delivered, and the link stalled for ever |
 | 55 | **medium** | A UDP link both ends accepted after a restart held a slot for ever, never authenticating |
 | 56 | **low** | Link-local addresses were advertised, and every peer paid a failed dial for each |
+| 57 | **low** | The reachability descriptors still carried link-local addresses into LAN tickets and LAN discovery |
+| 58 | **medium** | Local addresses sorted alphabetically: Docker bridges dialled first, the real LAN address cut from LAN discovery |
+| 59 | **low** | A bundle member opened by the far end showed `remote: null` |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -2910,4 +2913,64 @@ peer that tried them failed instantly, once per address per pass.
 
 **Impact** — wasted dials and a longer address list in every PING and
 `FOUND_NODE`. Nothing an adversary gains.
+
+---
+
+## 57 — low — The reachability descriptors still carried link-local addresses
+
+> **Status — fixed.** `ip_reachability` reads its addresses through
+> `ip_utils.advertisable_ips`, the same rule `expand_listen_uri` uses. Tests:
+> `tests/test_reachability.py::TestIPClassifier::test_link_local_is_no_audience`,
+> `…::TestNodeReachability::test_what_leaves_for_the_lan_is_dialable_and_primary_first`.
+
+**Where** — `src/ip_utils.py`, `ip_reachability`.
+
+**What happens** — finding 56 filtered link-local addresses out of the
+advertised list and left them in the reachability descriptors, which
+`local_endpoints()` (LAN join tickets) and `_lan_relay_addrs()` (answers to LAN
+discovery beacons) read. Seen on the live node after 56 shipped: 28
+`fe80::` descriptors, the UDP ones marked confirmed. Two places publish an
+address and only one had the rule.
+
+**Impact** — a LAN ticket or beacon answer naming addresses nobody can dial.
+
+---
+
+## 58 — medium — Local addresses sorted alphabetically
+
+> **Status — fixed.** `local_ip_addresses()` puts the addresses the default
+> routes leave from first, the rest sorted after them. Test:
+> `tests/test_ip_utils.py::TestLocalIPs::test_the_address_the_default_route_uses_comes_first`.
+
+**Where** — `src/ip_utils.py`, `local_ip_addresses`.
+
+**What happens** — the function found the outbound address and then sorted it
+in with everything else. On a host on `192.168.x` running Docker, the eleven
+`172.17–29.0.1` bridges came first: every peer dialled them first, at up to
+4 s each, and `_lan_relay_addrs()` — capped at eight — never announced the LAN
+address at all. The live node escaped only because its LAN address is
+`10.39.x`, which sorts first.
+
+**Impact** — slow first contact for every peer of such a host, and LAN relay
+discovery that names only unreachable bridges.
+
+**Fixing it without breaking something** — the order must stay deterministic:
+`NetMonitor` compares successive lists and reports a change, so a list that
+reordered itself between two probes would look like a network change each time.
+The primary-first order moves only when the default route does, which *is* a
+change.
+
+---
+
+## 59 — low — A bundle member opened by the far end showed `remote: null`
+
+> **Status — fixed.** A direct member's `remote` is its transport's far end
+> (`medium.endpoints`), `remote_addr` only as a fallback. Test:
+> `tests/test_mlo.py::TestAMemberSaysWhereItGoes`.
+
+**Where** — `src/node.py`, `_mlo_member_row`.
+
+**What happens** — the row read `remote_addr`, which is the address *dialled*;
+a link accepted on our listener dialled nothing, so the console's multi-link
+table showed an empty destination for it. A label and a value that disagreed.
 
