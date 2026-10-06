@@ -1703,6 +1703,40 @@ before and after.
   on the route change and on a context switch, beside the trace polling that
   already was.
 
+## A measurement that showed nothing, and a burst that measured itself
+
+- **The speed test measured and the card said it failed.** The node card read
+  the answer with `const {ok, error, data} = await this.op(...)` — the shape
+  `CHANNEL.ask` returns — but `op` is `CHANNEL.call`, which hands back the data
+  itself. `data` was `undefined`, `data.ok` threw, and the `catch` painted "the
+  speed test failed" over a result the node had produced correctly. **`call`
+  returns the answer or throws; `ask` returns `{ok, code, error, detail,
+  data}`.** Destructure only what `ask` gave you. The result is also a block of
+  its own now, kept per node id and redrawn with the card, rather than a status
+  line the next message overwrote.
+- **One lost probe held the test until its deadline.** Probes went out in
+  batches of eight and the batch waited for each member with the deadline as
+  its timeout, so a single dropped datagram stalled everything and the figure
+  was the clock rather than the link. Now a sliding window, with a per-probe
+  timeout (`_SPEED_PROBE_TIMEOUT`).
+- **Sixteen in flight collapses UDP.** Raising the window to sixteen probes of
+  16 kB (256 kB in one burst) took a loopback UDP link from ~78 MB/s and no loss
+  to 4 MB/s and 80 % lost, while TCP did not notice. The reliable layer under
+  `udp.py` backs its retransmit timer off to two seconds under that burst and
+  never recovers inside a test. The window stays at eight, which runs clean on
+  both media — and the collapse itself is a finding about the UDP transport,
+  not about the test: a medium that cannot take a quarter megabyte at once will
+  show it under any bulk transfer, and this is the reading that says so.
+
+## A loop over blocks that assumes every block is the same
+
+`paintTransportLive` walks every transport block and, at the end of each, sets
+the UDP controls' labels whenever *any* scheme can punch. The tcp block has no
+such controls, so `querySelector(...)` returned `null`, the assignment threw, and
+the `forEach` ended there — every block after tcp kept whatever it showed last.
+It now returns early unless *this* block carries the controls. **In a loop over
+heterogeneous blocks, ask the block, not the snapshot.**
+
 ## The terminal in a browser
 
 - **One request per keystroke delivers them out of order.** Every key fired its

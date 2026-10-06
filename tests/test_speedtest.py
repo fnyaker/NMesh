@@ -29,8 +29,9 @@ import pytest
 
 from src import features
 from src.node import (MeshNode, _Peer, SPEED_PROBE, SPEED_ECHO, _SPEED_CHUNK,
-                      _SPEED_MAX_BYTES, _SPEED_MAX_SECONDS,
-                      _SPEED_MAX_PER_WINDOW, _QID_LEN)
+                      _SPEED_IDLE_PROBES, _SPEED_INFLIGHT, _SPEED_MAX_BYTES,
+                      _SPEED_MAX_SECONDS, _SPEED_MAX_PER_WINDOW,
+                      _SPEED_PROBE_TIMEOUT, _QID_LEN)
 from src.node_id import NodeID
 from src.packet import Packet
 from tests.conftest import FakeTransport, make_manager
@@ -246,3 +247,100 @@ class TestItIsNegotiated:
                 node._peers.remove(link)
         finally:
             await node.stop()
+
+
+class _Echoing(_Link):
+    """A peer that answers probes the way a real one would, after ``delay``,
+    dropping every ``drop``-th one — through the node's own echo handler, so
+    the measurement is fed exactly what a link would feed it."""
+
+    def __init__(self, node, *, delay=0.002, drop=0):
+        super().__init__(node)
+        self.node, self.delay, self.drop, self.seen = node, delay, drop, 0
+        self.agreed = frozenset({features.SPEEDTEST})
+        self.tasks = set()
+
+    async def send(self, packet):
+        if packet.type != SPEED_PROBE:
+            return
+        self.seen += 1
+        if self.drop and self.seen % self.drop == 0:
+            return
+        echo = Packet.create(SPEED_ECHO, self.authenticated_id.raw,
+                             packet.src_id, packet.payload)
+
+        async def later():
+            await asyncio.sleep(self.delay)
+            await self.node._handle_speed_echo(self, echo)
+        task = asyncio.get_running_loop().create_task(later())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+
+class TestTheMeasurementItself:
+    """What the figures say, against a peer whose behaviour is known."""
+
+    async def _measure(self, **kwargs):
+        node = await _node()
+        link = _Echoing(node, **kwargs)
+        node._peers.append(link)
+        try:
+            return link, await node.console_speedtest(
+                link.authenticated_id.raw.hex())
+        finally:
+            node._peers.remove(link)
+            await node.stop()
+
+    async def test_a_clean_link_is_measured_to_the_byte_ceiling(self):
+        link, answer = await self._measure()
+        assert answer["ok"] is True, answer
+        assert answer["lost_probes"] == 0 and answer["loss_percent"] == 0.0
+        # Bounded by bytes: the ceiling, plus the probes at rest, and no more.
+        assert answer["sent_bytes"] <= _SPEED_MAX_BYTES + _SPEED_CHUNK * _SPEED_IDLE_PROBES
+        assert answer["echoed_bytes"] == answer["sent_bytes"]
+        assert answer["one_way_bps"] > 0
+        assert answer["round_trip_bps"] == 2 * answer["one_way_bps"]
+        assert answer["idle_ms"] is not None and answer["rtt_ms"] is not None
+        # Never more than the window outstanding: the far side's ceiling is
+        # what keeps it safe, and this is what keeps us inside it.
+        assert link.seen == answer["probes"]
+
+    async def test_one_lost_probe_does_not_hold_the_test_to_its_deadline(self):
+        """The bug the sliding window removed: a batch waited for its slowest
+        member, so a single dropped datagram stalled everything until the
+        clock ran out, and the figure was the deadline rather than the link."""
+        started = asyncio.get_running_loop().time()
+        _link, answer = await self._measure(drop=50)
+        took = asyncio.get_running_loop().time() - started
+        assert answer["ok"] is True
+        assert answer["lost_probes"] > 0
+        assert 0 < answer["loss_percent"] < 10
+        assert took < _SPEED_MAX_SECONDS - 1
+        # A lost probe costs its slot for the probe timeout and no longer.
+        assert took < _SPEED_PROBE_TIMEOUT * 3
+
+    async def test_a_silent_peer_is_all_loss_and_still_ends(self):
+        node = await _node()
+        link = _Echoing(node, drop=1)
+        node._peers.append(link)
+        try:
+            answer = await asyncio.wait_for(node.console_speedtest(
+                link.authenticated_id.raw.hex()), _SPEED_MAX_SECONDS + 5)
+            assert answer["ok"] is True
+            assert answer["echoed_bytes"] == 0
+            assert answer["loss_percent"] == 100.0
+            assert answer["one_way_bps"] == 0
+            assert answer["rtt_ms"] is None and answer["idle_ms"] is None
+            assert link.seen <= _SPEED_IDLE_PROBES + _SPEED_MAX_BYTES // _SPEED_CHUNK
+            # No echo is left waiting in the node's book once it has answered.
+            assert not node._pending_echo
+        finally:
+            node._peers.remove(link)
+            await node.stop()
+
+    def test_the_window_stays_inside_what_the_far_side_will_echo(self):
+        """One test must fit under the answering side's ceiling with room to
+        run it again, or the second test of a minute reads as total loss."""
+        per_test = _SPEED_IDLE_PROBES + _SPEED_MAX_BYTES // _SPEED_CHUNK
+        assert per_test * 2 <= _SPEED_MAX_PER_WINDOW
+        assert _SPEED_INFLIGHT * _SPEED_CHUNK <= 1024 * 1024

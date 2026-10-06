@@ -273,7 +273,19 @@ _SPEED_MAX_BYTES       = 8 * 1024 * 1024   # one test, in one direction
 _SPEED_MAX_SECONDS     = 10.0
 _SPEED_WINDOW          = 60.0              # what the *answering* side allows…
 _SPEED_MAX_PER_WINDOW  = 1200              # …in echoes, per identity, per window
-_SPEED_INFLIGHT        = 8                 # probes outstanding at once
+# Probes outstanding at once — a *sliding* window: a new probe leaves as each
+# echo lands, so the link is never idle waiting for the slowest of a batch.
+# Eight, not more: at sixteen (256 kB in one burst) the UDP transport's reliable
+# layer collapses on loopback — 80 % of the probes lost, a twentieth of the
+# rate — while eight runs clean on both media. A test that measures its own
+# burst rather than the link is not a measurement (`gotchas.md`).
+_SPEED_INFLIGHT        = 8
+# A probe not echoed within this is counted lost and its slot reused. Without
+# it one dropped datagram held the whole test until the deadline.
+_SPEED_PROBE_TIMEOUT   = 2.0
+# Probes sent one at a time before the load, for the latency of the link at
+# rest — the figure "latency under load" is only meaningful beside.
+_SPEED_IDLE_PROBES     = 3
 # A transport reaps an idle link once no data arrives for its read timeout
 # (TCP: 60s). A healthy but quiet link would die on its own, so ping every
 # established peer well inside that window — both sides do it, so each link
@@ -1026,10 +1038,12 @@ __all__ = [
     "_SHORT_SEEK_GAP",
     "_SHORT_SEEK_LEN",
     "_SPEED_CHUNK",
+    "_SPEED_IDLE_PROBES",
     "_SPEED_INFLIGHT",
     "_SPEED_MAX_BYTES",
     "_SPEED_MAX_PER_WINDOW",
     "_SPEED_MAX_SECONDS",
+    "_SPEED_PROBE_TIMEOUT",
     "_SPEED_WINDOW",
     "_STATE_WRITE_INTERVAL",
     "_STORE_RATE_MAX",

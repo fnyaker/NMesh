@@ -1540,7 +1540,13 @@ class MeshNode:
         Bounded twice over — by bytes and by seconds, whichever ends first — so
         a fast link cannot be asked for an unbounded amount and a dead one
         cannot hold the caller. Direct links only: routing a speedtest would
-        measure somebody else's link and spend it to do so."""
+        measure somebody else's link and spend it to do so.
+
+        Two phases: a few probes one at a time for the latency at rest, then a
+        sliding window for the rate and the latency under load. The gap
+        between those two latencies is what a queue somewhere on the path
+        adds when the link is busy — the one number a "how fast" figure alone
+        hides."""
         try:
             nid = NodeID(bytes.fromhex(node_id_hex))
         except (ValueError, TypeError):
@@ -1554,45 +1560,116 @@ class MeshNode:
             return {"ok": False, "error": "that node does not run speed tests"}
 
         payload = os.urandom(_SPEED_CHUNK - _QID_LEN)
-        sent = echoed = 0
-        rtts: list[float] = []
+        loop = asyncio.get_running_loop()
+        inflight: dict[bytes, tuple] = {}
+
+        async def launch() -> None:
+            qid = os.urandom(_QID_LEN)
+            future: asyncio.Future = loop.create_future()
+            while len(self._pending_echo) >= _PENDING_ECHO_MAX:
+                _, (_, old) = self._pending_echo.popitem(last=False)
+                if not old.done():
+                    old.cancel()
+            self._pending_echo[qid] = (nid, future)
+            inflight[qid] = (future, time.monotonic())
+            await peer.send(Packet.create(SPEED_PROBE, self._id.raw,
+                                          nid.raw, qid + payload))
+
+        def settle(qid) -> None:
+            future, _at = inflight.pop(qid)
+            self._pending_echo.pop(qid, None)
+            if not future.done():
+                future.cancel()
+
+        sent = echoed = lost = 0
+        idle: list[float] = []
+        loaded: list[float] = []
+        first_echo = last_echo = None
+        first_size = 0
         started = time.monotonic()
         deadline = started + _SPEED_MAX_SECONDS
         try:
-            while (echoed < _SPEED_MAX_BYTES
-                   and time.monotonic() < deadline):
-                batch = []
-                for _ in range(_SPEED_INFLIGHT):
-                    qid = os.urandom(_QID_LEN)
-                    future: asyncio.Future = asyncio.get_running_loop().create_future()
-                    while len(self._pending_echo) >= _PENDING_ECHO_MAX:
-                        _, (_, old) = self._pending_echo.popitem(last=False)
-                        if not old.done():
-                            old.cancel()
-                    self._pending_echo[qid] = (nid, future)
-                    batch.append((qid, future, time.monotonic()))
-                    await peer.send(Packet.create(SPEED_PROBE, self._id.raw,
-                                                  nid.raw, qid + payload))
+            # At rest first, one probe at a time: the latency of the link with
+            # nothing queued on it, which is what "under load" is compared to.
+            for _ in range(_SPEED_IDLE_PROBES):
+                await launch()
+                sent += _SPEED_CHUNK
+                [(qid, (future, at))] = inflight.items()
+                try:
+                    size = await asyncio.wait_for(
+                        asyncio.shield(future),
+                        min(_SPEED_PROBE_TIMEOUT,
+                            max(0.05, deadline - time.monotonic())))
+                    echoed += int(size)
+                    idle.append((time.monotonic() - at) * 1000.0)
+                except Exception:
+                    lost += 1
+                finally:
+                    settle(qid)
+            load_started = time.monotonic()
+            # Then a sliding window: a probe leaves as each echo lands, so the
+            # link is never idle waiting for the slowest of a batch, and a lost
+            # probe costs its own slot for `_SPEED_PROBE_TIMEOUT`, not the test.
+            # Past the deadline nothing new leaves, and what is already on the
+            # wire gets a moment to land: counting a full window as lost just
+            # because the clock ran out would invent a loss the link never had.
+            drain_until = None
+            while True:
+                now = time.monotonic()
+                if now >= deadline and drain_until is None:
+                    drain_until = now + min(1.0, _SPEED_PROBE_TIMEOUT)
+                if drain_until is not None and now >= drain_until:
+                    break
+                while (drain_until is None and len(inflight) < _SPEED_INFLIGHT
+                       and sent < _SPEED_MAX_BYTES):
+                    await launch()
                     sent += _SPEED_CHUNK
-                for qid, future, at in batch:
-                    try:
-                        size = await asyncio.wait_for(
-                            asyncio.shield(future),
-                            max(0.05, deadline - time.monotonic()))
-                        echoed += int(size)
-                        rtts.append((time.monotonic() - at) * 1000.0)
-                    except Exception:
-                        pass            # a lost probe is a measurement too
-                    finally:
-                        self._pending_echo.pop(qid, None)
-                        if not future.done():
-                            future.cancel()
+                if not inflight:
+                    break
+                now = time.monotonic()
+                limit = deadline if drain_until is None else drain_until
+                wait = min(_SPEED_PROBE_TIMEOUT, max(0.01, limit - now))
+                await asyncio.wait([future for future, _ in inflight.values()],
+                                   timeout=wait,
+                                   return_when=asyncio.FIRST_COMPLETED)
+                now = time.monotonic()
+                for qid, (future, at) in list(inflight.items()):
+                    if future.done() and not future.cancelled():
+                        size = int(future.result())
+                        echoed += size
+                        loaded.append((now - at) * 1000.0)
+                        if first_echo is None:
+                            first_echo, first_size = now, size
+                        last_echo = now
+                        settle(qid)
+                    elif now - at >= _SPEED_PROBE_TIMEOUT or future.done():
+                        lost += 1
+                        settle(qid)
         except Exception:
             return {"ok": False, "error": "the link failed during the test"}
+        finally:
+            lost += len(inflight)
+            for qid in list(inflight):
+                settle(qid)
         elapsed = max(1e-6, time.monotonic() - started)
-        # Round trip: what went out *and* came back, which is the honest figure
-        # for a measurement made by echoing. Saying "throughput" for one
-        # direction of it would be twice the truth.
+        loading = max(1e-6, time.monotonic() - load_started)
+        # The rate is read between the first echo of the load and the last:
+        # before the first, the window is still filling and nothing *can* have
+        # come back, and counting that as slowness under-reads a long link by
+        # its whole round trip. Too few echoes to have a between, and the plain
+        # average over the load is the honest figure.
+        if (first_echo is not None and len(loaded) >= 8
+                and last_echo - first_echo > 0.05):
+            one_way = ((echoed - _SPEED_CHUNK * len(idle) - first_size)
+                       / (last_echo - first_echo))
+        else:
+            one_way = max(0, echoed - _SPEED_CHUNK * len(idle)) / loading
+        one_way_bps = round(max(0.0, one_way))
+        probes = sent // _SPEED_CHUNK
+        everything = idle + loaded
+        # Each way, because an echo carries every byte twice: what one
+        # direction sustains is the figure an application would see, and the
+        # sum over both is what the link actually moved.
         return {
             "ok": True,
             "node": nid.raw.hex(),
@@ -1600,10 +1677,15 @@ class MeshNode:
             "sent_bytes": sent,
             "echoed_bytes": echoed,
             "lost_bytes": max(0, sent - echoed),
-            "round_trip_bps": round((sent + echoed) / elapsed),
-            "one_way_bps": round(echoed / elapsed),
-            "rtt_ms": round(sum(rtts) / len(rtts), 1) if rtts else None,
-            "best_ms": round(min(rtts), 1) if rtts else None,
+            "probes": probes,
+            "lost_probes": lost,
+            "loss_percent": round(lost * 100.0 / probes, 1) if probes else 0.0,
+            "one_way_bps": one_way_bps,
+            "round_trip_bps": 2 * one_way_bps,
+            "idle_ms": round(min(idle), 1) if idle else None,
+            "rtt_ms": (round(sum(loaded) / len(loaded), 1) if loaded
+                       else None),
+            "best_ms": round(min(everything), 1) if everything else None,
             "transport": self._peer_scheme(peer),
         }
 
@@ -8505,6 +8587,38 @@ Hints come first (the ``have`` byte on an announce, from an
                                f"from {publisher_id_hex[:12]}")
         return {**result, "version": entry["version"],
                 "publisher_id": publisher_id_hex}
+
+    def set_update_policy(self, *, check_minutes=None, when_active=None,
+                          quorum=None, auto_publish=None,
+                          recommend=None) -> dict:
+        """Change how this node goes looking for updates, on a running node.
+
+        Every one of these is read by the release loop on each pass, so setting
+        it is the whole change. The loop is woken because it may be asleep for
+        the *old* interval: a node moved from daily to every five minutes would
+        otherwise keep its promise to the old setting for up to a day."""
+        if check_minutes is not None:
+            self._update_check_seconds = max(0, int(check_minutes)) * 60
+        if when_active is not None:
+            self._update_when_active = bool(when_active)
+        if quorum is not None:
+            self._release_quorum = max(0, int(quorum))
+        if auto_publish is not None:
+            self._release_auto_publish = bool(auto_publish)
+        if recommend is not None:
+            self._recommend_version = bool(recommend)
+            self._recommended = ""
+        self._wake_release_pass()
+        return {"check_minutes": self._update_check_seconds // 60,
+                "when_active": self._update_when_active,
+                "quorum": self._release_quorum,
+                "auto_publish": self._release_auto_publish,
+                "recommend": self._recommend_version}
+
+    def set_abuse_gossip(self, enabled: bool) -> bool:
+        """Whether this node sends, and acts on, other nodes' abuse reports."""
+        self._gossip_abuse = bool(enabled)
+        return self._gossip_abuse
 
     def _ensure_release_watch(self) -> None:
         if self._release_task is None or self._release_task.done():

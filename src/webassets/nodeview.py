@@ -133,6 +133,19 @@ CSS = """
 .nodeview details.card>summary .tail{margin-left:auto;color:var(--text-muted);
   font-weight:500;font-size:var(--fs-xs)}
 .nv-pick{display:grid;gap:var(--s-2);grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr))}
+
+/* -- speed test ---------------------------------------------------------- */
+/* Its own block under the buttons, not a line in the status: a measurement is
+   five numbers and a sentence, and a status line held one of them at a time
+   until the next message replaced it. */
+.nv-speed{border:1px solid var(--border);border-radius:var(--r-md);
+  padding:var(--s-3) var(--s-4);display:flex;flex-direction:column;gap:var(--s-3);
+  background:var(--surface-2)}
+.nv-speed-head{display:flex;align-items:baseline;gap:var(--s-2);flex-wrap:wrap;
+  font-size:var(--fs-sm)}
+.nv-speed-head b{font-weight:620}
+.nv-speed .stats{grid-template-columns:repeat(auto-fit,minmax(min(120px,100%),1fr))}
+.nv-speed .stat{background:var(--surface)}
 """
 
 
@@ -176,6 +189,10 @@ const NODEVIEW = {
   lastRead: 0,
   // Set when the next repaint has to re-ask the apps as well as the node.
   deep: false,
+  // The last speed test per node id, kept so a repaint that rebuilds the card
+  // draws it again rather than losing it — and the one running, if any.
+  speed: {},
+  speedTimer: null,
 
   // Every call this view makes goes through one of these two, so a mount
   // cannot half follow the context. `op` is the control plane — what this view
@@ -194,6 +211,10 @@ const NODEVIEW = {
   // it drops a *node* from the routing table.)
   reset(){
     this.apps = {};
+    // A measurement belongs to the link it loaded, and that link was the node
+    // we just left's. Nothing of it describes the one we arrived on.
+    this.speed = {};
+    if(this.speedTimer){ clearInterval(this.speedTimer); this.speedTimer = null; }
     const held = this.current;
     this.current = null;
     if(this.reread){ clearTimeout(this.reread); this.reread = null; }
@@ -338,6 +359,7 @@ const NODEVIEW = {
       this.headerHTML(view, extras) +
       this.relationHTML(view, extras, options) +
       this.actionsHTML(view, extras, options) +
+      '<div data-nv-speed>' + this.speedHTML(view.id) + "</div>" +
       this.linksHTML(view) +
       this.packagesHTML(view, extras) +
       this.foldHTML("Addresses", this.addressHTML(view), this.addressCount(view)) +
@@ -990,35 +1012,110 @@ const NODEVIEW = {
   // to answer "how fast is it" and the reason it is a button somebody presses
   // rather than something on a cadence. The node bounds it (ten seconds, eight
   // megabytes, whichever ends first); this just waits, because the operation
-  // travels as a job and `CHANNEL.call` already knows how to wait for one.
+  // travels as a job and `CHANNEL.ask` already knows how to wait for one.
+  SPEED_SECONDS: 10,
+
   async speedtest(element, button, id){
+    if(this.speed[id] && this.speed[id].running) return;
+    const run = {running:true, started:Date.now()};
+    this.speed[id] = run;
+    this.paintSpeed(element, id);
+    // The bar moves with the clock, against the node's own ceiling: the honest
+    // reading of "how far along" for a test that ends on bytes *or* seconds.
+    if(this.speedTimer) clearInterval(this.speedTimer);
+    this.speedTimer = setInterval(() => this.tickSpeed(element, id), 250);
     await withBusy(button, async () => {
-      this.say(element, "Loading the link — up to ten seconds…");
       try{
-        const {ok, error, data} = await this.op("node.speedtest", {node:id});
-        if(!ok || data.ok === false){
-          this.say(element, (data && data.error) || error || "Could not measure",
-                   true);
-          return;
-        }
-        const rate = (bps) => bps >= 1e6 ? (bps / 1e6).toFixed(1) + " MB/s"
-                                         : Math.round(bps / 1e3) + " kB/s";
-        // Both figures, because one of them alone is a half-truth: the round
-        // trip is what was actually moved, and the one-way is what an
-        // application would see.
-        const lost = data.lost_bytes
-          ? ", " + Math.round(data.lost_bytes * 100 / data.sent_bytes) + "% lost"
-          : "";
-        this.say(element,
-          rate(data.one_way_bps) + " one way, " + rate(data.round_trip_bps) +
-          " round trip over " + (data.transport || "the link") +
-          " — " + (data.rtt_ms == null ? "no round trip measured"
-                                       : data.rtt_ms + " ms under load, " +
-                                         data.best_ms + " ms at best") + lost);
+        // `ask`, not `call`: the answer is `{ok, error, data}`. Destructuring
+        // that shape out of `call` — which hands back the data itself — is
+        // what made every result vanish into "the speed test failed".
+        const {ok, error, data} = await CHANNEL.ask(
+          "node.speedtest", {node:id}, {local:this.here});
+        if(!ok || !data || data.ok === false)
+          run.error = (data && data.error) || error || "Could not measure";
+        else run.data = data;
       }catch(error){
-        if(!isStale(error)) this.say(element, "The speed test failed", true);
+        if(isStale(error)) return;
+        run.error = "The speed test did not finish";
+      }finally{
+        run.running = false;
+        run.finished = Date.now();
+        if(this.speedTimer){ clearInterval(this.speedTimer); this.speedTimer = null; }
       }
+      if(this.speed[id] === run) this.paintSpeed(element, id);
     });
+  },
+
+  paintSpeed(element, id){
+    const box = element.querySelector("[data-nv-speed]");
+    if(box && element.dataset.nvId === id) setHTML(box, this.speedHTML(id));
+  },
+
+  tickSpeed(element, id){
+    const run = this.speed[id];
+    if(!run || !run.running) return;
+    const seconds = Math.min(this.SPEED_SECONDS, (Date.now() - run.started) / 1000);
+    const bar = element.querySelector("[data-nv-speed-bar]");
+    if(bar) bar.value = seconds;
+    const clock = element.querySelector("[data-nv-speed-clock]");
+    if(clock) clock.textContent = Math.floor(seconds) + " s of at most " + this.SPEED_SECONDS;
+  },
+
+  speedHTML(id){
+    const run = this.speed[id];
+    if(!run) return "";
+    const head = (tail) => '<div class="nv-speed-head"><b>Speed test</b>' +
+      '<span class="grow"></span>' + tail + "</div>";
+    if(run.running)
+      return '<div class="nv-speed" role="status">' +
+        head('<span class="tiny muted num" data-nv-speed-clock>0 s of at most ' +
+             this.SPEED_SECONDS + "</span>") +
+        '<progress class="meter" data-nv-speed-bar max="' + this.SPEED_SECONDS +
+        '" value="0"></progress>' +
+        '<p class="tiny muted">Measuring the link at rest, then loading it. ' +
+        "Traffic over it will be slower until this ends.</p></div>";
+    if(run.error)
+      return '<div class="nv-speed" role="status">' + head("") +
+        '<p class="msg error">' + esc(run.error) + "</p></div>";
+    const data = run.data || {};
+    const ms = (value) => value == null ? "—" : fmtNum(value) + " ms";
+    const mbit = (bps) => fmtNum(Math.round((bps || 0) * 8 / 1e5) / 10) + " Mbit/s";
+    const tile = (value, label, extra, cls) =>
+      '<div class="stat sm' + (cls ? " " + cls : "") + '"><span class="v">' + esc(value) +
+      '</span><span class="k">' + esc(label) + "</span>" +
+      (extra ? '<span class="tiny muted">' + esc(extra) + "</span>" : "") + "</div>";
+    const lost = data.loss_percent == null ? 0 : data.loss_percent;
+    const tiles = [
+      tile(fmtRate(data.one_way_bps), "Each way", mbit(data.one_way_bps)),
+      tile(ms(data.idle_ms), "Latency at rest"),
+      tile(ms(data.rtt_ms), "Latency under load"),
+      tile(fmtNum(lost) + " %", "Lost"),
+      tile(fmtRate(data.round_trip_bps), "Both ways", "", "only-expert"),
+      tile(ms(data.best_ms), "Best round trip", "", "only-expert"),
+      tile(fmtNum(data.lost_probes || 0) + " / " + fmtNum(data.probes || 0),
+           "Probes lost", "", "only-expert"),
+      tile(fmtBytes(data.sent_bytes), "Sent", "", "only-expert"),
+    ];
+    return '<div class="nv-speed" role="status">' +
+      head('<span class="tiny muted">over ' + esc(data.transport || "the link") +
+           " · " + esc(fmtNum(data.seconds)) + " s</span>") +
+      '<div class="stats">' + tiles.join("") + "</div>" +
+      '<p class="tiny muted">' + esc(this.speedVerdict(data)) + "</p></div>";
+  },
+
+  // One sentence a person can act on. The figures above are the evidence; this
+  // is what they add up to, said only when the evidence says it.
+  speedVerdict(data){
+    const idle = data.idle_ms, busy = data.rtt_ms;
+    if(!data.echoed_bytes) return "Nothing came back: the far node did not answer the test, " +
+      "or it already answered as many as it allows this minute.";
+    if((data.loss_percent || 0) >= 5) return "A noticeable share of the test was lost — " +
+      "expect retries and stalls on this link.";
+    if(idle != null && busy != null && busy - idle > Math.max(20, idle))
+      return "Latency rises from " + fmtNum(idle) + " to " + fmtNum(busy) + " ms when " +
+        "the link is busy: something on the path queues traffic. Calls and terminals " +
+        "will lag while a transfer runs.";
+    return "The link holds its latency under load.";
   },
 
   async retry(element, button, uri){
