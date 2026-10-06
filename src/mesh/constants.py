@@ -662,6 +662,13 @@ _KA_SEND_WAIT             = 1.0
 # how much later than asked the keepalive loop wakes — a timer that already
 # runs, so measuring costs no wake-up of its own.
 _LOOP_LAG_WARN            = 0.25
+# A machine that slept longer than this finds every link already gone at the
+# far end: past the longest silence any default lets a link live through (the
+# TCP read timeout, 60 s; the UDP keepalive horizon, 75 s). Its own clock does
+# not know — the monotonic clock stops while the machine sleeps, so on waking
+# every link looks as fresh as when it dozed off, and traffic sent down them
+# vanishes until each one times out from scratch.
+_SLEEP_ENDS_LINKS         = 90.0
 # A line that could be written once per packet is written once per this, per
 # key, with the count of what was folded into it. Bounded in keys.
 _LOG_THROTTLE             = 10.0
@@ -1069,6 +1076,7 @@ __all__ = [
     "_SEEK_TTL_PREAUTH",
     "_SHORT_SEEK_GAP",
     "_SHORT_SEEK_LEN",
+    "_SLEEP_ENDS_LINKS",
     "_SLOW_HANDLER",
     "_SPEED_CHUNK",
     "_SPEED_IDLE_PROBES",

@@ -722,6 +722,88 @@ class TestABurstDoesNotCollapseTheLink:
         await asyncio.wait_for(pending, 1)
 
 
+class TestATimeoutOnALatePathIsFoundOut:
+    """A path that grew slower than the timer used to be resent whole on every
+    timeout, so no frame could be timed (Karn), the estimate stayed on the idle
+    round trip, and the timer backed off to its ceiling: a live link read 30 ms
+    measured and waited 1.6 s, right after a speed test had filled it."""
+
+    @staticmethod
+    def _window(n: int = 5, cwnd: float = 512 * 1024.0):
+        link = _ReliableLink()
+        link._cwnd = cwnd
+        frames = [link.build_frame(make_packet(b"f" * 1000)) for _ in range(n)]
+        _expire_all(link)
+        return link, frames
+
+    def test_a_timeout_resends_the_oldest_frame_alone(self):
+        link, frames = self._window()
+        assert link.get_retransmit_frames() == [frames[0]]
+        assert link.timeouts == 1
+
+    def test_originals_arriving_late_undo_the_cut_and_measure_the_path(self):
+        link, frames = self._window()
+        link.get_retransmit_frames()
+        assert link._cwnd < 512 * 1024.0
+        link.process_ack(_seq_of(frames[0]), 0)
+        link.process_ack(_seq_of(frames[1]), 0)
+        assert link.spurious == 1
+        assert link._cwnd >= 512 * 1024.0
+        # frames[1] went out once, so its round trip counts and the timer
+        # comes back off its backoff.
+        assert link._srtt is not None
+        assert link._backoff == 1
+
+    def test_a_duplicate_ack_is_a_real_loss_and_the_rest_goes_without_backing_off(self):
+        link, frames = self._window()
+        link.get_retransmit_frames()
+        hole = (_seq_of(frames[0]) - 1) & 0xFFFFFFFF
+        link.process_ack(hole, 0b10)          # frames[1] arrived, frames[0] did not
+        assert link.spurious == 0
+        resent = link.get_retransmit_frames()
+        assert frames[2] in resent and frames[3] in resent
+        assert link.timeouts == 1             # the same loss, not a new one
+
+    def test_frames_held_back_by_a_timeout_do_not_back_the_timer_off(self):
+        """The frames a window too small to resend at once held back came due
+        a round later and doubled the timer each time, until it sat at its
+        ceiling."""
+        link, frames = self._window(n=20, cwnd=64 * 1024.0)
+        link.get_retransmit_frames()
+        backoff = link._backoff
+        link.process_ack((_seq_of(frames[0]) - 1) & 0xFFFFFFFF, 0b10)
+        for _ in range(4):
+            for entry in link._unacked.values():
+                if not entry.resent:
+                    entry.deadline = 0.0
+            link.get_retransmit_frames()
+        assert link.timeouts == 1
+        assert link._backoff <= backoff
+
+    def test_a_lost_resend_backs_off_again(self):
+        link, frames = self._window()
+        link.get_retransmit_frames()
+        rto = link._rto
+        _expire_all(link)
+        assert frames[0] in link.get_retransmit_frames()
+        assert link.timeouts == 2
+        assert link._rto > rto
+        assert link._frto == 0
+
+    def test_a_window_that_empties_keeps_the_backoff_until_a_measurement(self):
+        """Emptying the window put the timer back on the estimate that had just
+        fired too early, without anything having been measured."""
+        link, frames = self._window(n=1)
+        link.get_retransmit_frames()
+        backed_off = link._rto
+        link.process_ack(_seq_of(frames[0]), 0)
+        assert not link._unacked
+        assert link._rto == backed_off
+        fresh = link.build_frame(make_packet(b"g"))
+        link.process_ack(_seq_of(fresh), 0)
+        assert link._backoff == 1
+
+
 class TestTheTwoHalvesAgreeOnTheSack:
     """Each half was tested alone, against its own idea of what bit ``i`` names,
     and the two ideas were one apart: the receiver set bit ``i`` for

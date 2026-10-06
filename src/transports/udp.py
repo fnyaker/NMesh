@@ -209,6 +209,13 @@ class _ReliableLink:
         self._cwnd: float = float(_CWND_INITIAL)
         self._ssthresh: float = float(_CWND_MAX)
         self._recover: int = self._send_seq
+        # F-RTO (RFC 5682). A timeout resends the oldest frame alone, then the
+        # next two ACKs say whether anything was lost: 1 waits for the first
+        # one that moves the cursor, 2 for the second. `_undo` holds what the
+        # window and threshold were before the timeout cut them, for the case
+        # where it answered no loss at all.
+        self._frto: int = 0
+        self._undo: tuple[float, float] | None = None
 
         # Receive side. Set from the first frame that arrives, so the peer's
         # random initial sequence is adopted rather than assumed to be zero.
@@ -231,6 +238,8 @@ class _ReliableLink:
         # Times the oldest frame ran out its timer — the event that drops the
         # window to its floor, and the one that says a path stopped carrying.
         self.timeouts: int = 0
+        # Timeouts F-RTO found spurious: the originals were only late.
+        self.spurious: int = 0
 
     # -- send side --------------------------------------------------------
 
@@ -328,6 +337,7 @@ class _ReliableLink:
         """
         now = time.monotonic()
         acked = 0
+        advanced = 0
         # Sequence numbers are issued in order, so `_unacked` is in order too:
         # the cumulative ack clears a *prefix*. Walking the whole window (and
         # copying its key list) on every incoming frame was O(window) per
@@ -336,6 +346,7 @@ class _ReliableLink:
             if ((ack - s) & 0xFFFFFFFF) >= _MAX_UNACKED:
                 break
             acked += self._acknowledge(self._unacked.pop(s), now)
+            advanced += 1
 
         # Selective ACK: bits indicate seqs received above the cumulative ack
         base = (ack + 1) & 0xFFFFFFFF
@@ -346,14 +357,58 @@ class _ReliableLink:
                     if entry is not None:
                         acked += self._acknowledge(entry, now)
 
+        if self._frto:
+            self._frto_step(advanced, sack, now)
         if acked:
             self._grow(acked)
-        if not self._unacked:
-            self._backoff = 1
-            self._rto = self._rto_base
         if acked or not self._unacked:
             self._room.set()
         return self._fast_retransmit(base, sack, now) if sack else []
+
+    def _frto_step(self, advanced: int, sack: int, now: float) -> None:
+        """Decide a timeout from the ACKs that follow it (RFC 5682).
+
+        Only the oldest frame went out again, so every other frame of the
+        window is an original. An ACK that moves the cursor twice running is
+        those originals arriving: the timer fired on a late path, not a lossy
+        one, the cut is undone, and their round trips — which Karn's rule
+        allows, since they were sent once — teach the estimate how late the
+        path is. A duplicate ACK at either step says a frame really is missing,
+        and the rest of the window is resent as before.
+
+        Without this a path that grew slower than the timer was resent whole
+        on every timeout, no frame could be timed, and the estimate stayed on
+        the idle round trip while the timer backed off to its ceiling: 30 ms
+        measured, 1.6 s waited, on a link a speed test had just filled."""
+        if not advanced:
+            if sack:
+                self._frto_lost(now)
+            return
+        if self._frto == 1 and self._outstanding_before_recover():
+            self._frto = 2
+            return
+        if self._frto == 2:
+            self.spurious += 1
+            if self._undo is not None:
+                self._cwnd = max(self._cwnd, self._undo[0])
+                self._ssthresh = max(self._ssthresh, self._undo[1])
+        self._frto = 0
+        self._undo = None
+
+    def _frto_lost(self, now: float) -> None:
+        """A real loss after all: what the timeout held back goes now."""
+        self._frto = 0
+        self._undo = None
+        for seq, entry in self._unacked.items():
+            if not entry.resent and self._before_recover(seq):
+                entry.deadline = now
+
+    def _before_recover(self, seq: int) -> bool:
+        """Was ``seq`` sent before the last reduction of the window?"""
+        return ((seq - self._recover) & 0xFFFFFFFF) >= 0x80000000
+
+    def _outstanding_before_recover(self) -> bool:
+        return any(self._before_recover(seq) for seq in self._unacked)
 
     def _acknowledge(self, entry: _Sent, now: float) -> int:
         """Retire one frame; time it if its round trip means anything."""
@@ -364,7 +419,11 @@ class _ReliableLink:
 
     def _sample(self, rtt: float) -> None:
         """RFC 6298, with a floor of `_RTO_MIN` rather than a second: a mesh
-        link across a room must not wait a second to resend."""
+        link across a room must not wait a second to resend.
+
+        The only thing that brings a backed-off timer back down. A window that
+        merely emptied says nothing about the path: resetting there put the
+        timer back on the very estimate that had just fired too early."""
         rtt = max(0.0, rtt)
         if self._srtt is None:
             self._srtt, self._rttvar = rtt, rtt / 2
@@ -391,8 +450,9 @@ class _ReliableLink:
         overflowing, and halving twenty times is what used to collapse the
         link. A timeout of the oldest frame is the stronger signal and drops
         the window to its floor, as TCP does."""
-        if ((seq - self._recover) & 0xFFFFFFFF) >= 0x80000000:
+        if self._before_recover(seq):
             return                    # sent before the last reduction
+        self._undo = (self._cwnd, self._ssthresh)
         self._ssthresh = max(self._cwnd / 2, float(_CWND_MIN))
         self._cwnd = float(_CWND_MIN) if timeout else self._ssthresh
         self._recover = self._send_seq
@@ -426,7 +486,14 @@ class _ReliableLink:
         second ceiling in one pass, and every frame after it then waited two
         seconds. What is resent at once is bounded by the congestion window
         too; the rest waits its turn rather than refilling the queue that has
-        just overflowed."""
+        just overflowed.
+
+        A first timeout resends the oldest frame **alone** and leaves the rest
+        to the ACKs that follow (`_frto_step`). A frame of a loss event already
+        being recovered running out its timer is that recovery, not a new
+        timeout: it neither counts nor backs off again, or the frames a window
+        too small to resend at once had to hold back doubled the timer once
+        per round until it sat at its ceiling."""
         if not self._unacked:
             return []
         now = time.monotonic()
@@ -436,10 +503,23 @@ class _ReliableLink:
         if not expired:
             return []
         if expired[0][0] == oldest:
-            self.timeouts += 1
-            self._loss(oldest, timeout=True)
-            self._backoff = min(self._backoff * 2, 64)
-            self._rto = min(_RTO_MAX, self._rto_base * self._backoff)
+            first = self._unacked[oldest]
+            if first.resent or not self._before_recover(oldest):
+                self.timeouts += 1
+                self._backoff = min(self._backoff * 2, 64)
+                self._rto = min(_RTO_MAX, self._rto_base * self._backoff)
+                if not first.resent:
+                    self._loss(oldest, timeout=True)
+                    self._frto = 1
+                    for _, entry in expired:
+                        entry.deadline = now + self._rto
+                    first.resent = True
+                    self.retransmits += 1
+                    return [first.frame]
+            # The resend itself was lost, or the frames held back by the
+            # timeout came due before the ACKs decided: a loss either way.
+            self._frto = 0
+            self._undo = None
         frames: list[bytes] = []
         budget = max(self._cwnd, float(len(expired[0][1].frame)))
         for seq, entry in expired:
@@ -714,6 +794,7 @@ class UDPTransport(BaseTransport):
             "in flight kB": round(link._inflight / 1024),
             "keepalive misses": link._keepalive_misses,
             "timeouts": link.timeouts,
+            "spurious timeouts": link.spurious,
             "undecodable": self.undecodable,
         }
 

@@ -3001,3 +3001,69 @@ over, but a grant meaning more than it says.
 is now its own grant (`apps`, or `full`), so `govern` keeps exactly the reach
 its row in the fleet's table describes.
 
+---
+
+## 61 — high — A UDP timer that could only learn that the path was fast
+
+> **Status — fixed.** F-RTO (RFC 5682): a first timeout resends the oldest
+> frame alone and the next two ACKs decide; held-back frames neither count as a
+> new timeout nor back off again; the backoff comes down only on a measurement.
+> Tests: `tests/test_udp_transport.py::TestATimeoutOnALatePathIsFoundOut`.
+
+**Where** — `src/transports/udp.py`, `get_retransmit_frames`, `process_ack`.
+
+**What happens** — once a path's round trip grew past the timer, a timeout
+resent every frame in flight, Karn's rule then forbade timing any of them, and
+the estimate stayed on the idle round trip while the timer backed off to its
+ceiling. Seen live around two speed tests (107 and 340 kB/s, 28 % and 4.4 % of
+the probes over two seconds, where TCP on the same path carried ~1 MB/s with
+none lost): `srtt` 29 ms beside `rto` 1 600 ms on the same link.
+
+**Reproduce** — `_ReliableLink`, five frames in flight, expire them all:
+`get_retransmit_frames()` returned all five, and acknowledging them timed none.
+
+**Not proved** — that this alone made the 107 kB/s: a model of the path
+without host stalls or fragment loss does not collapse with the old code
+either. 63 is the other suspect.
+
+---
+
+## 62 — medium — A machine that slept kept links its peers had dropped
+
+> **Status — fixed.** `node._check_slept` compares `CLOCK_BOOTTIME` with
+> `CLOCK_MONOTONIC` on every keepalive wake and ends every link after a sleep
+> longer than `_SLEEP_ENDS_LINKS`. Tests:
+> `tests/test_reconnect.py::TestAMachineThatSlept`.
+
+**Where** — `src/node.py`, every liveness timer (they run on the monotonic
+clock, which stops during a suspend).
+
+**What happens** — seen live after a 6 872 s suspend: two UDP links black-holed
+traffic for 96 s (`unacked` 244, send queue full, `FIND_NODE` refused as busy)
+and a TCP link for 60 s, until each one's horizon ran out from the wake.
+
+**Reproduce** — suspend a node with links for longer than two minutes, resume,
+and read `logs.query --contains "link dropped"`: the reasons are keepalive and
+read timeouts more than a minute after the wake.
+
+---
+
+## 63 — medium — One UDP frame per mesh packet, fragmented by IP (open)
+
+**Where** — `src/transports/udp.py`: a frame carries one whole packet, up to
+`_MAX_PAYLOAD` (60 000 bytes).
+
+**What happens** — a 16 kB speed-test probe is one datagram of about twelve IP
+fragments. Losing any one loses the frame, so the frame's loss rate is that of
+a fragment multiplied by twelve, and some networks drop fragments outright. TCP
+segments at the MSS and never sees it — which fits a path where TCP lost
+nothing and UDP lost a third of its probes.
+
+**Reproduce** — a path model with 2 % loss per 1 472-byte fragment: 16 kB frames
+carry ~340 kB/s, 1 200-byte frames ~660 kB/s, on the same link.
+
+**Fixing it without breaking something** — the reliability layer has to split a
+packet across frames under the path MTU and reassemble it, bounded like the
+reorder buffer. It changes the wire format, so it must be negotiated per link
+and an old peer must keep the current framing.
+

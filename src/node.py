@@ -129,6 +129,18 @@ for _part in (_messages, _constants, _codecs, _peers):
 del _part, _name
 
 
+def _slept_total() -> float | None:
+    """Seconds this machine has spent asleep since it booted, or None where
+    there is no clock that keeps counting through a sleep.
+
+    Both clocks are read by name: a test that pins ``time.monotonic`` must not
+    look like a machine that slept."""
+    try:
+        return (time.clock_gettime(time.CLOCK_BOOTTIME)
+                - time.clock_gettime(time.CLOCK_MONOTONIC))
+    except (AttributeError, OSError):
+        return None
+
 
 # Field names a medium's note may not use: the line's own.
 _NOTE_RESERVED = frozenset({"message", "source", "level", "topic", "node", "link"})
@@ -544,6 +556,9 @@ class MeshNode:
         # uptime. A node started on a freshly booted machine therefore missed
         # the one thing this mechanism exists to catch.
         self._last_loss_burst: float | None = None
+        # The time this machine had spent asleep when last looked at
+        # (`_check_slept`).
+        self._slept_mark: float | None = _slept_total()
         # Source node id -> (authenticated local first hop it reached us over,
         # observation time). Learned from inbound traffic only, so it records a
         # path that provably carried a packet; no remote relay identities are
@@ -1757,6 +1772,7 @@ class MeshNode:
         while self._running:
             await self._keepalive_sleep(next_sweep)
             job.ran()
+            self._check_slept()
             now = time.monotonic()
             slots = self._neighbor_slots()
             peers = sorted(self._peers,
@@ -4022,6 +4038,37 @@ class MeshNode:
         # best link, which is exactly the list a bundle exists to widen again.
         return self._stripe(target, peers[:_ROUTE_SEND_FANOUT], exclude)
 
+    def _check_slept(self) -> None:
+        """End every link if this machine just slept past their far ends.
+
+        The monotonic clock every timer here runs on stops while the machine
+        sleeps; the boot clock does not, and the gap between the two grows by
+        exactly the time spent asleep. A laptop woken after two hours held a
+        UDP link that looked a second old, sent everything down it for 96 s to
+        a node that had forgotten it, and found out only when the link's own
+        keepalive horizon ran out — a horizon measured, again, from the wake.
+
+        Past `_SLEEP_ENDS_LINKS` there is nothing to probe: the far ends have
+        already let these links go, so they are ended here as the losses they
+        are, and the reconnect book dials the nodes again at once. Where the
+        boot clock does not exist this does nothing, and the links time out as
+        they always did."""
+        total = _slept_total()
+        if total is None:
+            return
+        mark, self._slept_mark = self._slept_mark, total
+        if mark is None or total - mark < _SLEEP_ENDS_LINKS:
+            return
+        slept = total - mark
+        peers = list(self._peers)
+        self.log("the machine slept: its links are gone at the far end",
+                 source="node", level=logbook.WARN, topic="link",
+                 slept_s=round(slept), links=len(peers))
+        for peer in peers:
+            self._end_link(peer, f"this machine slept {slept:.0f} s, past the far end's"
+                                 " horizon for a silent link")
+        self._poke_net("woke-from-sleep", urgent=True)
+
     def _drop_failed_peer(self, peer: _Peer, exc: BaseException | None = None) -> None:
         """A send to this peer failed: take it out of routing *now*, tear the
         link down in the background.
@@ -4036,7 +4083,12 @@ class MeshNode:
         reason = "a send failed"
         if exc is not None:
             reason += f": {type(exc).__name__} {' '.join(str(exc).split())[:80]}"
-        self._log_link_end(peer, reason.strip())
+        self._end_link(peer, reason.strip())
+
+    def _end_link(self, peer: _Peer, reason: str) -> None:
+        """Out of routing now, torn down in the background, chased if it was
+        a node's link. Never awaits: callers are receive loops and timers."""
+        self._log_link_end(peer, reason)
         if peer in self._peers:
             self._peers.remove(peer)
         self._forget_hints_via(peer.authenticated_id)
