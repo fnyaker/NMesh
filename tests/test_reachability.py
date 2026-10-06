@@ -67,6 +67,14 @@ class TestIPClassifier:
                                 confirmed=False)
         assert all(d["scope"] != "world" for d in descs)
 
+    def test_link_local_is_no_audience(self):
+        """The rule the listener's expansion already followed: without this
+        machine's zone id, nobody can dial a link-local address."""
+        descs = ip_reachability("tcp", "tcp://0.0.0.0:9000",
+                                local_ips=["fe80::1", "169.254.7.7", "10.0.0.2"],
+                                public_addrs=[], confirmed=True)
+        assert [d["address"] for d in descs] == ["tcp://10.0.0.2:9000"]
+
     def test_bad_uri_yields_nothing(self):
         assert ip_reachability("tcp", "garbage", ["8.8.8.8"], [], True) == []
 
@@ -106,6 +114,30 @@ class TestNodeReachability:
             scopes = {d["scope"] for d in descs}
             assert "world" in scopes and "lan" in scopes
             assert all(d["transport"] == "tcp" for d in descs)
+        finally:
+            await node.stop()
+
+    async def test_what_leaves_for_the_lan_is_dialable_and_primary_first(self):
+        """A LAN ticket and a LAN beacon answer read these descriptors. They
+        carried link-local addresses, and — kept to eight — the Docker bridges
+        that sorted ahead of the real LAN address."""
+        from src.transport_manager import TransportManager
+        from src.tcp_transport import TCPTransport, TCPServer
+        m = TransportManager()
+        m.register("tcp", TCPTransport, TCPServer)
+        node = MeshNode(transport_manager=m)
+        await node.start(["tcp://0.0.0.0:0"])
+        try:
+            node._local_ips = (["192.168.1.20"]
+                               + [f"172.{n}.0.1" for n in range(17, 30)]
+                               + ["fe80::1"])
+            node._inbound_schemes.add("tcp")
+            endpoints = node.local_endpoints()
+            assert endpoints[0].startswith("tcp://192.168.1.20:")
+            assert not any("fe80" in e for e in endpoints)
+            relay = node._lan_relay_addrs()
+            assert relay[0].startswith("tcp://192.168.1.20:")
+            assert not any("fe80" in a for a in relay)
         finally:
             await node.stop()
 

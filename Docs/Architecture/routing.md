@@ -638,7 +638,15 @@ B↔C is Wi-Fi…").
   means something only with this machine's zone id, so a peer handed it could
   only fail to dial — once per address, and a host running containers has one
   per virtual interface. A concrete link-local listen URI is the operator's
-  word and is kept.
+  word and is kept. The rule is `ip_utils.advertisable_ips`, and the
+  reachability descriptors (`ip_reachability`, which LAN tickets and LAN
+  discovery answers read) apply the same one: two places that publish an
+  address, one rule.
+- **The order is the order peers dial in.** `local_ip_addresses()` puts the
+  addresses the default routes leave from first and sorts the rest after them.
+  Sorted alone, a host on `192.168.x` with Docker advertised eleven `172.x`
+  bridges ahead of the one address its neighbours could reach, and
+  `_lan_relay_addrs()`, which keeps eight, dropped that one entirely.
 - The **PING carries `advertised_uris`**; `_handle_ping` does
   `_routing.add(src, valid_uris, dsa_pub)` (a merge) and answers PONG.
   `_validate_uri` filters before adding ("reject by default").

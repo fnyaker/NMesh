@@ -88,7 +88,14 @@ def is_wildcard(host: str) -> bool:
 
 
 def local_ip_addresses(include_loopback: bool = False) -> list[str]:
-    """Best-effort list of the host's own IP addresses (v4 and v6)."""
+    """Best-effort list of the host's own IP addresses (v4 and v6).
+
+    The addresses the default routes leave from come **first**, the rest
+    sorted after them. Order is what a peer dials in, and what a capped list
+    (`MeshNode._lan_relay_addrs` keeps eight) keeps: sorted alone, a host on
+    ``192.168.x`` with Docker put its eleven ``172.x`` bridges ahead of the one
+    address its neighbours could reach, and dropped that one past the cap."""
+    primary: list[str] = []
     addrs: set[str] = set()
     for family, probe in ((socket.AF_INET, ("8.8.8.8", 80)),
                           (socket.AF_INET6, ("2001:4860:4860::8888", 80))):
@@ -96,7 +103,7 @@ def local_ip_addresses(include_loopback: bool = False) -> list[str]:
             s = socket.socket(family, socket.SOCK_DGRAM)
             try:
                 s.connect(probe)          # no packets sent; picks the outbound addr
-                addrs.add(s.getsockname()[0])
+                primary.append(s.getsockname()[0])
             finally:
                 s.close()
         except OSError:
@@ -108,12 +115,16 @@ def local_ip_addresses(include_loopback: bool = False) -> list[str]:
         pass
 
     def keep(a: str) -> bool:
-        a = a.split("%", 1)[0]  # drop scope id
         if include_loopback:
             return True
         return not (a.startswith("127.") or a == "::1")
 
-    return sorted({a.split("%", 1)[0] for a in addrs if keep(a)})
+    out: list[str] = []
+    for a in primary + sorted({a.split("%", 1)[0] for a in addrs}):
+        a = a.split("%", 1)[0]  # drop scope id
+        if keep(a) and a not in out:
+            out.append(a)
+    return out
 
 
 # Interface / network enumeration
@@ -312,11 +323,9 @@ def expand_listen_uri(uri: str, local_ips: list[str], extra: list[str] = ()) -> 
     A wildcard host becomes one URI per local address (plus ``extra``, e.g. a
     discovered public address). A concrete host is returned unchanged.
 
-    Link-local addresses (``fe80::/10``, ``169.254/16``) are left out: one is
-    only meaningful with the zone of the interface it sits on, which is this
-    machine's and not the dialler's, so a peer handed ``tcp://[fe80::…]`` can
-    only fail to connect — once per address, and a host running containers
-    has one per virtual interface."""
+    Only `advertisable_ips`: a peer handed ``tcp://[fe80::…]`` can only fail
+    to connect — once per address, and a host running containers has one per
+    virtual interface."""
     parsed = _validate_uri(uri)
     if parsed is None:
         return []
@@ -329,9 +338,7 @@ def expand_listen_uri(uri: str, local_ips: list[str], extra: list[str] = ()) -> 
         return [uri]
     out: list[str] = []
     seen: set[str] = set()
-    for ip in list(local_ips) + list(extra):
-        if _is_link_local(ip):
-            continue
+    for ip in advertisable_ips(list(local_ips) + list(extra)):
         u = f"{scheme}://{_fmt_host(ip)}:{port}"
         if u not in seen:
             seen.add(u)
@@ -344,6 +351,18 @@ def _is_link_local(ip: str) -> bool:
         return ipaddress.ip_address(ip.split("%", 1)[0]).is_link_local
     except ValueError:
         return False
+
+
+def advertisable_ips(ips) -> list[str]:
+    """The addresses of this machine worth telling anybody about, in order.
+
+    Link-local ones (``fe80::/10``, ``169.254/16``) are left out: one means
+    something only with the zone of the interface it sits on, which is this
+    machine's and not the dialler's. The one rule for every place an address
+    leaves this node — the expansion of a listener and the reachability
+    descriptors that tickets and LAN discovery read — so the two cannot
+    disagree about what is reachable."""
+    return [ip for ip in ips if not _is_link_local(ip)]
 
 
 def is_global_ip(ip: str) -> bool:
@@ -369,10 +388,10 @@ def ip_reachability(scheme: str, uri: str, local_ips: list[str],
     """Reachability descriptors for an IP-based listener (tcp/udp).
 
     Globally-routable addresses (a real public IP, or a discovered reflexive
-    one) map to scope ``world``; RFC1918/link-local addresses map to scope
-    ``lan`` anchored by our public IP — so *our* ``192.168.0.0/24`` is a
-    different audience from the neighbour's identical range behind another
-    public IP.
+    one) map to scope ``world``; RFC1918 addresses map to scope ``lan``
+    anchored by our public IP — so *our* ``192.168.0.0/24`` is a different
+    audience from the neighbour's identical range behind another public IP.
+    Link-local addresses map to nothing (`advertisable_ips`).
 
     **Two audiences, two proofs.** ``confirmed`` is evidence the listener
     works — an inbound authenticated connection arrived on this transport —
@@ -414,7 +433,7 @@ def ip_reachability(scheme: str, uri: str, local_ips: list[str],
     for ip in public_addrs:
         if _is_global_ip(ip):
             add(ip, "world", "")
-    for ip in local_ips:
+    for ip in advertisable_ips(local_ips):
         if _is_global_ip(ip):
             add(ip, "world", "")
         else:

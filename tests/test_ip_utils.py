@@ -43,6 +43,43 @@ class TestLocalIPs:
         with_lo = local_ip_addresses(include_loopback=True)
         assert isinstance(with_lo, list)
 
+    def _host(self, monkeypatch, outbound, others):
+        """A machine whose default routes leave from ``outbound`` and whose
+        hostname resolves to ``others`` — no real socket opened."""
+        import socket as socket_module
+        routes = iter(outbound)
+
+        class Probe:
+            def __init__(self, *_a): self._addr = None
+            def connect(self, _probe):
+                self._addr = next(routes, None)
+                if self._addr is None:
+                    raise OSError("no route")
+            def getsockname(self): return (self._addr, 0)
+            def close(self): pass
+
+        monkeypatch.setattr(socket_module, "socket", Probe)
+        monkeypatch.setattr(socket_module, "getaddrinfo",
+                            lambda *_a: [(0, 0, 0, "", (ip, 0)) for ip in others])
+
+    def test_the_address_the_default_route_uses_comes_first(self, monkeypatch):
+        """Sorted alone, a 192.168 LAN came after every 172.x Docker bridge:
+        peers dialled the bridges first, and a list capped at eight lost it."""
+        bridges = [f"172.{n}.0.1" for n in range(17, 30)]
+        self._host(monkeypatch, ["192.168.1.20"], bridges + ["192.168.1.20"])
+        ips = local_ip_addresses()
+        assert ips[0] == "192.168.1.20"
+        assert ips[1:] == sorted(bridges)
+
+    def test_each_address_once_and_no_scope_id(self, monkeypatch):
+        self._host(monkeypatch, ["10.0.0.5", "fd00::5"],
+                   ["10.0.0.5", "fe80::1%eth0", "fd00::5", "127.0.0.1"])
+        assert local_ip_addresses() == ["10.0.0.5", "fd00::5", "fe80::1"]
+
+    def test_with_no_route_it_is_the_sorted_list(self, monkeypatch):
+        self._host(monkeypatch, [], ["10.0.0.9", "10.0.0.2"])
+        assert local_ip_addresses() == ["10.0.0.2", "10.0.0.9"]
+
 
 class TestExpand:
     def test_wildcard_v4_expands(self):
