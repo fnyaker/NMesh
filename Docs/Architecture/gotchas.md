@@ -124,6 +124,24 @@ The pair, never the address alone: in the trace the address was perfectly good �
 for the node that actually answers there. Holding it against everyone would have
 cut us off from the machine we could reach.
 
+### …and the gossip did not stop
+`WRONG_ADDRESS_TTL` assumed the gossip that taught us a wrong address stops
+repeating it. Between two nodes behind one public IP it never does: each keeps
+advertising it. A live node dialled the same `(node, address)` pair every ten
+minutes, to the second, and each dial cost more than a handshake: the answer
+came from a node we already had a link to, so the link **came up** as one to
+that node — `link up`, a catch-up burst of every announce we hold, each way —
+and was closed as redundant a tenth of a second later. The dial's clean-up
+then stopped the link it had opened without a line in the log, so a healthy
+link to a live node seemed to vanish (`BUGSVULNS.MD` 64, 65).
+
+Now a dial carries the id it is for (`_Peer.expected_id`) and
+`_handle_handshake_ack` refuses an answer from anybody else before the link
+counts; `_wait_for_peer_authenticated` gives up the moment another identity has
+answered instead of waiting out its timeout; and the same pair answering as the
+same node again doubles how long it is held (`WRONG_ADDRESS_TTL_MAX`). Every
+path that takes a link out of the list writes its line.
+
 ### The id that answers nobody, asked after for ever
 The same trace: one id was queried in every lookup round of the whole capture
 and never appeared as the source of a single packet. Every answer from every

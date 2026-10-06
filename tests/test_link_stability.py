@@ -20,6 +20,8 @@ Four defects lined up behind that, and each is held here:
   apart. Both now name the link (``L17/udp``) and the log says why it ended.
 """
 import asyncio
+import base64
+import json
 import socket
 import time
 
@@ -560,6 +562,50 @@ class TestTheLogSaysWhy:
         lines = _lines(node, "busy")
         assert len(lines) == 2
         assert lines[0]["fields"]["folded"] == 4      # newest first
+        await node.stop()
+
+
+class TestNoLinkEndsWithoutALine:
+    """A link to a live node vanished from the console with no "link dropped"
+    at all: the dial that had opened it reached a different node than the one
+    it was for, and its clean-up stopped the link without a word. Every path
+    that takes a link out of the list says so."""
+
+    async def test_a_dial_that_reached_somebody_else(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        node.logs.hold()
+
+        async def answered_elsewhere(peer, want, timeout):
+            peer.answered_as = NodeID(b"\x33" * 20)
+            return False
+        node._wait_for_peer_authenticated = answered_elsewhere
+        await node._dial_uri(TARGET, "fake://h:1", 0.5)
+        [line] = _lines(node, "unauthenticated link ended")
+        assert line["fields"]["reason"] == "the dial did not reach the node it was for"
+        await node.stop()
+
+    async def test_a_node_the_operator_forgets(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        node.logs.hold()
+        _authed(node, TARGET)
+        await node.console_forget_node(TARGET.raw.hex())
+        [line] = _lines(node, "link dropped")
+        assert line["fields"]["reason"] == "the operator forgot this node"
+        await node.stop()
+
+    async def test_a_join_that_failed(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        node._join_try_timeout = 0.05
+        node.logs.hold()
+        block = base64.b64encode(json.dumps(
+            {"v": 1, "code": "c" * 10, "uris": ["fake://a:1"]}).encode()).decode()
+        node.console_join_block(block)
+        await asyncio.wait_for(node._join_task, 5.0)
+        [line] = _lines(node, "unauthenticated link ended")
+        assert line["fields"]["reason"] == "the join through this address failed"
         await node.stop()
 
 

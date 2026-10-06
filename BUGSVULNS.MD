@@ -3067,3 +3067,38 @@ packet across frames under the path MTU and reassemble it, bounded like the
 reorder buffer. It changes the wire format, so it must be negotiated per link
 and an old peer must keep the current framing.
 
+---
+
+## 64 — medium — An address shared by two nodes cost a whole link every ten minutes
+
+> **Status — fixed.** A dial refuses, at the handshake, an answer from any node
+> but the one it was for (`_Peer.expected_id`), and gives up waiting the moment
+> one has answered; the same `(node, address)` pair answering as the same node
+> again is held twice as long, up to `WRONG_ADDRESS_TTL_MAX`. Tests:
+> `tests/test_self_dial.py::TestAnAddressSharedWithAnotherNode`.
+
+**Where** — `src/routing.py` (`note_wrong_address`), `src/node.py`
+(`_dial_uri`, `_handle_handshake_ack`, `_wait_for_peer_authenticated`).
+
+**What happens** — seen live: node 2df86885 advertises the public IP it shares
+with two other nodes. Every `WRONG_ADDRESS_TTL` (600 s), to the second, the
+record expired, the next dial paid a post-quantum handshake, and the link came
+up as one to the node that owns the address — `link up`, the ~324 kB catch-up
+burst of 53 each way — to be closed as redundant 0.1 s later. Read from the
+console as constant churn on healthy links.
+
+**Reproduce** — `logs.query --contains "wrong node"`: the same pair recurs at
+600 s intervals, each next to a `link up` and a `redundant` close.
+
+---
+
+## 65 — low — A link closed by a dial's clean-up left no line in the log
+
+> **Status — fixed.** `_dial_uri`, `console_forget_node` and the join loop
+> write the link's end like every other path. Tests:
+> `tests/test_link_stability.py::TestNoLinkEndsWithoutALine`.
+
+**What happens** — seen live: a TCP link to DTrump vanished from the console
+with no `link dropped` line. It was the link a wrong-node dial had opened (64);
+its `finally` stopped it and said nothing.
+

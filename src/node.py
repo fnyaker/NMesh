@@ -1468,6 +1468,7 @@ class MeshNode:
         for peer in list(self._peers):
             if peer.authenticated_id == nid:
                 existed = True
+                self._log_link_end(peer, "the operator forgot this node")
                 try:
                     await peer.stop()
                 except Exception:
@@ -3468,6 +3469,8 @@ class MeshNode:
                 return False
             if peer.authenticated_id == target and peer.session is not None:
                 return True
+            if peer.answered_as is not None and peer.answered_as != target:
+                return False
             if asyncio.get_event_loop().time() >= deadline:
                 return False
             await asyncio.sleep(_AUTH_POLL_INTERVAL)
@@ -4475,6 +4478,7 @@ class MeshNode:
                 transport = await self._transport_manager.connect(uri)
                 peer = self._new_peer(transport, is_client_side=True)
                 peer.probation = probe   # set before the handshake can complete
+                peer.expected_id = node_id
                 peer.remote_addr = uri
                 self._peers.append(peer)
                 await peer.start(self._handle_packet)
@@ -4515,6 +4519,7 @@ class MeshNode:
                             type(exc).__name__, time.monotonic() - started)
         finally:
             if peer is not None and not authenticated:
+                self._log_link_end(peer, "the dial did not reach the node it was for")
                 try:
                     await peer.stop()
                 except Exception:
@@ -6859,6 +6864,7 @@ class MeshNode:
                     return
                 except Exception as exc:
                     if peer is not None:
+                        self._log_link_end(peer, "the join through this address failed")
                         try:
                             await peer.stop()
                         except Exception:
@@ -11827,6 +11833,15 @@ Hints come first (the ``have`` byte on an announce, from an
             # would still leave this half holding a link whose authenticated id
             # is our own, which every count of "nodes connected" would believe.
             return self._refuse_handshake(packet, "the identity presented is our own")
+        if peer.expected_id is not None and server_id != peer.expected_id:
+            # We dialled one node and another answered — two nodes behind one
+            # public IP, most often. The dialler drops this link either way; it
+            # used to do so only after the link had come up as one to whoever
+            # answered, so every such dial cost that node a whole link: a
+            # catch-up burst each way, then a close as redundant a tenth of a
+            # second later. Ending it here costs the handshake and nothing else.
+            return self._refuse_handshake(
+                packet, "the address answered as another node than the one dialled")
 
         # Adopting a root is the one irreversible thing a handshake can do to
         # this node: from then on every chain anchored there authenticates. So
