@@ -2020,6 +2020,21 @@ class TestJobsCarryWhatTheRelayCannot:
         assert plane.call("jobs.start", {"op": "slow.hang"})["job"]
         module.done.set()
 
+    def test_the_refusal_says_what_is_holding_the_slots(self):
+        """"As many jobs as a console at a distance may run" read as a message
+        left over from something else — it was about work started earlier,
+        often by a page already closed — and it stood between an operator and
+        the update check with nothing saying what to wait for."""
+        plane, module = _slow_plane()
+        for _ in range(jobs_mod.MAX_RUNNING_REMOTE):
+            plane.call("jobs.start", {"op": "slow.hang"}, origin=Origin.REMOTE)
+        with pytest.raises(ControlError) as raised:
+            plane.call("jobs.start", {"op": "slow.hang"}, origin=Origin.REMOTE)
+        message = raised.value.message
+        assert message.count("slow.hang") == jobs_mod.MAX_RUNNING_REMOTE
+        assert "s more" in message and "Try again" in message
+        module.done.set()
+
     def test_a_job_that_outlives_its_ceiling_is_given_up_on(self):
         """Abandoned, never joined — the thread is let go exactly as a wedged
         console call is (`Docs/Architecture/gotchas.md`), and its slot with it,
@@ -2120,6 +2135,9 @@ class TestTransfer:
         def __init__(self):
             self.published = None
             self.blob = b"a signed package" * 20000     # ~320 kB: several chunks
+
+        def package_entry(self, record):
+            return None if record == "unknown" else {"id": record}
 
         async def fetch_package(self, record):
             if record == "missing":
@@ -2337,8 +2355,30 @@ class TestTransfer:
         with pytest.raises(ControlError) as raised:
             await asyncio.to_thread(
                 plane.call, "transfer.fetch",
-                {"kind": "package", "id": "missing"})
+                {"kind": "package", "id": "unknown"})
         assert raised.value.code == "not_found"
+        assert "no such record" in raised.value.message
+
+    async def test_a_record_whose_bytes_never_came_says_so(self):
+        """"No such package" about a package listed on the page sent people
+        looking for a typo. The record is here; nobody holding it sent it."""
+        plane = self._plane(self._Node())
+        with pytest.raises(ControlError) as raised:
+            await asyncio.to_thread(
+                plane.call, "transfer.fetch",
+                {"kind": "package", "id": "missing"})
+        assert raised.value.code == "unavailable"
+        assert "holding this package" in raised.value.message
+
+    def test_a_package_download_may_take_longer_than_a_minute(self):
+        """The descriptor, then a slice per round trip, and a slice timeout for
+        every holder that does not answer: sixty seconds was the descriptor
+        alone on a bad day, and the download arrived as "the node did not
+        answer" about a node busy fetching it."""
+        from src.control.modules import transfer as transfer_mod
+        fetch = next(entry for entry in TransferModule.OPERATIONS
+                     if entry["name"] == "fetch")
+        assert fetch["timeout"] >= transfer_mod._FETCH >= 180.0
 
     async def test_committing_nothing_is_refused_rather_than_published(self):
         plane = self._plane(self._Node())

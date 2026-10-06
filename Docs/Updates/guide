@@ -726,6 +726,23 @@ hops away — then the peers we happen to have. Bounded by `_RELEASE_ASK_MAX`. A
 node that does not have it costs one round trip and says nothing, which is
 cheaper than assuming.
 
+**The descriptor goes the same way** (`_descriptor_for`): before the DHT, the
+node that filed the record is asked for it, then up to
+`_DESCRIPTOR_HOLDERS_ASKED` other holders, and a value is kept only if it hashes
+to the key the record signed. Publishing keeps the descriptor in the publisher's
+own store and nowhere else until the directory sweep replicates it — up to
+`_DIR_REPUBLISH` later — while the record pointing at it travels at once. Asking
+the DHT alone asked the nodes closest to the key and never the one that had just
+signed "I hold this and I serve it": a package was listed on its node's page and
+could not be fetched for a quarter of an hour after every publication.
+
+**Downloading from a console** (`transfer.fetch`, kind `package`) has
+`_FETCH` (180 s): the descriptor, then a slice per round trip, and a slice
+timeout for each holder that does not answer. It used to have sixty seconds, and
+a download that ran out arrived as "the node did not answer". Its refusals now
+say which of two things went wrong — *this node holds no such record*, or *none
+of the nodes holding this package sent it*.
+
 
 - `RELEASE_FETCH` — `release_id(20) ‖ offset(4)`, routed, so a holder several
   hops away is reachable;
@@ -957,7 +974,7 @@ used to start the node and forget it).
 | POST | `/api/releases/endorse` | `{publisher_id, endorsed}` — let its signature count towards `release_quorum` |
 | GET | `/api/packages?q=…[&wide=1]` | ask the directory for a name — `wide` also asks the network |
 | GET | `/api/packages?node=<id>[&wide=1]` | what that node publishes or recommends |
-| GET | `/api/packages/<id>[?fetch=1]` | one record; `fetch` also pulls the descriptor it points at |
+| GET | `/api/packages/<id>[?fetch=1]` | one record; `fetch` also pulls the descriptor it points at. The console's own card reads the record alone (`packages.entry`): it draws nothing from the descriptor, and fetching it made opening a package a job on a node driven from elsewhere |
 | GET | `/api/packages/<id>/download` | the verified package, as an opaque `tar.gz` |
 | POST | `/api/packages/install` | `{id, confirm:true}` → fetch, verify, install |
 | POST | `/api/packages/trust` | `{id, confirm:true, auto?, endorsed?}` — pin the key that **signed the release**, carried in the record's publication proof. What it is accepted for follows the record's kind: node software pins a key that may replace this program, an app pins a party to that app. **400** for a record from a node that only holds the bytes: pinning a mirror would hand the machine to whoever handed you a copy |

@@ -1759,6 +1759,81 @@ fault, and every one of its tests fails on the old transport.
 > A test that is lowered until it passes has measured the test. When a
 > measurement shows a medium falling over, fix the medium — and say so.
 
+## Links that came and went under load, and a log that could not say why
+
+A node working over the internet reported its links "hyper unstable, above all
+when loaded, UDP worst, TCP too". Its log held six lines — `link dropped`, an
+id, an address — and its trace showed two things: one link to a peer answering
+**nothing** for a quarter of a minute (74 `PING` out, 0 `PONG` in) while that
+peer's own probes still arrived, and then **ten seconds in which no `PING` left
+for any peer at all**. Five faults lined up behind those two pictures.
+
+### A FIN that refreshed the link it ended
+`_process_frame` handed a FIN to `process_incoming`, which records an arrival
+for every frame that is not data. A FIN therefore *renewed* the liveness it
+announced the end of, and the side that missed the close kept the link. Then
+the far end made it worse: our next frames came from an address whose transport
+it had just closed, so `_dispatch_datagram` took them for a **new connection** —
+a fresh transport adopted our cursor, acknowledged our frames, kept us alive
+with its keepalives, and the node above it dropped every packet as
+unauthenticated. Both ends held a link that carried nothing, for as long as our
+probes took to give up (`_DEAD_LINK_SILENCE`, 80 s). Every close of a UDP link —
+a rescue's loser, a redundant twin, a tarpit let go — could leave one.
+
+A FIN now ends the link at once, believed only inside the peer's sequence
+window (the same 32-bit guess a data frame costs a spoofer), sent twice, and a
+server answers frames from a link it closed with a FIN instead of a welcome.
+`tests/test_link_stability.py::TestAFinEndsTheLink` and
+`…::TestAClosedLinkIsNotReopenedByItsOwnFrames`.
+
+> A control frame is not "an arrival with nothing in it". Each flag means
+> something, and a branch that lumps them together is a branch that does the
+> opposite of one of them.
+
+### Full is not gone
+A UDP queue that stayed full for `_SEND_WAIT` raised `ConnectionError("udp send
+queue full")` — the exception every caller reads as "the link died" — and
+`_send_to_candidates` tore the link down for it. Under load, which is precisely
+when a queue is full, a working link became a dropped link, a reconnect, a
+~400 kB catch-up of every announce the node holds (see `BUGSVULNS.MD`), and a
+congested link again. The medium now raises `LinkBusy` (not a
+`ConnectionError`), and routing tries the next candidate and keeps the link.
+
+> Two failures that call for opposite handling cannot share an exception. The
+> medium is the only one that knows which it was; make it say.
+
+### One send that waits is a wait every link pays
+The keepalive loop probes its links one after another and awaited each send
+with no bound — and a TCP send had **no bound at all** (`drain()` waits for as
+long as the peer does not read). One stuck link held every probe on every link:
+the ten silent seconds in the trace are `_SEND_WAIT`. A probe now waits
+`_KA_SEND_WAIT` (1 s) at most and expires as lost; a TCP send waits for room
+*before* writing, bounded, and raises `LinkBusy`.
+
+### A kernel buffer is a queue nobody sees
+Linux keeps up to `tcp_wmem`'s ceiling (4 MB) of unsent data per socket. A
+`PONG` queued behind that on a 1 MB/s uplink arrives four seconds late — after
+the three-second deadline that counts it lost. A TCP link carrying a big
+transfer therefore *looked* lossy, got benched by MLO, and got "rescued" by a
+fresh idle link that won the comparison and closed the loaded one mid-transfer.
+`unsent_limit` (`TCP_NOTSENT_LOWAT`, 128 kB) keeps the backlog in the node's own
+buffer, where `send` sees it and pushes back. The kernel's own counters
+(`TCP_INFO`: round trip, retransmissions, lost) are now in `stats()`, so a path
+that really is lossy is told apart from one that is only full.
+
+### An export that kept the newest two fifths
+`Trace.export` said "everything held" and returned `events(limit=2000)` — the
+page size of a screen. A 5 000-event trace exported the newest 2 000 and said
+nothing about the rest, which is the opening of the incident. It now exports
+everything to a page on this machine and, to a console driving the node from
+elsewhere (a reply there is capped at `frame.MAX_REPLY`), the newest that fit,
+with `omitted` saying how many did not.
+
+### …and the log that would have said all of this
+Every one of these was invisible from the node: it wrote two kinds of line.
+Each decision about a link now writes one where it is taken, under a label
+(``L17/udp``) the trace carries too — see `logging.md`, "What the core writes".
+
 ## A loop over blocks that assumes every block is the same
 
 `paintTransportLive` walks every transport block and, at the end of each, sets
@@ -1831,6 +1906,41 @@ heterogeneous blocks, ask the block, not the snapshot.**
 - **The shared token is not an identity.** Grants keyed by an app id the client
   merely *declared* were grants to anyone holding the shared token. Only an app's
   own token (`token_for`) is answered anything above the normal set.
+
+## A package seen on a node's page that could not be fetched
+
+Reported from a console driving another node: the package is listed on the
+publishing node's page, opening it fails, and the update check beside it is
+refused "by an old message". Three faults, one feeding the next.
+
+- **The descriptor was only asked of strangers.** Publishing keeps the signed
+  descriptor in the publisher's own store and nowhere else until the directory
+  sweep replicates it (`_DIR_REPUBLISH`, 15 min); the record pointing at it
+  travels at once. `dht_get` asks the nodes closest to the key — never the node
+  that had just signed "I hold this and I serve it". So the record resolved to
+  nothing, and each attempt spent up to six sequential `_DHT_QUERY_TIMEOUT`s
+  finding out. `_descriptor_for` asks the record's holders first.
+- **Opening a package was a job.** The card mounted with `packages.describe`
+  (background, 60 s ceiling) to fetch a descriptor it never drew. From a console
+  at a distance every background operation is a job, and such a console may run
+  **two** at once (`MAX_RUNNING_REMOTE`), each holding its slot until it ends —
+  open page or not. One package opened, "Ask the network" pressed, and the
+  update check was refused. The card now reads the record (`packages.entry`,
+  inline); downloading and installing fetch what they need when pressed.
+- **Every refusal said less than it knew.** The card said "Package not found"
+  whatever had failed; the download said "no such package" about a package on
+  screen, or "the node did not answer" once its 60 s ran out; the job refusal
+  named nothing it was waiting on. Each now says what it is: no such record, or
+  nobody holding it sent it; and which jobs hold the slots, for how long more.
+
+Two smaller ones on the same page: switching the node being driven dropped the
+offer from the last check but not its words, so "0.4.57 is available" and an
+**Install** button that did nothing stood under the new node's name; and
+"Installed X — restart the node to run it" stayed up when the node was already
+running X.
+
+> A page that starts work it does not need spends a budget somebody else on the
+> page needs. Count what a click costs *from a distance*, not only here.
 
 ## Self-update: installing is not updating
 

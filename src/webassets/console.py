@@ -4370,11 +4370,16 @@ async function refreshReleases(){
     // them; written into a status line they wiped out whatever the operator had
     // just been told, because every action on this page ends by calling this
     // function.
+    // "Installed — restart to run it" only while it is still true: the node
+    // running that very version has restarted onto it, and saying otherwise
+    // left a sentence on the page about an install that was over.
     const log = data.log || [], last = log[log.length - 1];
     const blocked = !data.updatable && !!data.reason;
+    const pending = last && last.outcome === "installed"
+      && last.version !== data.current;
     setMessage("update-standing",
       blocked ? "This install cannot update itself: " + data.reason
-      : last && last.outcome === "installed"
+      : pending
         ? "Installed " + last.version + " — restart the node to run it."
         : "", blocked);
   }catch(error){
@@ -5456,7 +5461,12 @@ CONTEXT.subscribe(() => {
   // to until the next good read — and with the interval off, for ever.
   railState("", "Reading the node…");
   RATE_NOW = {inbound:0, outbound:0};
-  MAP_NAMES = {}; MAP_PICK = null; UPDATE_OFFER = null;
+  MAP_NAMES = {}; MAP_PICK = null; UPDATE_OFFER = null; UPDATE_BRANCH = "";
+  // …and what was said about that offer. The offer was dropped and its words
+  // were not: the last machine's "0.4.57 is available" stood under this one's
+  // name with an Install button beside it that, its offer gone, did nothing.
+  setMessage("update-status", ""); setMessage("update-standing", "");
+  $("update-notes").hidden = true; $("update-apply").hidden = true;
   TRANSPORT_FORM = []; TRANSPORT_LIVE = {}; CONFIG_FIELDS = [];
   stopTracePolling();
   // The log on screen is that machine's: start again from the new one's end.
