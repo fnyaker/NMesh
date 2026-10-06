@@ -501,10 +501,17 @@ INDEX_HTML = """<!doctype html>
       <nav class="subnav" role="tablist" aria-label="App views">
         <button role="tab" data-subtab="installed" aria-selected="true">Installed</button>
         <button role="tab" data-subtab="store" aria-selected="false">Find an app</button>
+        <button role="tab" data-subtab="api" aria-selected="false">Internal API</button>
       </nav>
 
       <div data-sub="installed" class="stack">
         <div id="builtin-apps" class="cards"></div>
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Connected apps</h2>
+            <div class="sub">Apps outside this node's own code that asked for permissions — attached
+              to its data connector, or installed with a manifest</div></div></div>
+          <div class="card-body tight"><div id="attached-apps"></div></div>
+        </article>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Local packages <span id="installed-count" class="badge"></span></h2>
             <div class="sub">Fetched from the mesh and unpacked on this node</div></div>
@@ -514,6 +521,65 @@ INDEX_HTML = """<!doctype html>
             <thead><tr><th>App</th><th>Version</th><th>Id</th><th class="tight"></th></tr></thead>
             <tbody id="installed-list"></tbody></table></div>
             <div id="installed-pager" class="pager"></div></div>
+        </article>
+      </div>
+
+      <div data-sub="api" class="stack" hidden>
+        <article class="card" id="mcp-card">
+          <div class="card-head"><div class="grow"><h2>MCP server</h2>
+            <div class="sub">This node's operations as tools for an AI client — exactly the ones
+              the MCP app was granted, and no others</div></div>
+            <span id="mcp-state" class="badge">off</span></div>
+          <div class="card-body stack">
+            <p id="mcp-off" class="muted small">The MCP app is off. Enable it on the Installed tab,
+              then grant it what it may read and do — its tools are generated from that.</p>
+            <div id="mcp-on" class="stack" hidden>
+              <dl class="kv">
+                <dt>Endpoint</dt><dd><code id="mcp-url" class="inline"></code></dd>
+                <dt>Listening on</dt><dd id="mcp-where"></dd>
+                <dt>Tools right now</dt><dd id="mcp-tools"></dd>
+              </dl>
+              <p id="mcp-error" class="msg error"></p>
+              <p id="mcp-exposed" class="notice warn" hidden>It listens beyond this machine. Anybody
+                who can reach that address and holds the token can do whatever the MCP app was
+                granted.</p>
+              <div class="btn-row">
+                <button id="mcp-show">Show the client configuration</button>
+                <button id="mcp-rotate" class="danger">New token</button>
+              </div>
+              <pre id="mcp-config" class="mono small" hidden></pre>
+              <details><summary>Listen elsewhere</summary>
+                <form id="mcp-form" class="form-grid">
+                  <label class="field"><span>Address</span>
+                    <input id="mcp-host" class="mono" autocomplete="off" spellcheck="false"></label>
+                  <label class="field"><span>Port</span>
+                    <input id="mcp-port" class="mono" inputmode="numeric" autocomplete="off"></label>
+                  <div class="btn-row"><button type="submit" class="primary">Apply</button></div>
+                </form>
+                <p class="muted small">127.0.0.1 keeps it on this machine. Any other address makes
+                  the node's operations reachable by whoever reaches that address with the token.</p>
+              </details>
+            </div>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card-head"><div class="grow"><h2>Endpoints <span id="api-count" class="badge"></span></h2>
+            <div class="sub">Every operation this node exposes — the console's, the apps', and the
+              routes of apps that declare none — with the permission an app needs for each</div></div>
+            <label class="search"><span class="sr-only">Search endpoints</span>
+              <input id="api-search" type="search" placeholder="Search endpoints…"></label></div>
+          <div class="card-body stack">
+            <div class="segmented" role="group" aria-label="Which endpoints">
+              <button type="button" data-api-kind="all" aria-selected="true">All</button>
+              <button type="button" data-api-kind="node" aria-selected="false">Node</button>
+              <button type="button" data-api-kind="app" aria-selected="false">Apps</button>
+              <button type="button" data-api-kind="web" aria-selected="false">App pages</button>
+            </div>
+            <p id="api-how" class="muted small"></p>
+            <div class="table-wrap"><table>
+              <thead><tr><th>Endpoint</th><th>What it does</th><th>An app needs</th><th>MCP tool</th></tr></thead>
+              <tbody id="api-rows"></tbody></table></div>
+          </div>
         </article>
       </div>
 
@@ -1095,6 +1161,24 @@ INDEX_HTML = """<!doctype html>
   </div>
 </dialog>
 
+<dialog id="perm-dialog" class="wide" aria-labelledby="perm-title">
+  <div class="sheet">
+    <header class="sheet-head"><h2 id="perm-title">Permissions</h2>
+      <button id="perm-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
+    <div class="sheet-body stack">
+      <p id="perm-intro" class="muted small"></p>
+      <div id="perm-body" class="perm-list"></div>
+      <p id="perm-msg" class="msg"></p>
+    </div>
+    <footer class="sheet-foot">
+      <button id="perm-token" hidden>Connector token</button>
+      <button id="perm-forget" class="danger" hidden>Forget this app</button>
+      <span class="grow"></span>
+      <button id="perm-done" class="primary">Done</button>
+    </footer>
+  </div>
+</dialog>
+
 <dialog id="confirm-dialog" aria-labelledby="confirm-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="confirm-title"></h2></header>
@@ -1269,9 +1353,25 @@ CONSOLE_PAGE_CSS = """
 .app-tile h3{flex:1 1 auto;min-width:0}
 .app-tile p{font-size:var(--fs-sm);color:var(--text-muted);flex:1 1 auto}
 .app-tile .btn-row{margin-top:auto}
-.app-tile .grants{display:flex;flex-wrap:wrap;gap:var(--s-2) var(--s-4);
+.app-tile .perm-sum{font-size:var(--fs-sm);color:var(--text-muted);
   padding:var(--s-2) 0;border-top:1px solid var(--border)}
-.app-tile .grants .check{font-size:var(--fs-sm);color:var(--text-muted)}
+/* One row per permission an app asked for; a child sits under its parent so
+   "readstate" and "readstate.logs" read as the whole and one part of it. */
+.perm-list{display:flex;flex-direction:column;border:1px solid var(--border);
+  border-radius:var(--r-md);overflow:hidden}
+.perm-row{display:flex;gap:var(--s-3);align-items:flex-start;padding:var(--s-3);
+  border-bottom:1px solid var(--border)}
+.perm-row:last-child{border-bottom:0}
+.perm-row.child{padding-left:calc(var(--s-3) + 26px);background:var(--surface-2)}
+.perm-row .what{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.perm-row .what .name{font-weight:620}
+.perm-row .what .why{font-size:var(--fs-sm);color:var(--text)}
+.perm-row .what .desc{font-size:var(--fs-xs);color:var(--text-muted)}
+.perm-row input{margin-top:3px}
+#api-rows td:first-child code{white-space:nowrap}
+#api-rows td:nth-child(2){min-width:16ch}
+#mcp-config{white-space:pre-wrap;word-break:break-all;padding:var(--s-3);
+  border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2)}
 /* A watched row stays one line high: the version is a hint, not the row. The
    wrapper scrolls on a narrow screen rather than squeezing the name into a
    column one character wide. */
@@ -3313,47 +3413,271 @@ function appTile(app){
   if(known && app.installed) buttons.push('<button class="danger" data-builtin-id="' +
     esc(app.id) + '" data-builtin-action="uninstall">Uninstall</button>');
   if(app.running !== false) buttons.push('<a class="btn" href="' + esc(app.path) + '">Open</a>');
+  if(app.app_id && (app.permissions || []).length) buttons.push(
+    '<button data-perm-open="' + esc(app.app_id) + '">Permissions</button>');
   return '<article class="app-tile"><div class="top">' +
     '<span class="app-ic" aria-hidden="true">' + esc((app.name || "A").slice(0, 2).toUpperCase()) +
     "</span><h3>" + esc(app.name) + "</h3>" + badge(state[0], state[1]) + "</div>" +
     "<p>" + esc(app.description || "Built-in application.") + "</p>" +
-    grantsHTML(app) +
+    permSummaryHTML(app) +
     '<div class="btn-row">' + buttons.join("") + "</div></article>";
 }
-// What an app may ask of the node beyond running — rendered from what the node
-// declared, never from a list held here: a grant this page has never heard of
-// still appears, with the node's own words for it.
-function grantsHTML(app){
-  const grants = Array.isArray(app.grants) ? app.grants : [];
-  if(!app.installed || !grants.length) return "";
-  return '<div class="grants">' + grants.map((grant) =>
-    '<label class="check" title="' + esc(grant.description || "") + '">' +
-    '<input type="checkbox" data-grant-app="' + esc(app.id) + '"' +
-    ' data-grant="' + esc(grant.name) + '"' + (grant.granted ? " checked" : "") +
-    "><span>" + esc(grant.title || grant.name) + "</span></label>").join("") +
-    "</div>";
+// What an app asked to be allowed, in one line on its tile. The switches are in
+// a dialog of their own: an app that asks for nothing beyond its own section
+// shows no panel of switches it never needed — only what it asked is drawn.
+function permSummaryHTML(app){
+  const rows = Array.isArray(app.permissions) ? app.permissions : [];
+  if(!app.installed || !rows.length) return "";
+  const held = rows.filter((row) => row.granted).length;
+  const waiting = rows.filter((row) => !row.granted && row.level !== "normal").length;
+  return '<p class="perm-sum">' + plural(rows.length, "permission") + " asked · " +
+    held + " held" + (waiting ? " · " + badge(waiting + " not given", "warn") : "") + "</p>";
 }
-$("builtin-apps").addEventListener("change", async (event) => {
-  const box = event.target.closest("[data-grant]");
+
+// ---- permissions -----------------------------------------------------------
+// Rendered from what the node says each app asked for (`apps.permissions`),
+// never from a list held here: a permission this page has never heard of still
+// appears, with the node's own words for it.
+const PERM = {apps: [], open: ""};
+const LEVEL_WORDS = {normal: ["ordinary", ""], sensitive: ["reads this node", "warn"],
+                     dangerous: ["dangerous", "danger"]};
+
+async function loadPermissions(){
+  if(!CHANNEL.has("apps.permissions")){ PERM.apps = []; paintAttached(); return; }
+  try{
+    const data = await CHANNEL.call("apps.permissions");
+    PERM.apps = data.apps || [];
+  }catch(error){
+    if(isStale(error)) return;
+    PERM.apps = [];
+  }
+  paintAttached();
+  if(PERM.open) paintPermDialog();
+}
+function paintAttached(){
+  const others = PERM.apps.filter((app) => app.source !== "builtin");
+  setHTML("attached-apps", others.length ? '<div class="table-wrap"><table>' +
+    "<thead><tr><th>App</th><th>Id</th><th>Status</th><th>Asked</th><th class=\"tight\"></th></tr></thead><tbody>" +
+    others.map((app) => {
+      const live = app.attached || {};
+      const state = live.clients ? (live.identified ? badge("connected as itself", "ok")
+                                                    : badge("shared token only", "warn"))
+                                 : badge(app.source === "installed" ? "installed" : "not connected");
+      const held = (app.permissions || []).filter((row) => row.granted).length;
+      return "<tr><td><strong>" + esc(app.title || app.name || "unnamed") + "</strong>" +
+        (app.version ? ' <span class="muted tiny">' + esc(app.version) + "</span>" : "") +
+        (live.hooks && live.hooks.length ? '<div class="tiny">' + badge("mods " +
+          live.hooks.length + " operation" + (live.hooks.length === 1 ? "" : "s"), "danger") + "</div>" : "") +
+        "</td><td><code class=\"inline\">" + esc(app.app_id) + "</code></td><td>" + state +
+        "</td><td>" + (app.permissions || []).length + " · " + held + " held</td>" +
+        '<td><button class="sm" data-perm-open="' + esc(app.app_id) + '">Permissions</button></td></tr>';
+    }).join("") + "</tbody></table></div>"
+    : emptyHTML("No other app", "An app that connects to this node's data connector and " +
+                "declares a manifest appears here, with what it asks for."));
+}
+function permView(appId){
+  const fromPerm = PERM.apps.find((app) => app.app_id === appId);
+  if(fromPerm) return fromPerm;
+  const builtin = ((STATE && STATE.apps) || []).find((app) => app.app_id === appId);
+  return builtin ? {app_id: appId, title: builtin.name, name: builtin.id, source: "builtin",
+                    permissions: builtin.permissions || []} : null;
+}
+function openPermissions(appId){
+  PERM.open = appId;
+  setMessage("perm-msg", "");
+  paintPermDialog();
+  const dialog = $("perm-dialog");
+  if(!dialog.open) dialog.showModal();
+  loadPermissions();
+}
+function paintPermDialog(){
+  const view = permView(PERM.open);
+  if(!view){ $("perm-dialog").close(); return; }
+  $("perm-title").textContent = (view.title || view.name || "App") + " — permissions";
+  $("perm-intro").textContent = (view.description ? view.description + " " : "") +
+    "Only what this app asked for is listed. Ordinary permissions are what every app has " +
+    "and are on unless you turn them off; everything else is off until you turn it on.";
+  const rows = view.permissions || [];
+  setHTML("perm-body", rows.length ? rows.map((row) => {
+    const words = LEVEL_WORDS[row.level] || [row.level, ""];
+    return '<label class="perm-row' + (row.parent ? " child" : "") + '">' +
+      '<input type="checkbox" data-perm="' + esc(row.name) + '"' +
+      (row.granted ? " checked" : "") + ">" +
+      '<span class="what"><span class="name">' + esc(row.title) + " " +
+      badge(words[0], words[1]) + ' <code class="inline">' + esc(row.name) + "</code></span>" +
+      (row.why ? '<span class="why">Why: ' + esc(row.why) + "</span>" : "") +
+      '<span class="desc">' + esc(row.description) + "</span></span></label>";
+  }).join("") : emptyHTML("Nothing asked", "This app asks for nothing beyond running."));
+  const builtin = view.source === "builtin";
+  $("perm-token").hidden = builtin || !CHANNEL.has("apps.token");
+  $("perm-forget").hidden = builtin || !CHANNEL.has("apps.forget");
+}
+$("perm-body").addEventListener("change", async (event) => {
+  const box = event.target.closest("[data-perm]");
   if(!box) return;
-  const app = box.dataset.grantApp, capability = box.dataset.grant;
-  const granted = box.checked;
-  // The box is what the operator pressed, so it is what waits for the answer;
-  // a grant that was refused goes back to what the node says it is.
+  const permission = box.dataset.perm, granted = box.checked;
+  const view = permView(PERM.open) || {};
+  const row = (view.permissions || []).find((entry) => entry.name === permission) || {};
+  if(granted && row.level === "dangerous"){
+    const agreed = await confirmAction({
+      title:"Give " + (view.title || view.name) + " " + permission + "?",
+      body:'<p class="muted small">' + esc(row.description || "") + "</p>" +
+        '<p class="muted small">This lets the app act on this node as an operator would. ' +
+        "Give it only to an app you would hand the console to.</p>",
+      confirmLabel:"Give it", danger:true});
+    if(!agreed){ box.checked = false; return; }
+  }
   box.disabled = true;
   try{
-    const {ok, error, data} = await CHANNEL.ask(
-      "apps.grant", {app:app, capability:capability, granted:granted});
+    const {ok, error, data} = await CHANNEL.ask("apps.permit",
+      {app:PERM.open, permission:permission, granted:granted});
     if(ok){
-      toast(granted ? capability + " granted to " + app
-                    : capability + " taken back from " + app);
-      if(data.apps && STATE) STATE.apps = data.apps;
+      const index = PERM.apps.findIndex((app) => app.app_id === PERM.open);
+      if(index >= 0 && data.app) PERM.apps[index] = Object.assign({}, PERM.apps[index], data.app);
+      toast(granted ? permission + " given" : permission + " taken back");
+      tick();
     }else{
       box.checked = !granted;
-      toast(error || "the grant was refused", "danger");
+      setMessage("perm-msg", error || "refused", true);
     }
-  }catch(_){ box.checked = !granted; toast("the grant was refused", "danger"); }
-  finally{ box.disabled = false; if(STATE) paintApps(STATE); }
+  }catch(_){ box.checked = !granted; setMessage("perm-msg", "refused", true); }
+  finally{ box.disabled = false; paintPermDialog(); paintAttached(); }
+});
+$("perm-token").addEventListener("click", async (event) => withBusy(event.target, async () => {
+  const {ok, error, data} = await CHANNEL.ask("apps.token", {app:PERM.open});
+  if(!ok){ setMessage("perm-msg", error || "refused", true); return; }
+  setMessage("perm-msg", "This app connects to " + data.host + ":" + data.port +
+    " with the token below. It proves the app is this app — keep it out of anything shared.");
+  await copyText(data.token);
+}));
+$("perm-forget").addEventListener("click", async () => {
+  const agreed = await confirmAction({title:"Forget this app?",
+    body:'<p class="muted small">Its manifest and every permission it was given are dropped. ' +
+      "If it connects again it starts from nothing.</p>", confirmLabel:"Forget", danger:true});
+  if(!agreed) return;
+  const {ok, error} = await CHANNEL.ask("apps.forget", {app:PERM.open});
+  if(!ok){ setMessage("perm-msg", error || "refused", true); return; }
+  $("perm-dialog").close();
+  loadPermissions();
+});
+$("perm-close").addEventListener("click", () => $("perm-dialog").close());
+$("perm-done").addEventListener("click", () => $("perm-dialog").close());
+$("perm-dialog").addEventListener("close", () => { PERM.open = ""; });
+document.body.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-perm-open]");
+  if(button) openPermissions(button.dataset.permOpen);
+});
+
+// ---- the internal API --------------------------------------------------------
+// Every operation the node exposes, listed by the node (`apps.api`) — the same
+// derivation the MCP app's tools come from, so the page and the tools cannot
+// disagree about what exists.
+const API = {rows: [], kind: "all"};
+const API_KIND_WORDS = {node: "node", app: "app", web: "app page"};
+
+async function loadApi(){
+  if(!CHANNEL.has("apps.api")){ API.rows = []; paintApi(); return; }
+  try{
+    const data = await CHANNEL.call("apps.api");
+    API.rows = data.endpoints || [];
+    const conn = data.connector || {};
+    $("api-how").textContent = conn.available
+      ? "Apps reach these through the data connector on " + conn.host + ":" + conn.port +
+        " (a CONTROL frame, under their own token); a page reaches them with " + conn.http +
+        ". Nothing here is reachable from the network unless an app or the MCP server puts it there."
+      : "This node has no data connector: only this console reaches these.";
+  }catch(error){
+    if(isStale(error)) return;
+    API.rows = [];
+  }
+  paintApi();
+  await loadMcp();
+}
+function paintApi(){
+  const query = ($("api-search").value || "").trim().toLowerCase();
+  const rows = API.rows.filter((row) => (API.kind === "all" || row.kind === API.kind) &&
+    (!query || (row.op + " " + row.summary + " " + (row.permission || "")).toLowerCase().includes(query)));
+  $("api-count").textContent = API.rows.length;
+  setHTML("api-rows", rows.length ? rows.map((row) => {
+    const flags = [badge(API_KIND_WORDS[row.kind] || row.kind)];
+    if(row.changes) flags.push(badge("changes state", "warn"));
+    if(row.background) flags.push(badge("job"));
+    if(row.reach === "local") flags.push(badge("this machine only"));
+    if(row.modded_by) flags.push(badge("modded by " + row.modded_by, "danger"));
+    const need = row.permission === null ? badge("no app", "") :
+      (row.permission === "" ? '<span class="muted small">any app</span>'
+                             : '<code class="inline">' + esc(row.permission) + "</code>");
+    return "<tr><td><code class=\"inline\">" + esc(row.op) + "</code><div class=\"tiny\">" +
+      flags.join(" ") + "</div></td><td>" + esc(row.summary) + "</td><td>" + need +
+      "</td><td>" + (row.tool ? '<code class="inline">' + esc(row.tool) + "</code>" : "") + "</td></tr>";
+  }).join("") : spanRow(4, emptyHTML("Nothing matches", "Try another word.")));
+}
+$("api-search").addEventListener("input", debounce(paintApi, 120));
+document.body.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-api-kind]");
+  if(!button) return;
+  API.kind = button.dataset.apiKind;
+  $$("[data-api-kind]").forEach((entry) =>
+    entry.setAttribute("aria-selected", entry === button ? "true" : "false"));
+  paintApi();
+});
+
+async function mcpCall(op, args){
+  return CHANNEL.ask("apps.call", {app:"mcp", op:op, args:args || {}});
+}
+async function loadMcp(){
+  const running = ((STATE && STATE.apps) || []).some((app) => app.id === "mcp" && app.running);
+  $("mcp-off").hidden = running;
+  $("mcp-on").hidden = !running;
+  $("mcp-state").textContent = running ? "on" : "off";
+  $("mcp-state").className = "badge" + (running ? " ok" : "");
+  if(!running) return;
+  const {ok, data} = await mcpCall("status");
+  if(!ok) return;
+  const status = data.result || {};
+  $("mcp-url").textContent = status.url || "";
+  $("mcp-where").textContent = (status.host || "") + ":" + (status.port || "") +
+    (status.loopback ? " — this machine only" : " — reachable beyond this machine");
+  $("mcp-tools").textContent = status.tools ? status.tools + " (as of the last list)" : "listed when a client asks";
+  $("mcp-exposed").hidden = !!status.loopback;
+  setMessage("mcp-error", status.error || "", !!status.error);
+  if(document.activeElement !== $("mcp-host")) $("mcp-host").value = status.host || "";
+  if(document.activeElement !== $("mcp-port")) $("mcp-port").value = status.port || "";
+}
+// The client configuration is shown, never painted on its own: it carries the
+// token, which is the server's whole authority.
+$("mcp-show").addEventListener("click", async (event) => withBusy(event.target, async () => {
+  const {ok, error, data} = await mcpCall("token");
+  if(!ok){ toast(error || "refused", "danger"); return; }
+  const answer = data.result || {};
+  $("mcp-config").textContent = JSON.stringify({mcpServers:{nmesh:{type:"http",
+    url:answer.url, headers:{Authorization:"Bearer " + answer.token}}}}, null, 2) +
+    "\n\nA client that only speaks stdio: scripts/nmesh_mcp_stdio.py, with\n" +
+    "NMESH_MCP_URL=" + answer.url + " and NMESH_MCP_TOKEN set to the token above.";
+  $("mcp-config").hidden = false;
+}));
+$("mcp-rotate").addEventListener("click", async () => {
+  const agreed = await confirmAction({title:"Replace the MCP token?",
+    body:'<p class="muted small">Every client using the current token stops being able to call ' +
+      "this node until it is given the new one.</p>", confirmLabel:"Replace", danger:true});
+  if(!agreed) return;
+  const {ok, error} = await mcpCall("rotate");
+  toast(ok ? "New token issued" : (error || "refused"), ok ? "ok" : "danger");
+  $("mcp-config").hidden = true;
+});
+$("mcp-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const host = $("mcp-host").value.trim(), port = parseInt($("mcp-port").value, 10);
+  if(!["127.0.0.1", "::1", "localhost"].includes(host)){
+    const agreed = await confirmAction({title:"Listen on " + host + "?",
+      body:'<p class="muted small">The MCP server will be reachable by whoever reaches that ' +
+        "address. With the token they can do everything the MCP app was granted.</p>",
+      confirmLabel:"Listen there", danger:true});
+    if(!agreed) return;
+  }
+  const {ok, error} = await mcpCall("configure", {host:host, port:port});
+  toast(ok ? "MCP server moved" : (error || "refused"), ok ? "ok" : "danger");
+  await loadMcp();
 });
 $("builtin-apps").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-builtin-action]");
@@ -3382,9 +3706,13 @@ $("builtin-apps").addEventListener("click", async (event) => {
 });
 async function refreshApps(){
   if(ROUTER.section !== "apps") return;
+  if(ROUTER.sub === "api"){ await loadApi(); return; }
   // Only the installed set is a list here. Finding one is a question asked of
   // the directory, and a question has no page to repaint.
-  if(ROUTER.sub !== "store") await paintAppList("installed");
+  if(ROUTER.sub !== "store"){
+    await loadPermissions();
+    await paintAppList("installed");
+  }
 }
 async function paintAppList(kind){
   const body = $(kind + "-list");

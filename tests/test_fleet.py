@@ -1666,3 +1666,31 @@ class TestRequestCeiling:
         allowed = sum(agent.app._request_allowed(operator.id)
                       for _ in range(fleet.MAX_REQUESTS + 1))
         assert allowed == fleet.MAX_REQUESTS
+
+
+class TestShellEnvironment:
+    """``TERM`` names the terminal at the other end, which is always the
+    console's emulator. Inheriting the node's own — ``linux`` when it was
+    started from a console — made every program draw with sequences the
+    emulator does not speak, and ``top`` answered itself into its own input."""
+
+    def test_term_is_the_emulator_whatever_the_node_inherited(self, monkeypatch):
+        from src.apps import fleet as fleet_module
+        monkeypatch.setenv("TERM", "linux")
+        monkeypatch.setenv("LANG", "C")
+        monkeypatch.delenv("LC_ALL", raising=False)
+        env = fleet_module._shell_env()
+        assert env["TERM"] == "xterm-256color"
+        assert env["COLORTERM"] == "truecolor"
+        assert env["LANG"] == "C.UTF-8"
+
+    def test_a_utf8_locale_the_node_has_is_kept(self, monkeypatch):
+        from src.apps import fleet as fleet_module
+        monkeypatch.setenv("LANG", "fr_FR.UTF-8")
+        monkeypatch.delenv("LC_ALL", raising=False)
+        assert fleet_module._shell_env()["LANG"] == "fr_FR.UTF-8"
+
+    def test_the_connector_token_never_reaches_the_shell(self, monkeypatch):
+        from src.apps import fleet as fleet_module
+        monkeypatch.setenv("NMESH_CONNECTOR_TOKEN", "secret")
+        assert "NMESH_CONNECTOR_TOKEN" not in fleet_module._shell_env()

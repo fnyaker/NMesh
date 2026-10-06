@@ -251,4 +251,109 @@ t.write("one\r\ntwo\r\nthree");
 check("text is the lines joined", t.text(), "one\ntwo\nthree");
 check("a range spans rows", t.range({row:0, col:1}, {row:1, col:2}).text, "ne\ntw");
 
+
+// ---- what is a question, and what is not ------------------------------------
+// The bug behind "the remote shell is broken": `top`, started with the node's
+// own TERM=linux, set its cursor shape with `CSI ? 1 c`. The emulator read every
+// `CSI … c` as "who are you?" and typed its answer into `top`, whose screen
+// filled with "Unknown command". An answer goes only to a question.
+t = new Term(30, 4);
+replies = [];
+t.onReply = (text) => replies.push(text);
+t.write("\x1b[?1c\x1b[?6c\x1b[?1;2c");
+check("a private c is not a device attribute request", replies.length, 0);
+t.write("\x1b[>c");
+check("a secondary request has its own answer", replies[0], "\x1b[>0;10;1c");
+t.write("\x1b[0c");
+check("CSI 0 c is the primary request", replies[1], "\x1b[?1;2c");
+t.write("\x1b[=c\x1b[>1c");
+check("and nothing else in the family is", replies.length, 2);
+
+// A prefix changes the sequence. `CSI > 4 ; 2 m` is vim negotiating its
+// keyboard; read as SGR it set "dim" on everything that followed.
+t = new Term(30, 4);
+t.write("\x1b[>4;2mplain");
+check("a > m is not an attribute", t.cell(0, 0).s.dim, false);
+// `CSI = 5 u` and `CSI > 1 u` are a shell asking for a keyboard protocol; read
+// as "restore the cursor" they jumped it to wherever the last save was.
+t = new Term(30, 4);
+t.write("\x1b[2;3H\x1b[s\x1b[4;10H\x1b[=5u\x1b[>1u\x1b[?u");
+check("keyboard-protocol sequences leave the cursor alone", t.x + ":" + t.y, "9:3");
+t.write("\x1b[u");
+check("a plain restore still restores", t.x + ":" + t.y, "2:1");
+// A private scroll-region save is not a scroll region.
+t = new Term(10, 5);
+t.write("\x1b[2;4r\x1b[?1001r\x1b[5;1Hx");
+check("CSI ? r does not reset the region", t.top + ":" + t.bot, "1:3");
+
+// History replayed into a fresh screen asked its questions of a terminal that
+// is gone; answering them again types into whatever runs now.
+t = new Term(30, 4);
+replies = [];
+t.onReply = (text) => replies.push(text);
+t.quiet = true;
+t.write("\x1b[c\x1b[6n\x1b[18t");
+t.quiet = false;
+check("a replay answers nothing", replies.length, 0);
+t.write("\x1b[6n");
+check("and live output is answered again", replies.length, 1);
+
+// An editor asks what colour the background is before choosing its scheme.
+t = new Term(30, 4);
+replies = [];
+t.onReply = (text) => replies.push(text);
+t.write("\x1b]11;?\x07");
+check("the background colour is reported", replies[0], "\x1b]11;rgb:0a0a/0f0f/1616\x07");
+t.write("\x1b]52;c;aGVsbG8=\x07after");
+check("a clipboard write is swallowed, not obeyed", replies.length + ":" + screen(t)[0], "1:after");
+
+// `CSI 3 J` is the saved lines, and only them.
+t = new Term(10, 2);
+t.write("one\r\ntwo\r\nthree");
+t.write("\x1b[3J");
+check("ED 3 drops the scrollback", t.scrollback.length, 0);
+check("and keeps the screen", screen(t).join("|"), "two|three");
+
+// SGR with colon sub-parameters: the arguments live inside one parameter.
+t = new Term(30, 2);
+t.write("\x1b[38:2::10:20:30;1mA\x1b[0m\x1b[38:5:196mB\x1b[0m\x1b[4:3mC\x1b[4:0mD");
+check("38:2:: is 24-bit", t.cell(0, 0).s.front, "#0a141e");
+check("…and does not eat the next attribute", t.cell(0, 0).s.bold, true);
+check("38:5: is the 256 palette", t.cell(0, 1).s.front, "#ff0000");
+check("4:3 underlines", t.cell(0, 2).s.under, true);
+check("4:0 stops it", t.cell(0, 3).s.under, false);
+
+// The cursor's shape, which every editor changes between modes.
+t = new Term(10, 2);
+t.write("\x1b[6 q");
+check("a bar", t.cursorShape, "bar");
+t.write("\x1b[4 q");
+check("an underline", t.cursorShape, "under");
+t.write("\x1b[!p");
+check("a soft reset gives the block back", t.cursorShape, "block");
+
+// Repeat the last character.
+t = new Term(10, 2);
+t.write("-\x1b[4b");
+check("REP repeats", screen(t)[0], "-----");
+
+// ---- keys ---------------------------------------------------------------------
+// AltGr is Ctrl and Alt together on Windows, and the key it names is the
+// character it composed. Read as a control chord it was dropped: `|`, `#`, `{`
+// could not be typed on an AZERTY keyboard.
+check("AltGr is text", keyIsText({key:"|", ctrlKey:true, altKey:true}), true);
+check("a plain letter is text", keyIsText({key:"a"}), true);
+check("Ctrl and a letter is not", keyIsText({key:"c", ctrlKey:true}), false);
+check("Enter is not", keyIsText({key:"Enter"}), false);
+check("…and keyBytes gives the character", keyBytes({key:"|", ctrlKey:true, altKey:true}, null), "|");
+check("Ctrl-Left carries its modifier", keyBytes({key:"ArrowLeft", ctrlKey:true}, null), "\x1b[1;5D");
+check("Shift-Delete too", keyBytes({key:"Delete", shiftKey:true}, null), "\x1b[3;2~");
+// `T_MAC` is a const inside the evaluated source; the text test says which
+// side of it this machine is on.
+check("Alt as Meta off a Mac", keyBytes({key:"b", altKey:true}, null),
+      keyIsText({key:"b", altKey:true}) ? "b" : "\x1bb");
+check("Alt-Backspace deletes a word", keyBytes({key:"Backspace", altKey:true}, null), "\x1b\x7f");
+check("Ctrl-/ is ^_", keyBytes({key:"/", ctrlKey:true}, null), "\x1f");
+check("an unknown chord is nobody's", keyBytes({key:"Unidentified"}, null), null);
+
 process.exit(fails ? 1 : 0);

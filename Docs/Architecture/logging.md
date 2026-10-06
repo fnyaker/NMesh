@@ -174,7 +174,7 @@ Two unequal halves, over the data connector
   `app:<app id[:16]>`, so an app can only ever be quoted as itself. An app able
   to set its own source could write lines that read as the core's, and a log an
   operator cannot attribute is worse than no log.
-* **Reading needs the `logs` grant**, given per app in the console's Apps page
+* **Reading needs `readstate.logs`** (the `logs` grant — `Docs/AppPermissions/guide`), given per app in the console's Apps page
   (`apps.grant`, stored by `AppRegistry`, off until an operator turns it on, and
   dropped when the app is uninstalled). Without it every read is **answered**
   with `{"refused": true}` rather than dropped — a silent drop leaves the app

@@ -499,6 +499,24 @@ tests/
 │     coerced and bounded, an app that stopped is no longer reachable, an app that
 │     raises does not hand over its internals — and what chat and fleet expose is
 │     pinned (widening it is a security change)
+├── test_app_perms.py                                  — what an app may do:
+│     the tree (a parent covers its children, taking it back takes them), a
+│     manifest as hostile input (bounded, typed, an unknown permission refused
+│     by name), a broken state file that grants nothing, a built-in's manifest
+│     no client can rewrite, every plane module mapped, the operations that
+│     grant reachable by no app, and a mod the node survives (fallback,
+│     arguments checked again, never its own calls)
+├── test_app_connector.py                              — the connector as the
+│     internal API, over a real socket: an app is an app only with its own
+│     token, a frame not asked for is answered empty, a control call is the
+│     plane's answer (and a malformed one is answered with its id), a hook
+│     belongs to its client and its permission, only the client asked can
+│     answer a call, and no garbage ends a connection
+├── test_mcp.py                                        — the MCP app: tools
+│     generated from the catalogue (machinery excluded, page routes only when
+│     callable), schemas from declarations, a refusal as a readable result, a
+│     job polled to its end, the door (token, foreign Origin, 413, 405, batch),
+│     the token kept in the drawer, and the stdio bridge
 ├── test_address_retry.py                              — re-dialling an address:
 │     by hand (one `proto://addr` or all of them, and what each one did is
 │     reported; an address that is not this node's is refused without dialling),

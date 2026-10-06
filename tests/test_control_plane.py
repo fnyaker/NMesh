@@ -481,19 +481,32 @@ class TestBoundsFitTheRelay:
                     fits = entry["timeout"] <= REMOTE_BUDGET
                     assert fits is not entry["background"], entry["name"]
 
+    # The two that stay on this machine, and why — each a property of what it
+    # *is*, not of what it costs. Adding a third is a decision to write down
+    # here and in `Docs/Architecture/control-plane.md`, never a default.
+    LOCAL_BY_DESIGN = {
+        # An app's connector credential: the connector listens on this machine
+        # only, so the token is this machine's to hand out.
+        "apps.token",
+        # The routes chat's and fleet's pages call. A managed node is not a
+        # jump host, and this would make it one.
+        "web.request",
+    }
+
     def test_everything_this_node_can_do_can_be_done_at_a_distance(self):
         """The headline, as an assertion rather than a promise.
 
-        Not one operation is local-only. Whatever a new one costs and whatever
-        it decides, it declares a reach — and a module that quietly leaves both
-        off fails here rather than being discovered by the operator who could
-        not press the button from where they were."""
+        Not one operation is local-only beyond the two named above. Whatever a
+        new one costs and whatever it decides, it declares a reach — and a
+        module that quietly leaves both off fails here rather than being
+        discovered by the operator who could not press the button from where
+        they were."""
         plane = control.build(control.Context(node=None))
-        stranded = [module["module"] + "." + entry["name"]
+        stranded = {module["module"] + "." + entry["name"]
                     for module in plane.catalogue(Origin.LOCAL)
                     for entry in module["operations"]
-                    if entry["reach"] == "local"]
-        assert stranded == []
+                    if entry["reach"] == "local"}
+        assert stranded == self.LOCAL_BY_DESIGN
 
     def test_every_code_a_refusal_can_carry_has_a_status(self):
         assert set(control.CODES) <= set(_STATUS_BY_CODE)
@@ -512,10 +525,11 @@ class TestTheLedgerIsTrue:
     def _table(self) -> dict:
         r"""``{module: {operation: (reach, background)}}`` as the document claims.
 
-        Two marks, outside the backticks and escaped for markdown: ``\*`` for
+        Three marks, outside the backticks and escaped for markdown: ``\*`` for
         an operation that needs the ``govern`` capability, ``~`` for one that
-        travels as a job. Both may be on one operation — installing a release
-        is a decision *and* four hundred seconds."""
+        travels as a job, ``°`` for one that never leaves this machine. Two
+        may be on one operation — installing a release is a decision *and*
+        four hundred seconds."""
         rows, inside = {}, False
         for line in self.LEDGER.read_text().splitlines():
             if line.startswith("| Module | Operations |"):
@@ -535,8 +549,9 @@ class TestTheLedgerIsTrue:
                     continue
                 marks = word.replace("\\*", "*").split("`")[-1]
                 name = word.split("`")[1]
-                operations[name] = ("govern" if "*" in marks else "remote",
-                                    "~" in marks)
+                reach = ("govern" if "*" in marks
+                         else "local" if "°" in marks else "remote")
+                operations[name] = (reach, "~" in marks)
             rows.setdefault(module, {}).update(operations)
         return rows
 

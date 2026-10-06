@@ -356,15 +356,20 @@ class TestAFilterIsAnArgumentFromAProcessWeDoNotTrust:
 
 class TestTheRegistryIsWhereAGrantLives:
     def test_nothing_is_granted_by_default(self, tmp_path):
+        """And only what an app asked for is offered: fleet asks for the log
+        and the links, chat asks for neither, so chat shows no switch it never
+        needed (`src/app_perms.py`)."""
         registry = AppRegistry(str(tmp_path))
-        for app in registry.overview():
-            assert [grant["name"] for grant in app["grants"]] == \
-                [grant["name"] for grant in GRANTS]
+        apps = {app["id"]: app for app in registry.overview()}
+        assert [grant["name"] for grant in apps["fleet"]["grants"]] == \
+            [grant["name"] for grant in GRANTS]
+        assert apps["chat"]["grants"] == []
+        for app in apps.values():
             assert all(grant["granted"] is False for grant in app["grants"])
-            # Named and explained by the node, so a page never holds its own
-            # copy of what a grant means.
-            assert app["grants"][0]["title"]
-            assert app["grants"][0]["description"]
+        # Named and explained by the node, so a page never holds its own
+        # copy of what a grant means.
+        assert apps["fleet"]["grants"][0]["title"]
+        assert apps["fleet"]["grants"][0]["description"]
         assert registry.granted("fleet", "logs") is False
         assert registry.granted_to_id(builtin_id("fleet"), "logs") is False
 

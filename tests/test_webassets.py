@@ -280,6 +280,38 @@ def test_the_terminal_pane_takes_real_keystrokes():
     assert 'tabindex="0"' in webassets.FLEET_HTML
 
 
+def test_the_keyboard_belongs_to_the_session_not_to_each_page():
+    """Each page read keys off its own element, two different ways, and the
+    fleet panel dropped every AltGr character — `|`, `~`, `#` on an AZERTY
+    keyboard. Text now arrives through an editable element's `input` event,
+    which is the one path every keyboard types through."""
+    driver = terminal.JS.split("// ---- one shell session")[1]
+    assert 'input.addEventListener("keydown"' in driver
+    assert 'input.addEventListener("input"' in driver
+    assert 'input.addEventListener("compositionend"' in driver
+    assert "if(keyIsText(event)) return;" in driver
+    # And neither page grew its own reading of keys back.
+    assert '$("term").addEventListener("keydown"' not in webassets.fleet.FLEET_PAGE_JS
+    assert '$("term").addEventListener("keydown"' not in terminal.PAGE_JS
+
+
+def test_a_paste_cannot_close_its_own_bracket():
+    """Clipboard text carrying the end-of-paste marker would end the bracket
+    early, and whatever followed would run as though it were typed."""
+    paste = terminal.JS.split("ShellSession.prototype.paste =")[1].split("\nShellSession")[0]
+    assert r'replace(/\x1b\[20[01]~/g, "")' in paste
+    assert paste.index("replace(") < paste.index("this.term.bracketed")
+
+
+def test_a_click_is_not_a_selection():
+    """A press and a release on the same spot left an empty selection behind,
+    and a selection hides the cursor."""
+    screen = terminal.JS.split("// ---- the screen")[1].split("// ---- one shell session")[0]
+    end = screen.split("TermScreen.prototype.endSelect =")[1].split("\n};")[0]
+    assert "return this.clearSelect();" in end
+    assert "!this.select" not in screen.split("TermScreen.prototype.draw =")[1].split("\n};")[0]
+
+
 def test_the_rights_panel_is_wired_to_a_real_element():
     """The "who can control this node" view is the only place a right is added:
     if its container is missing, it disappears silently."""
@@ -1494,3 +1526,39 @@ def test_the_trace_is_downloaded_from_the_node_on_screen():
     body = webassets.console.CONSOLE_PAGE_JS
     assert 'window.location = "/api/trace/export"' not in body
     assert 'CHANNEL.call("trace.export")' in body
+
+
+# ── app permissions and the internal API ────────────────────────────────────
+
+def test_permissions_are_drawn_from_what_the_node_says():
+    """The switches are rendered from `apps.permissions` — what each app asked
+    for, in the node's own words — never from a list kept in the page."""
+    source = webassets.CONSOLE_PAGE_JS
+    load = source.split("async function loadPermissions(){")[1].split("\n}")[0]
+    assert 'CHANNEL.call("apps.permissions")' in load
+    paint = source.split("function paintPermDialog(){")[1].split("\n}")[0]
+    assert "view.permissions" in paint and "row.why" in paint
+    # A dangerous permission asks before the switch moves.
+    change = source.split('$("perm-body").addEventListener("change"')[1].split("\n});")[0]
+    assert 'row.level === "dangerous"' in change and "confirmAction" in change
+    assert 'CHANNEL.ask("apps.permit"' in change
+
+
+def test_the_mcp_token_is_shown_only_when_asked_for():
+    """The token is the MCP server's whole authority: it is fetched on a press
+    and written as text, never painted with the rest of the card."""
+    source = webassets.CONSOLE_PAGE_JS
+    load = source.split("async function loadMcp(){")[1].split("\n}")[0]
+    assert '"token"' not in load
+    show = source.split('$("mcp-show").addEventListener(')[1].split("\n}));")[0]
+    assert 'mcpCall("token")' in show
+    assert '$("mcp-config").textContent' in show
+    assert 'id="mcp-config" class="mono small" hidden' in webassets.INDEX_HTML
+
+
+def test_the_internal_api_is_the_nodes_own_list():
+    source = webassets.CONSOLE_PAGE_JS
+    assert 'CHANNEL.call("apps.api")' in source
+    for element in ('id="api-rows"', 'id="api-search"', 'data-subtab="api"',
+                    'id="perm-dialog"', 'id="attached-apps"'):
+        assert element in webassets.INDEX_HTML, element

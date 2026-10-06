@@ -32,12 +32,13 @@ from .store import StoreModule
 from .transfer import TransferModule
 from .trace import TraceModule
 from .trust import TrustModule
+from .web import WebModule
 
 # The order is the order a catalogue is read in, and nothing else depends on it.
 BUILT_IN = (NodeModule, ConfigModule, TransportsModule, TraceModule,
             PseudoModule, AppsModule, TrustModule, NetworkModule,
             ReleasesModule, PackagesModule, KeysModule, StoreModule,
-            JoinModule, TransferModule, LogsModule, AlertsModule)
+            JoinModule, TransferModule, LogsModule, AlertsModule, WebModule)
 
 
 def install(plane: ControlPlane, context) -> ControlPlane:
@@ -47,6 +48,10 @@ def install(plane: ControlPlane, context) -> ControlPlane:
     need the plane itself. One answers what the plane *is*; the other runs what
     the plane declares, which is why a job can never reach further than a call
     — it goes back through the same door."""
+    provide = getattr(context, "provide", None)
+    if provide is not None:
+        # The internal API listing reads the plane it is on (`apps.api`).
+        provide(plane=plane)
     for module in BUILT_IN:
         plane.register(module(context))
     plane.register(ControlModule(plane, context))

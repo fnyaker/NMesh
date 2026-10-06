@@ -288,8 +288,11 @@ def clean_install_options(raw) -> dict:
 
     Absent is not the same as false for the two grants: `allow_update` defaults
     to on because a machine nobody will log into again has to be able to take a
-    security update, and `docker` defaults to **off** because an account that can
-    reach the docker socket is root on that machine."""
+    security update. `docker` is three-valued — absent leaves it to
+    ``install.sh``, whose default is to grant it on a root install of a machine
+    that has docker, and an explicit no is passed on as ``--no-docker`` so the
+    refusal is the machine's to remember. An account that can reach the docker
+    socket is root on that machine, which is why a no has to be sayable."""
     raw = raw if isinstance(raw, dict) else {}
     flags = []
     for flag in raw.get("node_flags") or []:
@@ -300,7 +303,7 @@ def clean_install_options(raw) -> dict:
         return value if isinstance(value, str) and _PATH_RE.match(value) else ""
     service = raw.get("service")
     return {
-        "docker": raw.get("docker") is True,
+        "docker": raw["docker"] if isinstance(raw.get("docker"), bool) else None,
         "allow_update": raw.get("allow_update", True) is not False,
         "install_dir": path("install_dir"),
         "data_dir": path("data_dir"),
@@ -338,7 +341,7 @@ def build_install_phase(*, stage: str, install_dir: str | None = None,
         mode=_sh_quote(mode),
         sudo_user=_sh_quote(sudo_user or ""),
         can_sudo="1" if can_sudo else "0",
-        want_docker="1" if chosen["docker"] else "0",
+        want_docker={True: "1", False: "0", None: "''"}[chosen["docker"]],
         allow_update="1" if chosen["allow_update"] else "0",
         node_flags=_sh_quote(" ".join(chosen["node_flags"])),
     )
@@ -495,6 +498,7 @@ ARGS="--prefix '$INSTALL_DIR' --data '$DATA' --service '$SERVICE'"
 # nothing here is a second installer, and nothing here is a string from the
 # wire: the paths were charset-checked and the flags came from a list.
 [ "$WANT_DOCKER" = "1" ] && ARGS="$ARGS --docker"
+[ "$WANT_DOCKER" = "0" ] && ARGS="$ARGS --no-docker"
 [ "$ALLOW_UPDATE" = "0" ] && ARGS="$ARGS --no-allow-update"
 [ -n "$NODE_FLAGS" ] && ARGS="$ARGS $NODE_FLAGS"
 

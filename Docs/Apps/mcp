@@ -1,0 +1,114 @@
+# The MCP app — this node's operations, as tools for an AI client
+
+`src/apps/mcp.py` · `scripts/nmesh_mcp_stdio.py`
+
+[Model Context Protocol](https://modelcontextprotocol.io) is how a model is given
+tools: a server lists them with a name, a description and a JSON schema, and answers
+calls to them. The MCP app is such a server for one NMesh node, and the point of it
+is what it does **not** contain: **there is no list of tools in it.**
+
+> **Off by default**, like fleet: it can drive the node. Enable it on *Apps →
+> Installed*, then grant it what it may read and do — its tools are generated from
+> that, and from nothing else.
+
+## Where the tools come from
+
+From **what the console's front end is sent**:
+
+| Source | Tool | What it is |
+|---|---|---|
+| `control.catalogue` | `node_state`, `trace_set`, `releases_install`… | every operation of the control plane — the console's own buttons |
+| `apps.catalogue` | `app_chat_peer`, `app_fleet_relation`… | the operations apps declare (an app's `api`) |
+| `web.routes` | `web_chat_post_send`, `web_fleet_post_shell`… | the routes an app's own page calls, for apps that declare nothing — read off the page's script bundle (`src/app_web.py`) |
+
+A button the console grows is a tool the next time a client lists them. And the
+catalogue the server reads is **filtered by what the MCP app was granted**: an
+operation it may not call is not listed at all. Grant `readstate` and a model can
+look at everything and change nothing; add `control.diagnostics` and it can start
+the trace; add `control.appweb` and the chat and fleet page routes appear.
+
+Two things are machinery rather than tools: listing (`control.*`) and jobs
+(`jobs.*`). An operation that runs as a job — an install, a lookup across the
+network — is one tool: the server starts the job and polls it to its end
+(`CALL_CEILING`, ten minutes), so the model sees one call and one answer.
+
+Each tool carries its declaration as a JSON schema (a `choice` is an `enum`, a
+`count` has its `maximum`, a node id its pattern), whether it changes state
+(`readOnlyHint`, `destructiveHint`), and its summary. The schema describes; the node
+still checks every argument, exactly as it checks a page's.
+
+## How it reaches the node
+
+Like any app: through the data connector, under its **own app id and its own
+token**, with `CONTROL` frames — the internal API
+([`../AppPermissions/guide`](../AppPermissions/guide)). Every call is answered, or
+refused, by the code a page meets. A refusal is a **tool result** the model reads
+(`isError: true`, "node.restart needs the control.node permission") rather than a
+protocol error: it can ask for the permission, or pick another tool.
+
+Calls are logged by the node as the MCP app (`log`), one line per tool call with
+whether it was answered.
+
+## The door
+
+| Property | Why |
+|---|---|
+| **Loopback by default** (`127.0.0.1:8790`) | internal only unless an operator says otherwise |
+| **A bearer token**, `mcp-…`, in the app's drawer (encrypted at rest) | the server's whole authority; **New token** replaces it |
+| **`Origin` checked first** | a web page elsewhere that a browser was tricked into posting here (DNS rebinding) is refused before the token is read — the protocol's own advice |
+| **Bounded** | a body of 1 MB (a larger one is read up to 4 MB and answered `413`, so the client hears why rather than a broken pipe), a batch of 32, 512 tools, 16 requests at once (then `503` and `Retry-After`), 30 s for a client that sends nothing |
+| **A port in use is said, not fatal** | the app runs, says why it serves nothing, and can be moved |
+
+Binding it elsewhere (*Listen elsewhere*) makes the node's operations reachable by
+whoever reaches that address with the token; the page asks before doing it and says
+so afterwards.
+
+The token, a new token and the address are the bridge's three `operator`
+operations: callable by a person at a console, **never by another app** — an app
+that could read the token would hold every permission the MCP app holds. Only
+`status` is open to apps.
+
+## Transport
+
+MCP's **Streamable HTTP**, answered as plain JSON: one `POST /mcp` carries one
+JSON-RPC message or a batch, its answer comes back on the same response; a
+notification is `202 Accepted`. There is no server-initiated stream, so `GET` is
+`405`, as the transport allows. Revisions spoken: `2025-06-18`, `2025-03-26`,
+`2024-11-05`.
+
+Methods: `initialize`, `ping`, `tools/list`, `tools/call`, and empty answers to
+`resources/list`, `resources/templates/list` and `prompts/list` for clients that
+ask. Anything else is `-32601`.
+
+## Connecting a client
+
+*Apps → Internal API → Show the client configuration* prints it, token included:
+
+```json
+{
+  "mcpServers": {
+    "nmesh": {
+      "type": "http",
+      "url": "http://127.0.0.1:8790/mcp",
+      "headers": {"Authorization": "Bearer mcp-…"}
+    }
+  }
+}
+```
+
+A client that only speaks **stdio** runs the bridge, which carries one line at a
+time to the endpoint and back (standard library only):
+
+```bash
+NMESH_MCP_URL=http://127.0.0.1:8790/mcp NMESH_MCP_TOKEN=mcp-… \
+    python3 scripts/nmesh_mcp_stdio.py
+```
+
+## App API
+
+| Operation | changes | operator | What it answers |
+|---|---|---|---|
+| `mcp.status` | no | no | address, port, whether it listens on the loopback only, the last error, tools last listed, calls made |
+| `mcp.token` | no | **yes** | the bearer token and the endpoint |
+| `mcp.rotate` | yes | **yes** | a new token |
+| `mcp.configure` | yes | **yes** | listen on another `host`/`port` |

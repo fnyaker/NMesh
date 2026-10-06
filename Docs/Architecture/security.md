@@ -987,6 +987,26 @@ capabilities without a human (`ENROL_NARROW`) is **intersected** with what its
 sender already holds, so it can only take some away. Without that asymmetry the
 weakest capability would be enough to reach all the others.
 
+## Apps on this node: what each one may do (`app_perms.py`)
+
+The data connector is a door on this machine, and everything that comes through
+it is a local process — still not a trusted one. What an app may do is a
+**permission**, named in a tree (`readstate.*` to look, `control.*` to act,
+`modding` to replace what the node does), asked for in the app's manifest and
+granted by a person on the Apps page. Three properties carry the weight:
+
+* **a grant is held by an identity, and the identity is proved.** Each app has its
+  own connector token (an HMAC of its app id under a secret the node keeps); the
+  shared token says "a local process" and is never answered anything above what
+  every app always had, whatever id it claims;
+* **permissions never move themselves.** The operations that grant, forget or
+  hand out a token are refused to every app origin, whatever it holds;
+* **a mod is survived, not trusted.** A hook that fails, stalls or answers garbage
+  is the native answer; what it hands on is validated again; and the operations
+  that say what the node is and who may do what cannot be modded.
+
+Details: [`../AppPermissions/guide`](../AppPermissions/guide).
+
 ## Pseudos (a name is a label, never an identity)
 
 A node's identity is its `NodeID`, the hash of its ML-DSA public key. A pseudo

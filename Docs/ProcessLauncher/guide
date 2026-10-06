@@ -42,6 +42,12 @@ service).
 | `NMESH_CONNECTOR_TOKEN` | the authentication token            |
 | `NMESH_NODE_ID`         | the node's NodeID (hex)             |
 
+`launch(command, app_id=APP_ID)` launches the child **as one particular app**:
+`NMESH_APP_ID` is set, and `NMESH_CONNECTOR_TOKEN` is that app's own token rather
+than the shared one — the only token answered anything a person granted the app
+([`Docs/AppPermissions/guide`](../AppPermissions/guide)). Without `app_id` the child
+gets the shared token and the normal permissions, as before.
+
 An app that runs whether or not anybody is there should be launched with
 `NMESH_ATTENDED=0` in its `env`: an attached app is one of the things that says
 somebody is using this node, and a daemon is not one

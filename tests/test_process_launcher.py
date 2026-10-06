@@ -83,3 +83,24 @@ class TestLauncher:
             await launcher.stop_all()
             await conn.stop()
             await node.stop()
+
+
+class TestAnAppIsLaunchedAsItself:
+    """A launched app that is one particular app gets its own token, so what a
+    person granted it is what it is answered — the shared token would make it
+    "a local process" and nothing more."""
+
+    def test_the_child_gets_its_own_token_and_id(self):
+        from src.process_launcher import ProcessLauncher
+
+        class Connector:
+            host, port, token = "127.0.0.1", 9, "shared"
+
+            @staticmethod
+            def token_for(app_id):
+                return "app-" + app_id.hex()
+
+        env = ProcessLauncher(Connector()).app_env(bytes.fromhex("a1b2c3d4e5f60718"))
+        assert env["NMESH_CONNECTOR_TOKEN"] == "app-a1b2c3d4e5f60718"
+        assert env["NMESH_APP_ID"] == "a1b2c3d4e5f60718"
+        assert ProcessLauncher(Connector()).connection_env()["NMESH_CONNECTOR_TOKEN"] == "shared"

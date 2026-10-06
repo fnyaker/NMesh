@@ -88,7 +88,7 @@ def param(name: str, kind: str, *, required: bool = True, default=None,
 
 
 def operation(name: str, summary: str, params=(), *, changes: bool = False,
-              remote: bool = False) -> dict:
+              remote: bool = False, operator: bool = False) -> dict:
     """Declare one operation.
 
     ``changes`` marks an operation that alters state. It is not a permission —
@@ -102,14 +102,20 @@ def operation(name: str, summary: str, params=(), *, changes: bool = False,
     somebody else's conversations were never part of managing their machine,
     and a node one operator manages is not a way to reach the nodes *it*
     manages. The flag is data here; the enforcement is one place, in the
-    control plane that knows who is asking (`src/control/modules/apps.py`)."""
+    control plane that knows who is asking (`src/control/modules/apps.py`).
+
+    ``operator`` says only a *person* may call it — never another app, whatever
+    that app was granted. For an answer that is a credential: the MCP app's
+    bearer token is readable by whoever runs the node, and an app that could
+    read it would hold every permission the MCP app holds."""
     if not _NAME_RE.match(name):
         raise AppAPIError(f"bad operation name {name!r}")
     fields = list(params)
     if len(fields) > MAX_ARGS:
         raise AppAPIError("too many parameters")
     return {"name": name, "summary": summary, "params": fields,
-            "changes": bool(changes), "remote": bool(remote)}
+            "changes": bool(changes), "remote": bool(remote),
+            "operator": bool(operator)}
 
 
 def coerce(field: dict, raw):
@@ -182,8 +188,13 @@ class AppAPI:
     being read and a call being made simply is not there any more, and the call
     is refused — which is the honest answer, not an error to work around."""
 
-    def __init__(self, app_host) -> None:
+    def __init__(self, app_host, extra=None) -> None:
         self._host = app_host
+        # Apps that are not built in: attached to the data connector, they
+        # declared operations in their manifest and answer them over it
+        # (`DataConnector.api_catalogue`, `api_call`). Same declaration, same
+        # coercion, same refusals — the only difference is the pipe.
+        self._extra = extra
 
     # -- what exists ------------------------------------------------------
 
@@ -213,7 +224,21 @@ class AppAPI:
             operations = declared(bridge)
             if operations:
                 out.append({"app": app, "operations": operations})
+        taken = {entry["app"] for entry in out}
+        for entry in self._attached():
+            if entry["app"] not in taken:
+                out.append(entry)
         return out
+
+    def _attached(self) -> list:
+        if self._extra is None:
+            return []
+        try:
+            listing = self._extra.api_catalogue()
+        except Exception:
+            return []
+        return [entry for entry in listing if isinstance(entry, dict)
+                and _NAME_RE.match(str(entry.get("app") or ""))]
 
     def find(self, app: str, name: str) -> dict | None:
         """The declaration for one operation, or ``None`` if there is none.
@@ -222,6 +247,11 @@ class AppAPI:
         come back from here."""
         bridge = self._bridge(app)
         if bridge is None:
+            for entry in self._attached():
+                if entry["app"] == app:
+                    for row in entry.get("operations", ()):
+                        if row.get("name") == name:
+                            return row
             return None
         for entry in declared(bridge):
             if entry["name"] == name:
@@ -257,7 +287,18 @@ class AppAPI:
                 call_args[field["name"]] = coerce(field, args[field["name"]])
             except AppAPIError as exc:
                 raise AppAPIError(f"{field['name']}: {exc}") from None
-        handler = getattr(self._bridge(app), "api_" + name, None)
+        bridge = self._bridge(app)
+        if bridge is None and self._extra is not None:
+            # An attached app answers over the connector, after exactly the
+            # validation above — it is handed coerced, declared arguments only.
+            try:
+                result = self._extra.api_call(app, name, call_args)
+            except AppAPIError:
+                raise
+            except Exception as exc:
+                raise AppAPIError(f"{app}.{name} failed: {type(exc).__name__}") from None
+            return result if isinstance(result, dict) else {"result": result}
+        handler = getattr(bridge, "api_" + name, None)
         if not callable(handler):
             # Declared but not implemented: a bug in the app, not in the call.
             raise AppAPIError("operation is unavailable")
@@ -269,3 +310,44 @@ class AppAPI:
             # An app that throws must not hand its internals to the caller.
             raise AppAPIError(f"{app}.{name} failed: {type(exc).__name__}") from None
         return result if isinstance(result, dict) else {"result": result}
+
+
+def declare_all(raw) -> list[dict]:
+    """Operations an app *outside* this process declared in its manifest,
+    brought through exactly the checks a built-in's declaration meets.
+
+    Raises :class:`AppAPIError` on the first one that will not be kept, naming
+    it: an app that declared ten operations and hears nothing about the one
+    that was dropped would be calling it in vain."""
+    if not isinstance(raw, list) or len(raw) > MAX_OPERATIONS:
+        raise AppAPIError(f"api: a list of at most {MAX_OPERATIONS}")
+    out, seen = [], set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise AppAPIError("api: each operation is an object")
+        name = entry.get("name")
+        fields = entry.get("params", [])
+        if not isinstance(fields, list):
+            raise AppAPIError(f"api: {str(name)[:32]}: params is a list")
+        params = []
+        for field in fields:
+            if not isinstance(field, dict):
+                raise AppAPIError(f"api: {str(name)[:32]}: a parameter is an object")
+            default = field.get("default")
+            if default is not None and not isinstance(default, (str, int, bool)):
+                default = None
+            params.append(param(str(field.get("name") or ""),
+                                str(field.get("kind") or ""),
+                                required=field.get("required", True) is not False,
+                                default=default,
+                                help=str(field.get("help") or "")[:MAX_TEXT]))
+        summary = entry.get("summary")
+        declared_op = operation(str(name or ""),
+                                str(summary)[:MAX_TEXT] if isinstance(summary, str) else "",
+                                params, changes=entry.get("changes") is True,
+                                remote=entry.get("remote") is True)
+        if declared_op["name"] in seen:
+            continue
+        seen.add(declared_op["name"])
+        out.append(declared_op)
+    return out

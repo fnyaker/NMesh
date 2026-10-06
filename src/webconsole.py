@@ -40,6 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 from . import app_api
+from . import app_web
 from . import control
 from .control import listing
 from . import updater
@@ -265,6 +266,47 @@ _DOCKER_ARGS = ("id", "action", "tail", "image", "spec", "stack", "compose",
                 "url", "token", "fingerprint", "clear", "endpoint")
 
 
+class _WebSurface:
+    """The routes this console's app pages call, and a way to call one as the
+    page would (`src/control/modules/web.py`).
+
+    The routes come from the bundles themselves (`src/app_web.py`), for the apps
+    running right now: a page that is not served offers nothing."""
+
+    # Which bundles make up each app's page. The terminal is fleet's: its
+    # file browser is the `shell` right through another door.
+    _BUNDLES = {"/chat": ("CHAT_JS",), "/fleet": ("FLEET_JS", "TERM_JS")}
+
+    def __init__(self, console) -> None:
+        self._console = console
+
+    def routes(self) -> list:
+        from . import webassets
+        out = []
+        for app in self._console._apps():
+            names = self._BUNDLES.get(app.get("path"))
+            if not names or not app.get("running", True) or not app.get("installed", True):
+                continue
+            bundle = "".join(getattr(webassets, name, "") for name in names)
+            pairs = app_web.routes_in(bundle, "/api/" + str(app.get("id")) + "/")
+            out.append({"app": app.get("id"), "title": app.get("name"),
+                        "routes": [{"method": method, "path": path}
+                                   for method, path in pairs]})
+        return out
+
+    def call(self, method: str, path: str, body):
+        """``(status, content_type, bytes)`` — this console, over the loopback,
+        under a session that exists for this one call and is ended after it."""
+        from .apps.fleet_console import LocalConsole
+        local = LocalConsole()
+        local.bind(self._console)
+        token = self._console.issue_session_for_grant()
+        try:
+            return local.call(method, path, body, token)
+        finally:
+            self._console.revoke_session_for_grant(token)
+
+
 class WebConsole:
     def __init__(self, node, *, host: str = "127.0.0.1", port: int = 8787,
                  state_dir: str | None = None, use_tls: bool = True,
@@ -306,6 +348,11 @@ class WebConsole:
             changes=self._changes, api=lambda: self._api,
             host=lambda: self._app_host, restart=self.restart)
         self._plane = control.build(self._control_context)
+        self._control_context.provide(web=_WebSurface(self))
+        # Apps that reach the plane through the data connector: none until a
+        # connector is bound (`bind_connector`), and then only what each one
+        # was granted.
+        self._connector = None
 
         # Sessions: token -> expiry monotonic deadline.
         # Live sessions, keyed by a **handle** — the SHA-256 of the token —
@@ -605,8 +652,32 @@ class WebConsole:
         """The app API surface, over whatever is running right now.
 
         Built per access rather than held: an app stopped a second ago must not
-        still be reachable through a reference this object kept."""
-        return app_api.AppAPI(self._app_host)
+        still be reachable through a reference this object kept. Apps attached
+        to the data connector that declared operations are on it too."""
+        return app_api.AppAPI(self._app_host, extra=self._connector)
+
+    @property
+    def plane(self):
+        """The management plane this console answers with — one per node."""
+        return self._plane
+
+    def bind_connector(self, connector, perms) -> None:
+        """Let apps attached to ``connector`` drive this node, as far as
+        ``perms`` (the permission book) says each one may.
+
+        The gate is the plane's, the connector only carries frames to it: an app
+        reaches the same operations a page does, through the same validation,
+        and is refused by the same code a remote console is."""
+        from . import app_perms
+        self._connector = connector
+        gate = app_perms.ControlGate(perms, self._plane,
+                                     lambda app, op: self._api.find(app, op))
+        self._plane.set_app_gate(gate)
+        self._plane.set_hooks(getattr(connector, "hooks", None))
+        self._control_context.provide(perms=perms, connector=connector)
+        bind = getattr(connector, "bind_plane", None)
+        if bind is not None:
+            bind(self._plane)
 
     def _persist_setting(self, name: str, value) -> bool:
         """Remember one live toggle in the configuration file.
@@ -1948,6 +2019,7 @@ def _make_handler(console: WebConsole):
             many can be parked at once — each one is a thread of this server."""
             sid = (query.get("sid") or [""])[0]
             node = (query.get("node") or [""])[0]
+            rid = (query.get("rid") or [""])[0][:64]
             offset = _int_param(query, "offset", 0)
             wanted = (query.get("wait") or [""])[0] in ("1", "true", "yes")
             parked = False
@@ -1961,7 +2033,19 @@ def _make_handler(console: WebConsole):
                 # A page that has just asked for a shell knows the node, not the
                 # session: the open answers asynchronously. Naming the node is
                 # how a terminal draws itself without reading the whole ledger.
-                if not sid and node:
+                if not sid and rid:
+                    # The shell *this* request opened, or the reason it will
+                    # not open — a refusal is an answer, not a wait.
+                    sid, failure = console._fleet.wait_shell_rid(
+                        rid, _SHELL_HOLD if hold else 0.0)
+                    if failure:
+                        self._json(409, {"error": failure[:200], "failed": True})
+                        return
+                    if not sid:
+                        self._json(404, {"error": "no session"})
+                        return
+                    hold = False
+                elif not sid and node:
                     sid = (console._fleet.wait_shell_open(node, _SHELL_HOLD) if hold
                            else console._fleet.newest_shell(node))
                     if not sid:
