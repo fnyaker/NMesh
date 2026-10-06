@@ -95,6 +95,37 @@ class TestPrivileges:
         assert result.stdout.strip() == "[]"
 
 
+class TestTheCommandLine:
+    """`nmeshctl` is copied out of the install, which is mode 700 to the node's
+    account: an administrator over SSH must be able to run it."""
+
+    def test_where_it_goes(self, tmp_path):
+        root = run_snippet(tmp_path, "cli_path",
+                           fake_bins=[("id", "#!/bin/sh\necho 0\n")], isolate=True)
+        assert root.stdout.strip() == "/usr/local/bin/nmeshctl"
+        user = run_snippet(tmp_path, "cli_path",
+                           fake_bins=[("id", "#!/bin/sh\necho 1000\n")], isolate=True)
+        assert user.stdout.strip() == str(tmp_path / "home" / ".local/bin/nmeshctl")
+
+    def test_it_is_the_file_itself_and_runnable(self, tmp_path):
+        tree = tmp_path / "tree" / "scripts"
+        tree.mkdir(parents=True)
+        (tree / "nmeshctl.py").write_text("#!/usr/bin/env python3\nprint('hi')\n")
+        result = run_snippet(
+            tmp_path, f'install_cli "{tmp_path / "tree"}"',
+            fake_bins=[("id", "#!/bin/sh\necho 1000\n")],
+            env={"PATH": f"{tmp_path / 'stubbin'}:/usr/bin:/bin"})
+        assert result.returncode == 0, result.stderr
+        placed = Path(result.stdout.strip())
+        assert placed.read_text().endswith("print('hi')\n")
+        assert os.access(placed, os.X_OK)
+        assert not placed.is_symlink()
+
+    def test_the_shipped_one_starts_with_a_shebang(self):
+        assert (ROOT / "scripts" / "nmeshctl.py").read_text().startswith(
+            "#!/usr/bin/env python3\n")
+
+
 class TestPaths:
     def test_root_installs_under_opt(self, tmp_path):
         result = run_snippet(tmp_path, "default_prefix",
@@ -467,10 +498,12 @@ class TestPrefixIsNotOurs:
         assert not re.search(r'INSTALL_DIR=.*\$\{?PREFIX\b', self._code())
 
     def test_prefix_is_only_ever_read_as_termux_own(self):
-        """It is read again now — to find Termux's pkg, its service directory
-        and its sh — and that is exactly the value the rename protects."""
+        """It is read again now — to find Termux's pkg, its service directory,
+        its sh, and the bin directory its shell finds `nmeshctl` in — and that
+        is exactly the value the rename protects."""
         import re
-        termux_paths = ("bin/pkg", "bin/sh", "var/service", "var/log/sv")
+        termux_paths = ("bin/pkg", "bin/sh", "var/service", "var/log/sv",
+                        "bin/nmeshctl")
         for line in self._code().splitlines():
             if re.search(r'\$\{?PREFIX\b', line):
                 assert any(path in line for path in termux_paths), line

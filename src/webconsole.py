@@ -45,6 +45,7 @@ from . import control
 from .control import listing
 from . import updater
 from . import console_auth
+from . import console_sessions
 from .version import __version__
 from .control.modules.settings import write_settings
 from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
@@ -57,11 +58,15 @@ from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
 from .apps.fleet_docker import DockerError
 from . import console_feed
-from .apps.fleet_console import GOVERN_HEADER, REPLAY_HEADER
+from .apps.fleet_console import (APPS_HEADER, FULL_HEADER, GOVERN_HEADER,
+                                 REPLAY_HEADER)
 
 # The page names the node it is driving with this header. Absent (or naming us)
 # means "this node", which is what a page that has never heard of contexts does.
 _REMOTE_HEADER = "X-NMesh-Node"
+# The node to reach *through* the one `_REMOTE_HEADER` names — one hop on, and
+# only where that node granted `full`.
+_THEN_HEADER = "X-NMesh-Then"
 
 # The control channel's one route. Everything the management plane carries goes
 # through here as a frame (`src/control/frame.py`), whichever node it is for:
@@ -382,6 +387,11 @@ class WebConsole:
         self.generated_password: str | None = None
         self._salt, self._pw_hash = self._load_or_create_credentials(password)
         self._ssl_ctx = self._build_ssl_context() if use_tls else None
+        # The sessions a command line asked to keep across restarts
+        # (`nmeshctl login --for`). Beside the in-memory table, not instead of
+        # it: a tab's session still slides and still ends with the process.
+        self._lasting = console_sessions.LastingSessions(
+            console_sessions.path_for(state_dir))
 
     # -- credentials ------------------------------------------------------
 
@@ -431,7 +441,7 @@ class WebConsole:
             doomed = [handle for handle in self._tokens if handle != spared]
             for handle in doomed:
                 self._tokens.pop(handle, None)
-        return len(doomed)
+        return len(doomed) + self._lasting.revoke_all_except(keep)
 
     # -- TLS --------------------------------------------------------------
 
@@ -524,7 +534,7 @@ class WebConsole:
         with self._tokens_lock:
             held = self._tokens.get(handle)
             if held is None:
-                return False
+                return self._lasting.valid(token)
             stored, deadline = held
             # The digest found a candidate; this is what accepts it. Constant
             # time, because the thing being compared is the secret itself.
@@ -539,6 +549,7 @@ class WebConsole:
     def _revoke_token(self, token: str) -> None:
         with self._tokens_lock:
             self._tokens.pop(self._handle(token), None)
+        self._lasting.revoke(token)
 
     def _gc_tokens(self) -> None:
         now = time.monotonic()
@@ -727,11 +738,13 @@ class WebConsole:
         request handler knows where the frame came from and says so."""
         return control.LocalChannel(self._plane, origin)
 
-    def remote_channel(self, session: str, node_hex: str):
-        """The same channel, pointed at a node this operator manages."""
-        return control.RemoteChannel(node_hex, self._control_relay(session))
+    def remote_channel(self, session: str, node_hex: str,
+                       then: str | None = None):
+        """The same channel, pointed at a node this operator manages — or, with
+        ``then``, at a node *that one* manages, reached through it."""
+        return control.RemoteChannel(node_hex, self._control_relay(session, then))
 
-    def _control_relay(self, session: str):
+    def _control_relay(self, session: str, then: str | None = None):
         """How a frame reaches another node: the fleet's ``manage`` capability,
         replaying it against that node's console exactly as a browser there
         would (:mod:`src.apps.fleet_console`).
@@ -744,8 +757,12 @@ class WebConsole:
             if fleet is None:
                 raise control.ControlError("conflict",
                                            "the fleet app is not running")
+            if then and "full" not in fleet.granted(node_hex):
+                raise control.ControlError(
+                    "refused", "reaching on through that node needs the full "
+                    "capability")
             status, _ctype, payload = fleet.remote_call(
-                session, node_hex, "POST", CONTROL_PATH, frame)
+                session, node_hex, "POST", CONTROL_PATH, frame, then=then)
             if 200 <= int(status) < 300:
                 return payload
             # Not a frame: the relay itself refused (no session on that node,
@@ -1093,6 +1110,23 @@ def _make_handler(console: WebConsole):
             raw = (self.headers.get(_REMOTE_HEADER) or "").strip().lower()
             if not raw or raw == console._node.id.raw.hex():
                 return None
+            # A call replayed through the relay names a further node only when
+            # the relay wrote the header itself, which it does under `full`
+            # alone. Anything else carrying one is refused rather than obeyed
+            # or ignored: obeyed, this node would be a jump host for a grant
+            # that never said so; ignored, the call would run *here*.
+            if self.headers.get(REPLAY_HEADER) and not self.headers.get(FULL_HEADER):
+                return ""
+            return raw if _is_node_hex(raw) else ""
+
+        def _next_hop(self) -> str | None:
+            """The node to reach *through* the one being driven, or ``None``.
+
+            Asked of the operator's own console only — the far end reads the
+            hop from what its relay wrote, never from this header."""
+            raw = (self.headers.get(_THEN_HEADER) or "").strip().lower()
+            if not raw or self.headers.get(REPLAY_HEADER):
+                return None
             return raw if _is_node_hex(raw) else ""
 
         def _proxy_remote(self, node_hex: str, path: str,
@@ -1102,12 +1136,24 @@ def _make_handler(console: WebConsole):
             if fleet is None:
                 self._json(409, {"error": "the fleet app is not running"})
                 return
-            refusal = fleet_console_refusal(path)
+            then = self._next_hop()
+            if then == "":
+                self._json(400, {"error": "bad node id"})
+                return
+            # The same rule the far node applies, asked here of what *it*
+            # granted us, so a page is told at once rather than after a mesh
+            # round trip. The far node checks its own ledger whatever this says.
+            granted = fleet.granted(node_hex)
+            refusal = fleet_console_refusal(path, apps="apps" in granted,
+                                            full="full" in granted)
+            if not refusal and then and "full" not in granted:
+                refusal = "reaching on through that node needs the full capability"
             if refusal:
                 self._json(403, {"error": refusal})
                 return
             status, ctype, payload = fleet.remote_call(
-                self._session_token() or "", node_hex, self.command, path, body)
+                self._session_token() or "", node_hex, self.command, path, body,
+                then=then)
             self._send(status, str(ctype)[:128], payload)
 
         # -- the control channel -------------------------------------------
@@ -1122,7 +1168,11 @@ def _make_handler(console: WebConsole):
             """The channel this request is for, and the origin it speaks as."""
             remote = self._remote_node()
             if remote:
-                return console.remote_channel(self._session_token() or "", remote)
+                then = self._next_hop()
+                if then == "":
+                    return control.RefusedChannel("bad_request", "bad node id")
+                return console.remote_channel(self._session_token() or "",
+                                              remote, then)
             if remote == "":
                 # The header was there and was not a node id. Answering it here
                 # as "this node" would run the frame on the **wrong machine** —
@@ -1147,8 +1197,13 @@ def _make_handler(console: WebConsole):
         def _origin(self) -> str:
             if not self.headers.get(REPLAY_HEADER):
                 return control.Origin.LOCAL
-            return (control.Origin.GOVERN if self.headers.get(GOVERN_HEADER)
-                    else control.Origin.REMOTE)
+            if self.headers.get(FULL_HEADER):
+                return control.Origin.FULL
+            govern = bool(self.headers.get(GOVERN_HEADER))
+            if self.headers.get(APPS_HEADER):
+                return (control.Origin.GOVERN_APPS if govern
+                        else control.Origin.REMOTE_APPS)
+            return control.Origin.GOVERN if govern else control.Origin.REMOTE
 
         def _handle_control(self, body) -> None:
             """One frame in, one frame out.
@@ -1246,6 +1301,19 @@ def _make_handler(console: WebConsole):
                 return
             if path == "/api/invite/issuers":
                 self._handle_invite_issuers()
+                return
+            if path == "/api/session":
+                # The caller's own session: whether it outlives a restart and
+                # until when, and the lasting ones this console holds. Labels
+                # and dates only — never a token, never a hash.
+                if not self._authed():
+                    self._json(401, {"error": "unauthorized"})
+                    return
+                until = console._lasting.deadline(self._session_token())
+                self._json(200, {"lasting": until is not None,
+                                 "expires_at": int(until) if until else None,
+                                 "sessions": console._lasting.overview(),
+                                 "node": console._node.id.raw.hex()})
                 return
             if path == "/api/events":
                 self._stream_changes()
@@ -2656,6 +2724,16 @@ def _make_handler(console: WebConsole):
             console._record_login_result(ok)
             if not ok:
                 self._json(401, {"error": "invalid password"})
+                return
+            # `for`: a command line asking to stay signed in across restarts,
+            # for a lifetime it names (capped). No cookie for it — a browser
+            # never asks this, and a cookie would hand a tab a session that
+            # outlives the tab.
+            lasting = (data or {}).get("for")
+            if lasting is not None:
+                token, until = console._lasting.issue(
+                    lasting, (data or {}).get("label") or "")
+                self._json(200, {"token": token, "expires_at": int(until)})
                 return
             token = console._issue_token()
             self._json(200, {"token": token},

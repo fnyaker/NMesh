@@ -182,6 +182,28 @@ class TestRemoteIsRefusedByDefault:
         refused = plane.dispatch(control.Request("sample.here"), Origin.REMOTE)
         assert refused.ok is False and refused.code == "refused"
 
+    def test_full_is_answered_as_this_machine_would_be(self):
+        plane = _plane()
+        assert plane.dispatch(control.Request("sample.here"), Origin.FULL).ok
+        local = {e["name"] for e in plane.catalogue(Origin.LOCAL)[0]["operations"]}
+        full = {e["name"] for e in plane.catalogue(Origin.FULL)[0]["operations"]}
+        assert full == local
+
+    def test_the_apps_grant_adds_no_reach_over_the_nodes_own_operations(self):
+        plane = _plane()
+        for origin, base in ((Origin.REMOTE_APPS, Origin.REMOTE),
+                             (Origin.GOVERN_APPS, Origin.GOVERN)):
+            names = lambda o: {e["name"] for e in plane.catalogue(o)[0]["operations"]}
+            assert names(origin) == names(base), origin
+            assert plane.dispatch(control.Request("sample.here"), origin).ok is False
+
+    def test_full_is_still_a_console_at_a_distance(self):
+        """Answered as if here, held to the relay's bounds: a job's ceiling and
+        a reply's size are about the wire, not about trust."""
+        assert control.at_a_distance(Origin.FULL)
+        assert not control.at_a_distance(Origin.LOCAL)
+        assert not control.at_a_distance(Origin.app("ab" * 8))
+
     def test_an_unknown_origin_is_refused(self):
         assert _plane().dispatch(control.Request("sample.read"), "whoever").ok is False
 
@@ -806,6 +828,25 @@ class TestAppsOnTheChannel:
         # And the one that says so travels.
         assert there.call("apps.call", {"app": "demo", "op": "look",
                                         "args": {"node": "ab" * 20}}).ok
+
+    def test_govern_says_nothing_about_an_apps_operations(self):
+        """`govern` is a grant about trust. It reached every operation an app
+        declared, the ones it kept at home included, because the gate asked "is
+        this the plain remote console?" and answered yes to everybody else."""
+        plane = self._plane_over({"demo": self._Bridge()})
+        there = control.LocalChannel(plane, Origin.GOVERN)
+        refused = there.call("apps.call", {"app": "demo", "op": "touch",
+                                           "args": {"node": "ab" * 20}})
+        assert refused.ok is False and refused.code == "refused"
+        offered = there.call("apps.catalogue").result["apps"][0]["operations"]
+        assert [row["name"] for row in offered] == ["look"]
+
+    def test_the_apps_grant_reaches_what_an_app_kept_at_home(self):
+        plane = self._plane_over({"demo": self._Bridge()})
+        for origin in (Origin.REMOTE_APPS, Origin.GOVERN_APPS, Origin.FULL):
+            there = control.LocalChannel(plane, origin)
+            assert there.call("apps.call", {"app": "demo", "op": "touch",
+                                            "args": {"node": "ab" * 20}}).ok, origin
 
     def test_the_catalogue_hides_what_that_console_cannot_call(self):
         plane = self._plane_over({"demo": self._Bridge()})
@@ -1774,7 +1815,8 @@ class TestConsoleControlRoute:
         seen = {}
 
         class _FakeFleetBridge:
-            def remote_call(self, session, node_hex, method, path, body):
+            def remote_call(self, session, node_hex, method, path, body,
+                            then=None):
                 seen.update(session=session, node=node_hex, method=method,
                             path=path, frame=json.loads(body))
                 return 200, "application/json", control.encode(
@@ -1807,7 +1849,8 @@ class TestConsoleControlRoute:
         node, console = await _make_console()
 
         class _Silent:
-            def remote_call(self, session, node_hex, method, path, body):
+            def remote_call(self, session, node_hex, method, path, body,
+                            then=None):
                 return 502, "application/json", json.dumps(
                     {"error": "could not reach that node (TimeoutError)"}).encode()
 
@@ -1826,7 +1869,8 @@ class TestConsoleControlRoute:
         node, console = await _make_console()
 
         class _NoSession:
-            def remote_call(self, session, node_hex, method, path, body):
+            def remote_call(self, session, node_hex, method, path, body,
+                            then=None):
                 return 401, "application/json", json.dumps(
                     {"error": "no session on that node"}).encode()
 

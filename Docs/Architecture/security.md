@@ -340,6 +340,41 @@ timing signal from a hash-table lookup is very weak. This is not a hole that was
 being walked through. It is an absolute that was not absolute, which is the kind
 of thing that stays wrong until something else leans on it.
 
+### A session that outlives the process (`console_sessions.py`)
+
+`nmeshctl login --for 8h` asks for a session that survives the node's restarts
+— an update is a restart, and an operator at a terminal must not be signed out
+by one. What changes from a tab's session, and why each is the way it is:
+
+- **Written down, as a hash only** (`console.sessions`, 0600 from its first
+  byte, replaced atomically). The token is 32 bytes from `secrets`, so the
+  SHA-256 indexing it is not invertible into a way in, and a reader of the file
+  learns that sessions exist and until when, never one they could use.
+- **An absolute end, never sliding**, chosen at login and capped at 24 h. A
+  credential sitting in a file on another machine ends on a date somebody
+  chose, not whenever its holder stops using it. A deadline further than any
+  login could have asked for is dropped on load rather than believed.
+- **Bounded** (16, the oldest pushed out) and **ended by everything that ends
+  the others**: sign-out, a password change through the console (the caller's
+  own spared, as for a tab), and `install.sh --reset-password`, which changes
+  the credential without the console and so removes the file itself — a reset
+  is what somebody does who thinks a way in was stolen.
+- **No cookie.** A browser never asks for one, and a cookie would hand a tab a
+  session that outlives the tab.
+
+### `full`: the grant that is every grant
+
+Every grant in the fleet ledger names one thing, and one never implies another
+— except `full`, whose meaning is "all of them", plus the two things none of
+them gives: the console answering as if the operator sat at the machine
+(`Origin.FULL`, which reaches the local-only operations), and the node acting as
+a **jump host** towards the nodes it manages. It is asked for and given like
+the others, by a human on the machine that bears it, and taken back the same
+way. Holding it is checked through one function (`fleet_state.effective_caps`)
+wherever a grant is checked, so "holds `full`" and "holds everything" cannot be
+two answers. The question to ask before granting it is the charter's: *what
+would they do with this?* — everything this node can do, to it and through it.
+
 ## Noise is charged to whoever sent it, not to the socket it arrived on
 
 `AGENTS.md` is explicit: *counted per identity, not per link — a peer that

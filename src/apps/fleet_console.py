@@ -55,6 +55,14 @@ REPLAY_HEADER = "X-NMesh-Replayed"
 # header anybody holding a console session could set, and a console session is
 # already more than it grants.
 GOVERN_HEADER = "X-NMesh-Govern"
+# The same, for the `apps` and `full` grants — written here from the ledger,
+# read only beside the replay marker, for the same reason.
+APPS_HEADER = "X-NMesh-Apps"
+FULL_HEADER = "X-NMesh-Full"
+# The node the replayed call is for, when the operator reaches *through* this
+# one to a node it manages. The console's own context header, set here — and
+# only under `full`, which is the one grant that makes this node a jump host.
+NODE_HEADER = "X-NMesh-Node"
 READ_MAX = 512 * 1024
 
 
@@ -171,13 +179,15 @@ class LocalConsole:
             raise ConsoleError("the console's certificate does not match")
 
     def call(self, method: str, path: str, body: bytes | None,
-             token: str | None, *, govern: bool = False,
+             token: str | None, *, govern: bool = False, apps: bool = False,
+             full: bool = False, node: str | None = None,
              timeout: float = CALL_TIMEOUT) -> tuple:
         """``(status, content_type, body)`` — blocking, run it through
         :func:`bounded`.
 
-        ``govern`` is the caller's second grant, read from the ledger by the
-        handler above us and never from anything the caller sent."""
+        ``govern``, ``apps`` and ``full`` are the caller's grants, read from the
+        ledger by the handler above us and never from anything the caller
+        sent; ``node`` is honoured only beside ``full``."""
         connection = self._connection(timeout)
         try:
             connection.connect()
@@ -186,6 +196,12 @@ class LocalConsole:
             headers = {"Accept": "application/json", REPLAY_HEADER: "1"}
             if govern:
                 headers[GOVERN_HEADER] = "1"
+            if apps:
+                headers[APPS_HEADER] = "1"
+            if full:
+                headers[FULL_HEADER] = "1"
+                if node:
+                    headers[NODE_HEADER] = node
             if token:
                 headers["Authorization"] = "Bearer " + token
             if body is not None:

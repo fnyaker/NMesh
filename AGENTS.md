@@ -302,6 +302,32 @@ scope. Add yours.
   `relay_only` links and a relay's joiner link are unauthenticated on purpose
   for as long as a relayed join lives, and it would have cut them. Caught before
   coding. → Before broadening a sweep, list every holder of the state it reaps.
+- **The same history comment, twice.** After the rule above was written, the
+  next change wrote "this used to let through…" into `apps._reachable`. Caught
+  on reread again. → Before committing, reread every comment you added, and
+  delete any sentence about what the code *was*.
+- **A test that could not fail.** An "ambiguous name" test named a prefix only
+  one node had, so it would have passed against code that never detects
+  ambiguity. Caught by reading the test before running it. → For each new test,
+  say which line of the code under test it would catch removed.
+- **`str()` on a value that may be absent.** `nmeshctl` joined an unset
+  `--caps` option into the list as the capability `"None"`, and a bare
+  `--flag` swallowed the next `name=value` as its answer. Both caught by the
+  tests written beside them. → Optional inputs are checked for presence, never
+  stringified; a value is consumed only when it is one of the values expected.
+- **A new secret beside a credential, and a writer of that credential that
+  never heard of it.** Sessions that outlive restarts were ended by a password
+  change through the console, and not by `install.sh --reset-password`, which
+  writes the credential directly — the one path used when a way in is thought
+  stolen. Caught while wiring the installer. → When state hangs off a
+  credential, find every writer of the credential, not only the one you call.
+- **Test doubles updated where the default run looks, and nowhere else.** A
+  signature change (`LocalConsole.call` gained `apps`, `full`, `node`) was
+  carried into every stub under `tests/` — and not into the two in
+  `tests/integration/test_fleet.py`, which `pytest -q` ignores. Six integration
+  tests failed with a 502 that read like a relay bug. → After changing a
+  signature, `grep -rn` the method name over `tests/` *including*
+  `tests/integration`, and run both suites before calling it green.
 - **An empty log answer read as "nothing happened".** After a restart the log
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not
