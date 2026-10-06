@@ -64,7 +64,9 @@ class NodeModule:
                   [param("confirm", "flag")],
                   changes=True, remote=True, timeout=_READ),
         operation("speedtest", "Measure the link to one node by loading it",
-                  [param("node", "node")],
+                  [param("node", "node"),
+                   param("bundle", "flag", required=False, default=False,
+                         help="load every direct link of the node's bundle at once")],
                   remote=True, background=True, timeout=_SPEEDTEST),
         operation("retry", "Dial a node's known addresses now",
                   [param("node", "node"),
@@ -152,7 +154,7 @@ class NodeModule:
     def op_ping(self) -> dict:
         return {"ok": True, **self._ask(self._node.console_ping_peers(), _READ)}
 
-    def op_speedtest(self, node: str) -> dict:
+    def op_speedtest(self, node: str, bundle: bool = False) -> dict:
         """What this link actually carries, rather than what it is called.
 
         The charter names a speed principle and a figure to beat, and nothing
@@ -160,7 +162,8 @@ class NodeModule:
         loading one. This is the one that spends it, so it is bounded by the
         node (`node._SPEED_MAX_BYTES`, `_SPEED_MAX_SECONDS`) and refused
         outright without a direct authenticated link."""
-        return self._ask(self._node.console_speedtest(node), _SPEEDTEST)
+        return self._ask(self._node.console_speedtest(node, bool(bundle)),
+                         _SPEEDTEST)
 
     def op_ping_node(self, node: str) -> dict:
         return self._ask(self._node.console_ping_node(node), _PING_NODE)

@@ -1558,7 +1558,20 @@ class MeshNode:
             return
         fut.set_result(len(packet.payload))
 
-    async def console_speedtest(self, node_id_hex: str) -> dict:
+    def _speed_members(self, target: NodeID) -> list['_Peer']:
+        """The direct links in the active bundle to ``target``. Routed members
+        are left out: a probe through a neighbour measures the neighbour's
+        links, and the far end refuses one that does not arrive directly."""
+        bundle = self._bundles.get(target)
+        if bundle is None or not bundle.active:
+            return []
+        return [member for member in bundle.keys
+                if not isinstance(member, routed.Path)
+                and member.session is not None
+                and member.authenticated_id == target]
+
+    async def console_speedtest(self, node_id_hex: str,
+                                bundle: bool = False) -> dict:
         """Load the link to one node and say how fast it actually is.
 
         Bounded twice over — by bytes and by seconds, whichever ends first — so
@@ -1570,24 +1583,46 @@ class MeshNode:
         sliding window for the rate and the latency under load. The gap
         between those two latencies is what a queue somewhere on the path
         adds when the link is busy — the one number a "how fast" figure alone
-        hides."""
+        hides.
+
+        The window opens as the link shows it can take more: one probe more
+        per echo, until the round trip under load passes twice the one at rest
+        (a queue is filling: the link is full) or a probe is lost. A fixed
+        eight in flight read at most eight probes per round trip — about
+        1 MB/s at 130 ms — whatever the link could carry.
+
+        ``bundle`` loads every direct member of the node's active bundle at
+        once, each with a window of its own, and reports them together and one
+        by one: what multi-link operation adds is the sum, and no single link
+        can show it."""
         try:
             nid = NodeID(bytes.fromhex(node_id_hex))
         except (ValueError, TypeError):
             return {"ok": False, "error": "bad id"}
         if nid == self._id:
             return {"ok": False, "error": "a node cannot measure itself"}
-        peer = self._link_to(nid)
-        if peer is None or peer.session is None:
-            return {"ok": False, "error": "no direct link to that node"}
-        if not self.peer_announces(peer, features.SPEEDTEST):
+        if bundle:
+            members = self._speed_members(nid)
+            if len(members) < 2:
+                return {"ok": False,
+                        "error": "no bundle of two direct links to that node"}
+        else:
+            peer = self._link_to(nid)
+            if peer is None or peer.session is None:
+                return {"ok": False, "error": "no direct link to that node"}
+            members = [peer]
+        if not self.peer_announces(members[0], features.SPEEDTEST):
             return {"ok": False, "error": "that node does not run speed tests"}
 
         payload = os.urandom(_SPEED_CHUNK - _QID_LEN)
         loop = asyncio.get_running_loop()
         inflight: dict[bytes, tuple] = {}
+        books = [{"link": member, "window": _SPEED_INFLIGHT,
+                  "peak": _SPEED_INFLIGHT, "grow": True, "flying": 0,
+                  "idle": [], "loaded": [], "echoed": 0, "lost": 0}
+                 for member in members]
 
-        async def launch() -> None:
+        async def launch(book: dict) -> None:
             qid = os.urandom(_QID_LEN)
             future: asyncio.Future = loop.create_future()
             while len(self._pending_echo) >= _PENDING_ECHO_MAX:
@@ -1595,19 +1630,35 @@ class MeshNode:
                 if not old.done():
                     old.cancel()
             self._pending_echo[qid] = (nid, future)
-            inflight[qid] = (future, time.monotonic())
-            await peer.send(Packet.create(SPEED_PROBE, self._id.raw,
-                                          nid.raw, qid + payload))
+            inflight[qid] = (future, time.monotonic(), book)
+            book["flying"] += 1
+            await book["link"].send(Packet.create(SPEED_PROBE, self._id.raw,
+                                                  nid.raw, qid + payload))
 
         def settle(qid) -> None:
-            future, _at = inflight.pop(qid)
+            future, _at, book = inflight.pop(qid)
+            book["flying"] -= 1
             self._pending_echo.pop(qid, None)
             if not future.done():
                 future.cancel()
 
+        def landed(book: dict, rtt_ms: float) -> None:
+            book["loaded"].append(rtt_ms)
+            if not book["grow"]:
+                return
+            if book["idle"] and rtt_ms > (2.0 * min(book["idle"])
+                                          + _SPEED_QUEUE_SLACK_MS):
+                book["grow"] = False
+                return
+            book["window"] = min(book["window"] + 1, _SPEED_INFLIGHT_MAX)
+            book["peak"] = max(book["peak"], book["window"])
+
+        def lost_one(book: dict) -> None:
+            book["lost"] += 1
+            book["grow"] = False
+            book["window"] = max(_SPEED_INFLIGHT, book["window"] // 2)
+
         sent = echoed = lost = 0
-        idle: list[float] = []
-        loaded: list[float] = []
         first_echo = last_echo = None
         first_size = 0
         started = time.monotonic()
@@ -1615,21 +1666,24 @@ class MeshNode:
         try:
             # At rest first, one probe at a time: the latency of the link with
             # nothing queued on it, which is what "under load" is compared to.
-            for _ in range(_SPEED_IDLE_PROBES):
-                await launch()
-                sent += _SPEED_CHUNK
-                [(qid, (future, at))] = inflight.items()
-                try:
-                    size = await asyncio.wait_for(
-                        asyncio.shield(future),
-                        min(_SPEED_PROBE_TIMEOUT,
-                            max(0.05, deadline - time.monotonic())))
-                    echoed += int(size)
-                    idle.append((time.monotonic() - at) * 1000.0)
-                except Exception:
-                    lost += 1
-                finally:
-                    settle(qid)
+            for book in books:
+                for _ in range(_SPEED_IDLE_PROBES):
+                    await launch(book)
+                    sent += _SPEED_CHUNK
+                    [(qid, (future, at, _book))] = inflight.items()
+                    try:
+                        size = await asyncio.wait_for(
+                            asyncio.shield(future),
+                            min(_SPEED_PROBE_TIMEOUT,
+                                max(0.05, deadline - time.monotonic())))
+                        echoed += int(size)
+                        book["echoed"] += int(size)
+                        book["idle"].append((time.monotonic() - at) * 1000.0)
+                    except Exception:
+                        lost += 1
+                        book["lost"] += 1
+                    finally:
+                        settle(qid)
             load_started = time.monotonic()
             # Then a sliding window: a probe leaves as each echo lands, so the
             # link is never idle waiting for the slowest of a batch, and a lost
@@ -1644,37 +1698,43 @@ class MeshNode:
                     drain_until = now + min(1.0, _SPEED_PROBE_TIMEOUT)
                 if drain_until is not None and now >= drain_until:
                     break
-                while (drain_until is None and len(inflight) < _SPEED_INFLIGHT
-                       and sent < _SPEED_MAX_BYTES):
-                    await launch()
-                    sent += _SPEED_CHUNK
+                for book in books:
+                    while (drain_until is None and book["flying"] < book["window"]
+                           and sent < _SPEED_MAX_BYTES):
+                        await launch(book)
+                        sent += _SPEED_CHUNK
                 if not inflight:
                     break
                 now = time.monotonic()
                 limit = deadline if drain_until is None else drain_until
                 wait = min(_SPEED_PROBE_TIMEOUT, max(0.01, limit - now))
-                await asyncio.wait([future for future, _ in inflight.values()],
+                await asyncio.wait([future for future, _, _ in inflight.values()],
                                    timeout=wait,
                                    return_when=asyncio.FIRST_COMPLETED)
                 now = time.monotonic()
-                for qid, (future, at) in list(inflight.items()):
+                for qid, (future, at, book) in list(inflight.items()):
                     if future.done() and not future.cancelled():
                         size = int(future.result())
                         echoed += size
-                        loaded.append((now - at) * 1000.0)
+                        book["echoed"] += size
+                        landed(book, (now - at) * 1000.0)
                         if first_echo is None:
                             first_echo, first_size = now, size
                         last_echo = now
                         settle(qid)
                     elif now - at >= _SPEED_PROBE_TIMEOUT or future.done():
                         lost += 1
+                        lost_one(book)
                         settle(qid)
         except Exception:
             return {"ok": False, "error": "the link failed during the test"}
         finally:
             lost += len(inflight)
             for qid in list(inflight):
+                inflight[qid][2]["lost"] += 1
                 settle(qid)
+        idle = [ms for book in books for ms in book["idle"]]
+        loaded = [ms for book in books for ms in book["loaded"]]
         elapsed = max(1e-6, time.monotonic() - started)
         loading = max(1e-6, time.monotonic() - load_started)
         # The rate is read between the first echo of the load and the last:
@@ -1710,7 +1770,18 @@ class MeshNode:
             "rtt_ms": (round(sum(loaded) / len(loaded), 1) if loaded
                        else None),
             "best_ms": round(min(everything), 1) if everything else None,
-            "transport": self._peer_scheme(peer),
+            "transport": "+".join(self._peer_scheme(book["link"])
+                                  for book in books),
+            "links": [{
+                "link": self._label(book["link"]),
+                "transport": self._peer_scheme(book["link"]),
+                "echoed_bytes": book["echoed"],
+                "lost_probes": book["lost"],
+                "idle_ms": round(min(book["idle"]), 1) if book["idle"] else None,
+                "rtt_ms": (round(sum(book["loaded"]) / len(book["loaded"]), 1)
+                           if book["loaded"] else None),
+                "window": book["peak"],
+            } for book in books],
         }
 
     async def _handle_echo_request(self, peer: _Peer, packet: Packet) -> None:
