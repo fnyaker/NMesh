@@ -32,7 +32,8 @@ CHAT_HTML = """<!doctype html>
 <link rel="stylesheet" href="/chat.css">
 </head>
 <body data-app-name="NMesh Chat"
-      data-ctx-local="Chat runs on this node — its conversations are not part of managing another.">
+      data-ctx-needs="apps"
+      data-ctx-local="Chat runs on this node — that one has not granted this one its apps.">
 
 <div id="login" class="gate hidden">
   <form id="login-form">
@@ -587,8 +588,9 @@ function convAvatarId(conv){ return convIsGroup(conv) ? null : conv; }
 function avatarHTML(id, name, cls){
   const c = "ch-av" + (cls ? " " + cls : "");
   if(id && hasAvatar(id))
-    return '<span class="' + c + '"><img alt="" src="/api/chat/avatar?id=' +
-           encodeURIComponent(id) + '&v=' + VER + '"></span>';
+    return '<span class="' + c + '"><img alt="" ' +
+           MEDIA.attr("/api/chat/avatar?id=" + encodeURIComponent(id) + "&v=" + VER) +
+           "></span>";
   return '<span class="' + c + '">' + esc(initials(name)) + "</span>";
 }
 
@@ -816,12 +818,13 @@ function paintMsg(el, m, prev){
   if(m.deleted){
     html += '<div class="ch-txt">deleted message</div>';
   }else if(m.kind === "image"){
-    html += '<img class="ch-media" alt="' + esc(m.name || "") + '" src="/api/chat/file?mid=' +
-            encodeURIComponent(m.mid) + '">';
+    html += '<img class="ch-media" alt="' + esc(m.name || "") + '" ' +
+            MEDIA.attr("/api/chat/file?mid=" + encodeURIComponent(m.mid)) + ">";
     if(m.text) html += '<div class="ch-txt">' + linkify(m.text) + "</div>";
   }else if(m.kind === "file"){
-    html += '<a class="ch-file" href="/api/chat/file?mid=' + encodeURIComponent(m.mid) +
-      '" download="' + esc(m.name || "file") + '"><span class="fi">' + icon("file") + "</span>" +
+    html += '<a class="ch-file" ' +
+      MEDIA.attr("/api/chat/file?mid=" + encodeURIComponent(m.mid), "href") +
+      ' download="' + esc(m.name || "file") + '"><span class="fi">' + icon("file") + "</span>" +
       '<span class="fm"><span class="fn">' + esc(m.name || "file") + "</span>" +
       '<span class="muted tiny">' + esc(fmtBytes(m.size)) + "</span></span></a>";
   }else{
@@ -1012,7 +1015,7 @@ function openSettings(){
   $("set-bio").value = ST.bio || "";
   $("set-id").textContent = ST.me || "";
   setHTML("set-av", ST.has_avatar
-    ? '<img alt="" src="/api/chat/avatar?id=self&v=' + VER + '">'
+    ? '<img alt="" ' + MEDIA.attr("/api/chat/avatar?id=self&v=" + VER) + ">"
     : esc(initials(ST.pseudo)));
   $("set-details").value = detailMode();
   pendingAvatar = undefined; $("settings").showModal();

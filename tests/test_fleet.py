@@ -338,13 +338,19 @@ class StubConsole:
         self.issued = []
         self.revoked = []
         self.governed = []
+        self.grants = []
+        self.hops = []
 
-    def call(self, method, path, body, token, govern=False, timeout=None):
+    def call(self, method, path, body, token, govern=False, apps=False,
+             full=False, node=None, timeout=None):
         self.calls.append((method, path, body, token))
-        # The second grant, as the agent read it from its own ledger. Recorded
-        # apart from the call so a test can check the thing that matters: it is
-        # never taken from what the peer sent.
+        # The grants, as the agent read them from its own ledger. Recorded
+        # apart from the call so a test can check the thing that matters: they
+        # are never taken from what the peer sent.
         self.governed.append(bool(govern))
+        self.grants.append({"govern": bool(govern), "apps": bool(apps),
+                            "full": bool(full)})
+        self.hops.append(node)
         return self.status, self.ctype, self.body
 
     def issue_session(self):
@@ -1694,3 +1700,108 @@ class TestShellEnvironment:
         from src.apps import fleet as fleet_module
         monkeypatch.setenv("NMESH_CONNECTOR_TOKEN", "secret")
         assert "NMESH_CONNECTOR_TOKEN" not in fleet_module._shell_env()
+
+
+class TestFullAndApps:
+    """`full` stands for every capability, and `apps` opens the apps' surfaces
+    to a remote console — each read from the agent's own ledger, and each
+    opening exactly the families it names."""
+
+    def test_full_is_every_capability_wherever_a_grant_is_checked(self):
+        from src.apps.fleet_state import effective_caps
+        state = FleetState()
+        state.add_operator("ab" * 20, b"k", caps=["full"])
+        state.add_managed("cd" * 20, caps=["full"])
+        for cap in CAPABILITIES:
+            assert state.allows("ab" * 20, cap), cap
+            assert state.may_use("cd" * 20, cap), cap
+        # What a human ticked is what is stored and shown.
+        assert state.operator("ab" * 20)["caps"] == ["full"]
+        assert effective_caps(["full"]) == list(CAPABILITIES)
+
+    def test_apps_alone_implies_nothing_else(self):
+        state = FleetState()
+        state.add_operator("ab" * 20, b"k", caps=["manage", "apps"])
+        assert not state.allows("ab" * 20, "govern")
+        assert not state.allows("ab" * 20, "shell")
+        assert not state.allows("ab" * 20, "full")
+
+    def test_each_family_opens_with_its_own_grant_and_nothing_less(self):
+        refuse = fleet.console_path_refusal
+        assert refuse("/api/state") == ""
+        assert refuse("/index.html")
+        assert refuse("/index.html", full=True)       # the page is served locally
+        for path in ("/api/chat/send", "/api/fleet/state", "/api/remote/targets"):
+            assert refuse(path), path
+        assert refuse("/api/chat/send", apps=True) == ""
+        assert refuse("/api/fleet/state", apps=True)  # the jump host is `full`'s
+        assert refuse("/api/remote/connect", apps=True)
+        for path in ("/api/chat/send", "/api/fleet/state", "/api/remote/connect"):
+            assert refuse(path, full=True) == "", path
+
+    async def test_the_grants_are_read_from_the_ledger_not_the_call(
+            self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage"])
+        agent.app._on_console_request(
+            operator.id, None,
+            {"rid": "r1", "method": "GET", "path": "/api/state",
+             "apps": True, "full": True, "govern": True})
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if console.grants:
+                break
+        assert console.grants == [{"govern": False, "apps": False, "full": False}]
+
+    async def test_apps_reaches_chat_and_not_fleet(self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage"])
+        agent.app.state.add_operator(operator.id.raw.hex(), b"k",
+                                     caps=["manage", "apps"])
+        chat = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/chat/messages"))
+        await deliver_both(operator, agent)
+        assert (await chat)[0] == 200
+        fleet_page = asyncio.ensure_future(
+            operator.app.console_call(agent.id, "GET", "/api/fleet/state"))
+        await deliver_both(operator, agent)
+        with pytest.raises(ConsoleProxyError) as refused:
+            await fleet_page
+        assert "full" in str(refused.value)
+        assert [call[1] for call in console.calls] == ["/api/chat/messages"]
+        assert console.grants[0]["apps"] is True
+
+    async def test_reaching_on_through_a_node_needs_full(self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage", "govern"])
+        beyond = "ef" * 20
+        task = asyncio.ensure_future(operator.app.console_call(
+            agent.id, "POST", "/api/control", b"{}", then=beyond))
+        await deliver_both(operator, agent)
+        with pytest.raises(ConsoleProxyError) as refused:
+            await task
+        assert "full" in str(refused.value)
+        assert console.calls == []
+
+        agent.app.state.add_operator(operator.id.raw.hex(), b"k", caps=["full"])
+        task = asyncio.ensure_future(operator.app.console_call(
+            agent.id, "POST", "/api/control", b"{}", then=beyond))
+        await deliver_both(operator, agent)
+        assert (await task)[0] == 200
+        assert console.hops == [beyond]
+        assert console.grants == [{"govern": True, "apps": True, "full": True}]
+
+    async def test_a_hop_that_is_not_a_node_is_refused(self, operator, agent):
+        console = StubConsole()
+        agent.app._local_console = console
+        await enrol(operator, agent, caps=["manage"])
+        agent.app.state.add_operator(operator.id.raw.hex(), b"k", caps=["full"])
+        agent.app._on_console_request(
+            operator.id, None, {"rid": "r1", "method": "GET", "path": "/api/state",
+                                "node": "../../etc"})
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert console.calls == []

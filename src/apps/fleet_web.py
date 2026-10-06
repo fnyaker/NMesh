@@ -38,7 +38,7 @@ from .fleet import (
     ShellClosed, ShellOpened, ShellOutput, StatusReceived,
 )
 from .fleet_state import (CAP_DESCRIPTIONS, CAPABILITIES, clean_caps,
-                          clean_stack_names)
+                          clean_stack_names, effective_caps)
 
 MAX_LOG = 500                 # activity lines kept for the UI
 MAX_SHELL_BACKLOG = 256 * 1024   # bytes buffered per shell session
@@ -710,7 +710,7 @@ class FleetBridge:
         answer = self._links.view()
         answer["following"] = self._app.following_links()
         answer["may_ask"] = [row["id"] for row in self._app.state.managed()
-                             if "links" in (row.get("caps") or [])]
+                             if "links" in effective_caps(row.get("caps"))]
         return answer
 
     def forget_links(self, node: str = "") -> dict:
@@ -732,7 +732,7 @@ class FleetBridge:
             node = entry.get("id") or ""
             caps = list(entry.get("caps") or [])
             badges = ["managed"]
-            if "logs" in caps and node in following:
+            if "logs" in effective_caps(caps) and node in following:
                 badges.append("log")
             out[node] = {"badges": badges, "label": entry.get("label") or "",
                          "caps": caps, "tone": "ok"}
@@ -856,11 +856,16 @@ class FleetBridge:
         return [
             {"id": entry["id"], "label": entry.get("label") or "",
              "pseudo": self._name_of(entry["id"]),
-             "passwordless": "passwordless" in (entry.get("caps") or []),
+             "passwordless": "passwordless" in effective_caps(entry.get("caps")),
+             # What a page may send there beyond the console: chat with
+             # `apps`, fleet's own page and the relay itself with `full`. The
+             # far node checks its ledger whatever this says — this only stops
+             # a page asking for what will be refused.
+             "caps": effective_caps(entry.get("caps")),
              "connected": entry["id"] in open_now}
             for entry in sorted(self._app.state.managed(),
                                 key=lambda item: item.get("label") or item["id"])
-            if "manage" in (entry.get("caps") or [])
+            if "manage" in effective_caps(entry.get("caps"))
         ]
 
     def invite_issuers(self) -> list:
@@ -876,7 +881,7 @@ class FleetBridge:
              "pseudo": self._name_of(entry["id"])}
             for entry in sorted(self._app.state.managed(),
                                 key=lambda item: item.get("label") or item["id"])
-            if "invite" in (entry.get("caps") or [])
+            if "invite" in effective_caps(entry.get("caps"))
         ]
 
     def remote_connect(self, session: str, node_hex: str,
@@ -929,8 +934,15 @@ class FleetBridge:
             for key in [k for k in self._remote if k[0] == session]:
                 self._remote.pop(key, None)
 
+    def granted(self, node_hex: str) -> list:
+        """What ``node_hex`` granted us, ``full`` expanded — the rights a page
+        driving it may lean on. The far node decides again from its own ledger;
+        this only lets the near side refuse at once what that one will."""
+        entry = self._app.state.managed_one(str(node_hex or "").lower())
+        return effective_caps((entry or {}).get("caps"))
+
     def remote_call(self, session: str, node_hex: str, method: str, path: str,
-                    body: bytes | None) -> tuple:
+                    body: bytes | None, then: str | None = None) -> tuple:
         """Relay one console call. ``(status, content_type, body)``.
 
         A node that granted ``passwordless`` keeps being driven across its own
@@ -954,13 +966,14 @@ class FleetBridge:
             if token is None:
                 return self._not_back_yet()
         status, ctype, payload = self._remote_raw(node_hex, token, method,
-                                                  path, body)
+                                                  path, body, then)
         if status == 401:
             if self._app.state.may_use(node_hex, "passwordless"):
                 fresh = self._reissue_remote(session, node_hex, force=True)
                 if fresh is None:
                     return self._not_back_yet()
-                return self._remote_raw(node_hex, fresh, method, path, body)
+                return self._remote_raw(node_hex, fresh, method, path, body,
+                                        then)
             # Its console dropped our session (restart, password change): forget
             # it here too, so the page asks for the password instead of looping.
             self.remote_disconnect(session, node_hex)
@@ -1006,10 +1019,10 @@ class FleetBridge:
         return token
 
     def _remote_raw(self, node_hex: str, token, method: str, path: str,
-                    body: bytes | None) -> tuple:
+                    body: bytes | None, then: str | None = None) -> tuple:
         try:
             return self._call(self._app.console_call(
-                self._node(node_hex), method, path, body, token),
+                self._node(node_hex), method, path, body, token, then),
                 timeout=_CALL_TIMEOUT)
         except ConsoleProxyError as exc:
             return 502, "application/json", _dump({"error": str(exc)[:200]})

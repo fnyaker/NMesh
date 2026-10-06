@@ -1,0 +1,147 @@
+# `nmeshctl` — the node from a terminal
+
+For an operator who reached the machine over SSH. `nmeshctl` talks to the node's
+own console on this machine, and through it to every node that granted it
+`manage` — the same session, the same operations, the same refusals as the web
+console. It is not a second implementation of anything: the commands are read
+from the node's control-plane catalogue
+([`../Architecture/control-plane.md`](../Architecture/control-plane.md)), so an
+operation the node gains is a command the moment it does.
+
+Source: [`scripts/nmeshctl.py`](../../scripts/nmeshctl.py). Standard library
+only, and no import of the node's code: a management tool that needed liboqs to
+start would not start on the day it is needed most.
+
+## Installing
+
+`install.sh` copies it to `/usr/local/bin/nmeshctl` (a root install),
+`~/.local/bin/nmeshctl` (a user install) or `$PREFIX/bin/nmeshctl` (Termux). The
+file itself, not a wrapper: the install directory is mode 700 to the node's
+own account, so an administrator signed in over SSH could not read a script
+left there. `--uninstall` removes it.
+
+A node that updates itself replaces its own tree, not this copy — re-run
+`install.sh` (or copy `scripts/nmeshctl.py`) to bring the command line up to the
+node's version. Nothing breaks in between: the commands come from the node.
+
+## Signing in
+
+```bash
+nmeshctl login                      # 8 hours
+nmeshctl login --for 1d             # at most 24 h
+nmeshctl login --url https://127.0.0.1:8787 --label laptop
+nmeshctl status                     # until when, on which node
+nmeshctl logout
+```
+
+The password is asked for without echo (or read from `--password-stdin`, or
+`NMESH_PASSWORD` for a script). What comes back is a session that **survives
+the node's restarts** — every update is one — and ends on the date it was
+given, whether or not it is used. It is kept in `~/.config/nmesh/ctl.json`
+(0600; `NMESH_CTL_CONFIG` to put it elsewhere), and on the node only as a hash.
+It ends at `logout`, when the console password is changed, and at
+`install.sh --reset-password`. Details:
+[`../Architecture/security.md`](../Architecture/security.md#a-session-that-outlives-the-process-console_sessionspy).
+
+**The console's certificate is pinned at login.** It is self-signed, so trust
+comes from its fingerprint, compared before a byte of any request is sent:
+
+- read from the node's state directory (`/var/lib/nmesh`, or `NMESH_DATA`) when
+  this account can — which needs no question;
+- otherwise shown once for you to confirm, as SSH does — compare it with the
+  one `install.sh` prints, or pass `--fingerprint <sha256>`; `--yes` pins
+  without asking, and says so.
+
+A certificate that changes afterwards is never spoken to: sign in again if it
+was regenerated on purpose.
+
+## Operations
+
+```bash
+nmeshctl ops                         # everything this console can reach
+nmeshctl ops config                  # one module
+nmeshctl node state
+nmeshctl node ping --node <id>       # after the command, --node is the operation's own
+nmeshctl config save --settings '{"pseudo": "box"}'
+nmeshctl trace set --action start --seconds 60
+nmeshctl logs query --level warn --limit 50
+nmeshctl call node.state --params '{}'   # the raw door, JSON arguments
+```
+
+`<module> <operation>` and then the arguments the operation declares, as
+`--name value`, `--name=value` or `name=value`; a bare `--flag` is yes. A
+structure (`document`, `payload`) is JSON. An argument the operation does not
+take is refused here with the list of those it does — never passed on.
+
+What the answer is: JSON on standard output. `--json` anywhere on the line
+does the same for the commands that print tables. Exit codes: `0` done, `1`
+refused or failed, `2` the command line was wrong, `3` signed out.
+
+**Long operations wait.** A node driven from a distance answers anything
+longer than one relayed call with "start it as a job"; `nmeshctl` does exactly
+that, says so on standard error, and polls until the answer comes. Locally the
+same operation simply takes as long as it takes.
+
+## Another node
+
+```bash
+nmeshctl remote list                         # the nodes that granted this one manage
+nmeshctl --node web-01 node state            # by id, id prefix, label or name
+nmeshctl --node web-01 config save --settings '{"pseudo": "web"}'
+nmeshctl remote connect web-01               # open the session explicitly
+nmeshctl remote disconnect web-01
+nmeshctl --node web-01 --then <id> node state    # one further, through web-01
+```
+
+`--node` (before the command) opens this console's session on that node the way
+the web console's context selector does: nothing to type where the node granted
+`passwordless`, that node's console password otherwise — asked for, sent once
+inside the mesh session, kept nowhere. Every command then runs there, refused or
+answered by that node from its own ledger.
+
+`--then` reaches a node *that one* manages, through it. It needs that node's
+**`full`** grant — the one that makes it a jump host — and is refused otherwise.
+
+## Rights: who may manage what
+
+The fleet app's ledger, from here. Run on the node that bears the consequence
+(or `--node` one that granted this one `full`).
+
+```bash
+nmeshctl fleet caps                          # the capabilities and what each allows
+nmeshctl fleet requests                      # nodes asking to manage this one
+nmeshctl fleet approve laptop                # grant what it asked for
+nmeshctl fleet approve laptop status,manage  # …or less of it — never more
+nmeshctl fleet deny laptop --reason "not this one"
+nmeshctl fleet operators                     # who controls this node, with what
+nmeshctl fleet grant laptop manage apps      # set exactly this
+nmeshctl fleet grant laptop shell --add      # add to what it holds
+nmeshctl fleet grant laptop shell --remove   # take away
+nmeshctl fleet grant laptop full             # everything (see below)
+nmeshctl fleet revoke laptop                 # cut it off, both ways
+nmeshctl fleet managed                       # the nodes this one manages
+nmeshctl fleet request web-01 --caps manage,apps   # ask another node for rights
+nmeshctl fleet drop web-01 shell             # hand one back
+```
+
+The rules are the fleet's own ([`../Apps/fleet`](../Apps/fleet)): an approval
+can only **narrow** what was asked, and `nmeshctl` refuses a wider one before
+sending it; a capability name it does not know is refused rather than dropped,
+because a typo must not become "no rights"; asking for more parks a request for
+a human on the other node.
+
+Two grants matter most from a terminal:
+
+| Grant | What it adds |
+|---|---|
+| `apps` | the node's apps from a remote console: chat, and every operation an app declares |
+| `full` | everything: every capability, every console operation as if at the machine, and the nodes it manages through it |
+
+## Bounds
+
+| Bound | Value | Why |
+|---|---|---|
+| session lifetime | 1 min – 24 h, default 8 h | a credential in a file ends on a date |
+| lasting sessions per node | 16, oldest first | a login loop cannot fill the disk |
+| an answer read | 4 MB | the console's own replies are far smaller; a larger one is refused, not truncated |
+| waiting on a job | 15 min | then it says how to look at it again (`nmeshctl jobs poll --job …`) |

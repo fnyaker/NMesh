@@ -75,7 +75,8 @@ from .frame import (MAX_FRAME, MAX_REPLY, Reply, Request, decode_reply,
 from .jobs import JobBook
 from .modules import install
 from .params import coerce, param
-from .plane import ControlPlane, Origin, app_of, operation, reaches
+from .plane import (ControlPlane, Origin, app_of, at_a_distance, carries_apps,
+                    operation, reaches)
 
 __all__ = [
     "BaseChannel", "CODES", "Context", "ControlError", "ControlPlane",
@@ -83,7 +84,7 @@ __all__ = [
     "RefusedChannel", "RemoteChannel", "Reply", "Request", "build", "coerce",
     "decode_reply",
     "decode_request", "encode", "install", "on_loop", "operation", "param",
-    "reaches", "app_of",
+    "reaches", "app_of", "at_a_distance", "carries_apps",
 ]
 
 

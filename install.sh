@@ -178,6 +178,28 @@ copy_tree() {
         | ( cd "$dst" && tar -xf - )
 }
 
+# ── the command line ─────────────────────────────────────────────────────────
+# `nmeshctl`, put where an operator's shell finds it. The file itself, not a
+# wrapper pointing into the install: that directory is mode 700 to the node's
+# own account, so an administrator signed in over SSH could not read a script
+# left there. It needs nothing but python3's standard library, which is why it
+# can live on its own.
+cli_path() {
+    if is_termux; then echo "${PREFIX}/bin/nmeshctl"; return; fi
+    if is_root; then echo "/usr/local/bin/nmeshctl"; return; fi
+    echo "$(caller_home)/.local/bin/nmeshctl"
+}
+
+install_cli() {
+    local src="$1/scripts/nmeshctl.py" dest
+    dest="$(cli_path)"
+    [ -f "$src" ] || return 1
+    mkdir -p "$(dirname "$dest")" 2>/dev/null || return 1
+    cp "$src" "$dest.tmp" && chmod 0755 "$dest.tmp" && mv -f "$dest.tmp" "$dest" \
+        || { rm -f "$dest.tmp"; return 1; }
+    echo "$dest"
+}
+
 # ── directories ──────────────────────────────────────────────────────────────
 # Escalating to create a directory hands it to root. `sudo mkdir -p
 # ~/.local/share/nmesh/data` did exactly that on a user install: the node runs
@@ -716,6 +738,9 @@ if [ "$UNINSTALL" = true ]; then
         run_priv rm -rf "$INSTALL_DIR"
         ok "Removed $INSTALL_DIR"
     fi
+    if [ -f "$(cli_path)" ]; then
+        rm -f "$(cli_path)" && ok "Removed $(cli_path)"
+    fi
     if [ "$PURGE" = true ]; then
         # The identity is what makes this node *this* node on the mesh: deleting
         # it is irreversible, and every peer that trusted it now trusts nothing.
@@ -770,6 +795,12 @@ else
     copy_tree "$SOURCE_REAL" "$INSTALL_DIR" || fail "Could not copy the NMesh tree"
     chmod +x "$INSTALL_DIR/start.sh" "$INSTALL_DIR/install.sh" 2>/dev/null || true
     ok "Files installed in $INSTALL_DIR"
+fi
+if CLI_AT="$(install_cli "$INSTALL_DIR")"; then
+    ok "Command line: $CLI_AT (nmeshctl login)"
+else
+    CLI_AT=""
+    warn "Could not install nmeshctl — run it as: python3 $INSTALL_DIR/scripts/nmeshctl.py"
 fi
 
 # ── the account the node runs under ──────────────────────────────────────────
@@ -1128,6 +1159,12 @@ echo "  start — read them from the service log above."
 echo ""
 echo "  Upgrade later : re-run ./install.sh from a newer checkout,"
 echo "                  or use the console's Settings → Updates page."
+if [ -n "${CLI_AT:-}" ]; then
+echo "  Command line  : $CLI_AT — nmeshctl login --for 8h"
+if [ -f "$DATA/console_cert.pem" ] && command -v openssl >/dev/null 2>&1; then
+echo "  Console cert  : sha256 $(run_owning "$DATA" openssl x509 -in "$DATA/console_cert.pem" -outform der 2>/dev/null | openssl dgst -sha256 -r 2>/dev/null | cut -d' ' -f1)"
+fi
+fi
 echo "  Remove        : ./install.sh --uninstall"
 echo "═══════════════════════════════════════════════════════════════"
 echo ""

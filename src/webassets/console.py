@@ -5495,7 +5495,7 @@ CONTEXT.subscribe(() => {
 function askForContext(node){
   const target = TARGETS.find((entry) => entry.id === node);
   if(!target){ $("ctx-node").value = CONTEXT.node; return; }
-  if(target.connected){ CONTEXT.set(node, target.label); return; }
+  if(target.connected){ CONTEXT.set(node, target.label, target.caps); return; }
   const name = target.label || shortId(node);
   const free = !!target.passwordless;
   $("modal-title").textContent = "Manage " + name;
@@ -5527,7 +5527,7 @@ function askForContext(node){
       return;
     }
     $("modal").close();
-    CONTEXT.set(node, target.label);
+    CONTEXT.set(node, target.label, target.caps);
     toast("Managing " + name, "warn");
   }));
   $("ctx-no").addEventListener("click", finish);

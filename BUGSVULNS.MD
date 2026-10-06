@@ -147,6 +147,7 @@ like the regression.
 | 57 | **low** | The reachability descriptors still carried link-local addresses into LAN tickets and LAN discovery |
 | 58 | **medium** | Local addresses sorted alphabetically: Docker bridges dialled first, the real LAN address cut from LAN discovery |
 | 59 | **low** | A bundle member opened by the far end showed `remote: null` |
+| 60 | **medium** | A console holding `govern` reached every operation an app declared, those it kept at home included |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -2973,4 +2974,30 @@ change.
 **What happens** — the row read `remote_addr`, which is the address *dialled*;
 a link accepted on our listener dialled nothing, so the console's multi-link
 table showed an empty destination for it. A label and a value that disagreed.
+
+---
+
+## 60 — medium — `govern` reached every operation an app declared
+
+> **Status — fixed.** `AppsModule._reachable` asks "is this a console that
+> carries apps?" (`plane.carries_apps`: this machine, `apps`, `full`) and
+> otherwise reads the app's own `remote` mark. Test:
+> `tests/test_control_plane.py::TestAppsOnTheChannel::test_govern_says_nothing_about_an_apps_operations`.
+
+**Where** — `src/control/modules/apps.py`, `_reachable`.
+
+**What happens** — the gate tested `origin == Origin.REMOTE` and returned the
+app's `remote` mark; every other origin fell through to `True`. `GOVERN` is
+another origin, so a peer holding `manage` + `govern` reached `apps.call` for
+every operation of every app — chat's, which declares none as travelling,
+included — and saw them all in `apps.catalogue`.
+
+**Impact** — an operator trusted to decide what a node trusts could act through
+its apps (chat contacts, messages in that node's name) without anybody having
+granted that. No escalation beyond what that node's operator already handed
+over, but a grant meaning more than it says.
+
+**Fixing it without breaking something** — the reach over an app's operations
+is now its own grant (`apps`, or `full`), so `govern` keeps exactly the reach
+its row in the fleet's table describes.
 

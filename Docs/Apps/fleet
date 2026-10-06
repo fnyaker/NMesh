@@ -53,7 +53,8 @@ remote-execution feature **auditable** and not merely functional.
 
 ## Capabilities
 
-From the most harmless to total. One never implies another.
+From the most harmless to total. One never implies another — except `full`,
+which is the one grant whose meaning *is* "every other one".
 
 | Capability | What it allows |
 |---|---|
@@ -69,6 +70,8 @@ From the most harmless to total. One never implies another.
 | `manage` | driving this node's **web console** remotely — **the target's console password is still required** |
 | `govern` | deciding what that node **trusts**: pinning signing keys, installing and publishing releases, minting invitations, holding private keys. Needs `manage` to be of any use |
 | `passwordless` | opening this node's console **without** its password: the grant is the second key. Needs `manage` to be of any use |
+| `apps` | using this node's **apps** from a remote console: chat's page, and every operation an app declares — not only those it marked as travelling. Needs `manage` to be of any use |
+| `full` | **everything**: every capability above, every console operation answered as if the operator sat at this machine (those that never travel included), and the nodes this one manages, reached *through* it |
 
 ## Enrolment — the notification
 
@@ -183,6 +186,36 @@ In the console, a node that granted it appears in the context selector with no
 ordinary **Settings → Password** page is right there: set a password you know,
 and take the right back if you would rather have the two keys again.
 
+### `apps` and `full` — the apps, and then everything
+
+`manage` drives the console and stops at the apps, on purpose: somebody else's
+conversations were never part of managing their machine. **`apps`** is the
+grant that says they are. With it, an operator driving this node from their own
+console sees *its* chat — conversations, contacts, pictures — and reaches every
+operation any app on it declares, the ones the app kept at home included. The
+app's own `remote` mark still decides for a console holding only `manage`.
+
+**`full`** is everything, said once: every other capability (checked as such
+wherever a grant is checked — `FleetState.allows` and `may_use` read it through
+`effective_caps`), and a console that answers as it would to somebody at the
+machine. Two things change beyond the sum of the others:
+
+- the operations that never travel (`apps.token`, `web.request`) do;
+- **this node becomes a jump host.** Its fleet page travels, so the operator
+  approves *its* requests and drives the nodes *it* manages, with the rights it
+  holds there; and a call can be addressed one node further on — `X-NMesh-Then`
+  at the operator's console, the `node` field in the relayed document, the
+  console's own `X-NMesh-Node` written on this side — so a console reaches a
+  node it has no grant on, through one that has. That is the whole reason it is
+  a grant of its own: it is the one that makes a right on this machine a right
+  on others.
+
+Both are read from **this node's** ledger at the door, like `govern`, and
+written as headers beside the replay marker (`APPS_HEADER`, `FULL_HEADER`); a
+call that names a further node without `full` is refused, never obeyed and
+never quietly run here. The ledger keeps what a human ticked: holding `full`
+shows as `full`, and narrowing to less is unticking it.
+
 ### The relay reinvents nothing
 
 The target node does not answer by itself: it **replays the call against its own
@@ -206,20 +239,22 @@ nothing new becomes reachable by being added.
 
 The apps are on the same channel, with the same rule: an operator managing this
 node reaches an app operation only if the app declared that one as reachable
-from a distance (`remote=True`). Chat declares none, and fleet declares only
-`relation` — a read of this node's ledger. That closed a gap the denylist could
-not: `/api/chat/*` was refused, but the *app call* route was not, so chat's
-declared operations were reachable through it.
+from a distance (`remote=True`) — or holds `apps`, which reaches them all. Chat
+declares none, and fleet declares only `relation` — a read of this node's
+ledger. That closed a gap the denylist could not: `/api/chat/*` was refused,
+but the *app call* route was not, so chat's declared operations were reachable
+through it.
 
 Beside it, the routes that have not moved onto the plane yet are still relayed
-by path, and the denylist is what governs those:
+by path, and each family opens with a grant of its own
+(`console_path_refusal`):
 
-| Refused | Why |
-|---|---|
-| `/api/fleet/*` | a managed node is not a **bounce**. Without this, a grant would propagate to every node *that one* manages |
-| `/api/remote/*` | the relay driving the relay — a loop with a mesh hop in it |
-| `/api/chat/*` | somebody else's conversations are no part of managing their machine, and the grant never asked for that |
-| anything that is not `/api/` | the page is already served locally; there is nothing to fetch over there |
+| Family | Opens with | Why not with less |
+|---|---|---|
+| `/api/chat/*` | `apps` | somebody else's conversations are no part of managing their machine, unless they said so |
+| `/api/fleet/*` | `full` | a managed node is not a **bounce** unless it said so: this is a grant propagating to every node *that one* manages |
+| `/api/remote/*` | `full` | the relay driving the relay — the operator reaching on through this node |
+| anything that is not `/api/` | never | the page is already served locally; there is nothing to fetch over there |
 
 Methods: `GET` and `POST` only.
 

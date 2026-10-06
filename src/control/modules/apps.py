@@ -40,7 +40,7 @@ from ... import app_perms
 from ...app_registry import GRANTS
 from ..errors import ControlError
 from ..params import param
-from ..plane import Origin, app_of, operation
+from ..plane import Origin, app_of, carries_apps, operation
 
 _READ = 10.0
 # Enabling an app writes the registry and starts its loops; disabling stops
@@ -110,8 +110,6 @@ class AppsModule:
         return surface
 
     def _reachable(self, origin: str, app: str, row: dict) -> bool:
-        if origin == Origin.REMOTE:
-            return bool(row.get("remote"))
         app_hex = app_of(origin)
         if app_hex:
             if row.get("operator"):
@@ -119,7 +117,13 @@ class AppsModule:
             perms = self._context.provided("perms")
             need = "control.apps" if row.get("changes") else "readstate.apps"
             return perms is not None and perms.allows(app_hex, need)
-        return True
+        if carries_apps(origin):
+            return True
+        # Every other console is at a distance and holds no `apps` grant —
+        # `govern` included: deciding what a node trusts says nothing about
+        # its apps. So the test is "is it one of those that carry apps?", and
+        # never "is it the plain remote one?", whose `else` is everybody else.
+        return bool(row.get("remote"))
 
     def op_catalogue(self, origin: str) -> dict:
         catalogue = []
