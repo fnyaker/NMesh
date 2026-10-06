@@ -507,10 +507,13 @@ class TestAndroidService:
         return prefix
 
     def test_termux_with_services_has_a_service_manager(self, tmp_path):
+        """Isolated: on a host with a booted systemd, the host's `systemctl` on
+        PATH answered first and the phone was never asked about."""
         prefix = self._termux(tmp_path)
         result = run_snippet(
-            tmp_path, 'detect_init',
-            env={"PREFIX": str(prefix), "PATH": f"{prefix}/bin:/usr/bin:/bin"})
+            tmp_path, 'detect_init', isolate=True,
+            env={"PREFIX": str(prefix),
+                 "PATH": f"{prefix}/bin:{tmp_path / 'stubbin'}"})
         assert result.stdout.strip() == "runit"
 
     def test_a_phone_without_termux_services_is_offered_them(self, tmp_path):

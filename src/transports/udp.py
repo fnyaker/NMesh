@@ -301,13 +301,18 @@ class _ReliableLink:
         return (self._recv_next - 1) & 0xFFFFFFFF, self._sack
 
     def _recompute_sack(self) -> None:
-        """Rebuild the bitmap from the buffer. Only when the cursor moves."""
+        """Rebuild the bitmap from the buffer. Only when the cursor moves.
+
+        Bit ``i`` is sequence ``ack + 1 + i`` — the sender reads it so
+        (`process_ack`), and bit 0 is the hole the cursor waits on, so it is
+        never set. One bit off and the sender retires the very frame that is
+        missing, never resends it, and the cursor waits on it for ever."""
         sack = 0
         base = self._recv_next
         for seq in self._reorder:
             offset = (seq - base) & 0xFFFFFFFF
-            if 0 < offset <= 32:
-                sack |= (1 << (offset - 1))
+            if 0 < offset < 32:
+                sack |= (1 << offset)
         self._sack = sack
 
     def process_ack(self, ack: int, sack: int) -> list[bytes]:
@@ -507,8 +512,8 @@ class _ReliableLink:
                 self._reorder_bytes += len(payload)
                 self.reordered += 1
                 offset = (seq - self._recv_next) & 0xFFFFFFFF
-                if 0 < offset <= 32:
-                    self._sack |= (1 << (offset - 1))
+                if 0 < offset < 32:
+                    self._sack |= (1 << offset)
             self._schedule_ack()
             return []
 
