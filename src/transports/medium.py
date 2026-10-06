@@ -152,6 +152,18 @@ def reachability(server, uri: str, ctx: dict) -> list:
     return out
 
 
+def end_reason(transport) -> str:
+    """Why this link ended, in the medium's words, or ``""``.
+
+    Read once, when a receive loop stops, to put on the line that says the link
+    dropped. Text, bounded, one line — a medium that answers anything else has
+    said nothing."""
+    raw = _ask(transport, "end_reason", "")
+    if not isinstance(raw, str):
+        return ""
+    return " ".join(raw.split())[:MAX_STAT_TEXT]
+
+
 def received(raw):
     """What ``receive()`` handed back, if it is a packet at all.
 

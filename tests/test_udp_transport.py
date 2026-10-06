@@ -467,12 +467,21 @@ class TestAKeepaliveKeepsTheLinkAlive:
         self._aged(transport, UDPTransport.setting("keepalive_timeout") + 10.0)
         assert not transport._link.is_alive()
 
-    def test_an_ack_and_a_fin_are_arrivals_too(self):
-        for flag in (FLAG_ACK_ONLY, FLAG_FIN):
-            transport = self._transport()
-            silent = self._aged(transport, 50.0)
-            transport._process_frame(_MAGIC + _FRAME.pack(0, 0, 0, flag, 0))
-            assert transport._link._last_recv_time > silent, flag
+    def test_an_ack_is_an_arrival_too(self):
+        transport = self._transport()
+        silent = self._aged(transport, 50.0)
+        transport._process_frame(_MAGIC + _FRAME.pack(0, 0, 0, FLAG_ACK_ONLY, 0))
+        assert transport._link._last_recv_time > silent
+
+    def test_a_fin_is_not_an_arrival_it_is_the_end(self):
+        """A FIN used to be counted as an arrival like an ACK — it *refreshed*
+        the liveness it announces the end of. See `TestAFinEndsTheLink`."""
+        transport = self._transport()
+        transport._process_frame(_MAGIC + _FRAME.pack(0, 0, 0, FLAG_KEEPALIVE, 0))
+        silent = self._aged(transport, 50.0)
+        transport._process_frame(_MAGIC + _FRAME.pack(0, 0, 0, FLAG_FIN, 0))
+        assert transport._link._last_recv_time == silent
+        assert transport.is_closed()
 
     def test_the_cursor_is_adopted_from_the_opening_keepalive(self):
         """`connect()` sends a keepalive before any data, and that is the frame

@@ -85,6 +85,52 @@ Every failure a guard swallows lands here as well as on stderr —
 are the failures with no other reader at all, which makes them the lines an
 operator turning a log on is most often looking for.
 
+## What the core writes
+
+The ring held two lines from the core for a long time — "link dropped", with an
+id and an address, and "protocol violation charged to a peer" — and a node whose
+links came and went over the internet produced a log that said exactly that,
+six times, and nothing about why. A trace beside it showed one link answering
+nothing for a quarter of a minute and then ten seconds in which no probe left
+for anybody; nothing on the node's side could say what it had been doing.
+
+So every decision about a link is now written where it is taken, under a name
+that ties the log to the trace: each link is numbered when it is made
+(`_Peer.label`, ``L17/udp`` — a process-local number and the medium, naming no
+one), and the same label is on every trace event that crossed it.
+
+| source / topic | line | level | what it carries |
+|---|---|---|---|
+| `peers` / `link` | `link up` | info | node, link, address, dialled or accepted |
+| `peers` / `link` | `link dropped` | **warn** if it died on its own, info if we closed it | node, link, address, **reason**, age, seconds since it last answered, recent loss %, the medium's counters (zeros left out) |
+| `transport` / `link` | whatever the medium says (`BaseTransport.note`) | the medium's | the peer closed the link; the peer went silent; a retransmit timeout dropped the window; a send was refused — each with the medium's figures |
+| `peers` / `link` | `a probe could not be sent` | warn | why, and the link's figures — once a minute per link |
+| `peers` / `link` | `link failing: it loses too many probes` / `link recovered` | warn / info | on the crossing only, with the figures |
+| `peers` / `link` | `a link was too busy to take a packet` | warn | the message type; the packet went to the next route and the link was kept |
+| `peers` / `link` | `a handler held the receive loop` | warn | the message type and for how long (≥ `_SLOW_HANDLER`) — nothing else on that link was read meanwhile |
+| `node` / `load` | `the event loop ran late` | warn | by how much, and how many links waited |
+| `peers` / `rescue` | `every link to a node is failing…`, `rescue: no address answered` | warn | which links |
+| `peers` / `reconnect` | `node lost: it will be dialled again`, `reconnect attempt failed`, `reconnected` | info / warn | attempts, when the next one is |
+| `peers` / `dial` | `dial connected` (info) and every other outcome (debug) | — | address, outcome, detail, milliseconds |
+| `peers` / `handshake` | `handshake refused` | warn | the refusal's reason |
+| `peers` / `keepalive` | `keepalive accord`; `a peer announced a cadence outside the accord`; `…window refused` | info / warn | the agreed fast and slow cadences |
+| `mlo` / `mlo` | `bundle changed` | info | members, benched, skew — on a change only |
+| `peers` / `abuse` | `behaviour rule … fired`, `a peer's standing crossed to …`, `link tarpitted…` | warn | rule, weight, score, how long the tarpit holds |
+| `peers` / `rate` | `a peer went over a rate limit: dropped` | info | which plane, its allowance |
+
+Three rules keep this from becoming the problem it diagnoses:
+
+- **Free while nothing is kept.** `LogBook.record` off is one attribute test,
+  and every line that builds anything (figures, labels, a join) tests
+  `logs.enabled` first.
+- **What can happen per packet is written once per `_LOG_THROTTLE` per key**
+  (`_log_throttled`), and the next line for that key says how many it `folded`.
+  A rate limit or a busy link under load is otherwise a flood that pushes every
+  other line out of the ring.
+- **A diagnostic never raises on the path it describes.** Every one of these is
+  reached from a receive loop, a sweep or a teardown, and reads the link with
+  `getattr` where a stand-in might not be a `_Peer`.
+
 ## Reading
 
 A reader holds a **sequence number** and asks what has happened since. That is

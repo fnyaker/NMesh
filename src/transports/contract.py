@@ -27,6 +27,23 @@ class OptionError(Exception):
     """A value a transport will not take, phrased for whoever typed it."""
 
 
+class LinkBusy(Exception):
+    """A send that could not be queued in time: the link is full, not gone.
+
+    Two failures used to share one exception, and the core cannot tell them
+    apart unless the medium does. A link that died has to be torn down; a link
+    that is carrying all it can is the opposite case — it is working, and
+    tearing it down throws away every packet already in flight and pays a
+    handshake to get back where it was. Under load, that confusion turned a
+    congested UDP queue into a dropped link, a reconnect, a ~400 kB catch-up
+    burst, and a queue congested again.
+
+    So a medium raises this when it refused the packet for lack of room, and
+    only then — nothing of the packet went out. It is deliberately **not** a
+    ``ConnectionError``: every place that reads one as "the link is dead" must
+    not read this one that way."""
+
+
 def option(name: str, kind: str, default, help: str, *, label: str = "",
            choices=None, minimum=None, maximum=None, unit: str = "",
            placeholder: str = "", restart: bool = False) -> dict:
@@ -127,6 +144,29 @@ class BaseTransport(ABC):
 
     def __init__(self) -> None:
         self.on_connect: Callable[[], Coroutine[Any, Any, None]] | None = None
+        # Who wants to hear what happens to this link, set by the node that
+        # owns it. See `note`.
+        self.on_event: Callable[..., None] | None = None
+
+    def note(self, message: str, level: str = "info", **fields) -> None:
+        """Say what just happened to this link — a retransmit timeout, a peer
+        that went silent, a send refused for lack of room.
+
+        The things only the medium sees, and the ones an operator most needs
+        when a link misbehaves: the core sees a packet that did not come back,
+        the medium knows its window collapsed to the floor two seconds earlier.
+        A medium that reports nothing simply never calls this.
+
+        **Never raises**, and costs one attribute test when nobody listens: it
+        is called from datagram callbacks and send loops. ``getattr``, because a
+        medium written by hand may not call ``super().__init__()``."""
+        hook = getattr(self, "on_event", None)
+        if hook is None:
+            return
+        try:
+            hook(message, level, fields)
+        except Exception:                       # noqa: BLE001 — never the reason
+            pass
 
     #: The scheme this medium is known by, or ``None`` for one that registers
     #: nowhere. The core asks this to name a link's medium — "which medium is
@@ -150,7 +190,13 @@ class BaseTransport(ABC):
 
     @abstractmethod
     async def send(self, packet: Packet) -> None:
-        """Send a packet over this connection."""
+        """Send a packet over this connection.
+
+        **Bounded.** A send may wait for room, never for ever: a peer that stops
+        reading must not be able to hold every coroutine that writes to it.
+        Raise :class:`LinkBusy` when the packet could not be queued in time —
+        the link is full, and the packet did not go — and ``ConnectionError``
+        only when the link itself is gone."""
         ...
 
     @abstractmethod
@@ -218,6 +264,18 @@ class BaseTransport(ABC):
         For an *accepted* link that is the only address there is, and it is what
         tells an operator which of a peer's addresses is carrying traffic."""
         return {"local": None, "remote": None}
+
+    def end_reason(self) -> str:
+        """Why this link ended, once it has — ``""`` while it has not, or for a
+        medium that cannot tell.
+
+        "The peer closed it", "nothing arrived for sixty seconds" and "the
+        connection was reset" are three different investigations, and only the
+        medium can tell them apart: by the time the receive loop sees an
+        exception, the difference is a class name. Asked through
+        ``medium.end_reason`` and written on the line that says the link
+        dropped."""
+        return ""
 
     def idle_timeout(self) -> float | None:
         """Seconds of silence after which *this medium* gives up on the link,

@@ -60,8 +60,11 @@ class TestNoPayloadEverLeaves:
         trace.start(seconds=5)
         trace.record("out", _Packet(), 80)
         event = trace.events()[0]
+        # `link` names which of our links it crossed (``L17/udp``): a number
+        # this process gave the link and its medium — still nothing a relay
+        # could not already see, and nothing of the payload.
         assert set(event) == {"at", "direction", "type", "bytes", "ttl",
-                              "peer", "src", "dst"}
+                              "peer", "link", "src", "dst"}
 
     def test_node_ids_are_kept_short(self):
         trace = Trace()

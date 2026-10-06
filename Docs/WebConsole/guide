@@ -1233,7 +1233,10 @@ in [`../Architecture/gotchas.md`](../Architecture/gotchas.md): one table per
 message type, and the answer was in the first row.
 
 What is recorded: the instant, the direction, the message type, the size on the
-wire, the TTL, and the header's source/destination ids. **Never a payload** —
+wire, the TTL, the peer, **which of our links to it** (`link`, e.g. `L17/udp` — a
+number this node gave the link and its medium, the same label the node's log
+uses, so a trace line and a log line can be read side by side), and the header's
+source/destination ids. **Never a payload** —
 not the ciphertext, not the plaintext, not a key. The header is already visible
 to every relay on the path; the payload is what this project exists to protect,
 and a debugging tool is no reason to write it down somewhere.
@@ -1245,7 +1248,11 @@ reaches the disk only if an operator asks (0600). The bounds the request asks
 for are **capped**, not obeyed.
 
 *Download* asks the node on screen for its trace over the channel
-(`trace.export`) and hands the browser the bytes. It used to be a navigation to
+(`trace.export`) and hands the browser the bytes — **every event the trace
+holds**. It used to stop at the newest 2 000 whatever had been recorded, which
+cut the opening off any incident worth tracing. On a node being driven from
+another console a reply is capped (512 kB), so that download carries the newest
+events that fit and says how many it left out (`omitted`, beside `exported`). It used to be a navigation to
 `/api/trace/export`, and a navigation cannot carry the header that names the node
 being driven — so on a console managing another machine it downloaded *this*
 machine's trace under the other one's page.

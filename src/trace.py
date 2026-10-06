@@ -7,7 +7,9 @@ one line per packet, and a summary by message type that usually makes the answer
 obvious before anyone reads a single line.
 
 What it records, and nothing else: time, direction, message type, size on the
-wire, TTL, the peer it crossed, and the source/destination ids in the header.
+wire, TTL, the peer it crossed, which of our links to that peer it crossed
+(``L17/udp`` — a number this process gave the link, and the medium), and the
+source/destination ids in the header.
 **No payload, ever** — not the ciphertext, not the plaintext, not a key. The
 header is already visible to every relay on the path; the payload is the part
 this project exists to protect, and a debugging tool is not a reason to write it
@@ -32,6 +34,9 @@ DEFAULT_EVENTS = 5000
 MAX_SECONDS = 3600.0
 DEFAULT_SECONDS = 120.0
 _ID_CHARS = 16          # how much of a node id a line carries
+# What the status and the summary cost in an export, kept free of events when
+# the document has a budget: the summary holds at most 512 rows.
+_EXPORT_OVERHEAD = 64 * 1024
 
 
 class Trace:
@@ -97,7 +102,8 @@ class Trace:
 
     # -- recording ---------------------------------------------------------
 
-    def record(self, direction: str, packet, nbytes: int, peer_id=None) -> None:
+    def record(self, direction: str, packet, nbytes: int, peer_id=None,
+               link: str = "") -> None:
         """One packet crossed the wire. Never raises: a trace must not be able
         to take down the link it is watching."""
         if not self.enabled:
@@ -121,7 +127,8 @@ class Trace:
                 self._dropped += 1
             self._events.append((
                 time.time(), direction, kind, nbytes, packet.ttl,
-                _short(peer_id), _short(packet.src_id), _short(packet.dst_id)))
+                _short(peer_id), _short(packet.src_id), _short(packet.dst_id),
+                link if isinstance(link, str) else ""))
         except Exception:
             # Including a packet with fields we did not expect. Losing a trace
             # line is nothing; losing the receive loop is a security bug.
@@ -186,10 +193,13 @@ class Trace:
         return max(1e-6, end - self._started_at)
 
     def events(self, limit: int = 500, offset: int = 0) -> list:
-        """The most recent events, newest first, as plain dicts."""
+        """The most recent events, newest first, as plain dicts. A page: what
+        a screen asks for. `export` is the one that hands over everything."""
         limit = max(1, min(int(limit), 2000))
         offset = max(0, int(offset))
-        ordered = list(self._events)[::-1]
+        return self._as_dicts(list(self._events)[::-1][offset:offset + limit])
+
+    def _as_dicts(self, rows) -> list:
         return [{
             "at": round(at, 4),
             "direction": direction,
@@ -197,19 +207,44 @@ class Trace:
             "bytes": nbytes,
             "ttl": ttl,
             "peer": peer,
+            "link": link,
             "src": src,
             "dst": dst,
-        } for (at, direction, kind, nbytes, ttl, peer, src, dst)
-            in ordered[offset:offset + limit]]
+        } for (at, direction, kind, nbytes, ttl, peer, src, dst, link) in rows]
 
-    def export(self) -> dict:
-        """Everything held, as one JSON-serialisable document."""
+    def export(self, budget: int | None = None) -> dict:
+        """Everything held, as one JSON-serialisable document.
+
+        **Everything**: it used to hand over a page of the 2 000 newest and say
+        nothing about the rest, so a trace that recorded 5 000 events exported
+        two fifths of them — the opening of every incident, which is the part
+        somebody reads a trace for. The ring is already bounded
+        (`MAX_EVENTS`), so the whole of it is a bounded document.
+
+        ``budget`` is for a document that has to fit somewhere — one reply on a
+        channel to another node is capped. The newest events that fit are kept
+        and the rest are **counted** (`omitted`), never silently dropped: a
+        trace that leaves out its opening has to say so."""
+        rows = self._as_dicts(list(self._events)[::-1])
+        omitted = 0
+        if budget is not None:
+            used, kept = _EXPORT_OVERHEAD, 0
+            for row in rows:
+                used += len(json.dumps(row, separators=(",", ":"),
+                                       ensure_ascii=False).encode("utf-8")) + 1
+                if used > budget:
+                    break
+                kept += 1
+            omitted = len(rows) - kept
+            rows = rows[:kept]
         return {
             "format": "nmesh-trace-1",
             "note": "Routing metadata only — no payload is ever recorded.",
             "status": self.status(),
             "summary": self.summary(),
-            "events": self.events(limit=2000),
+            "exported": len(rows),
+            "omitted": omitted,
+            "events": rows,
         }
 
     def write(self, path: str) -> str:
