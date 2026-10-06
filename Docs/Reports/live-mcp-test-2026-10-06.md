@@ -128,3 +128,16 @@ showed while doing so changed two of the diagnoses above.
 | 7. `releases_overview` size | Not done. | — |
 | 8. Minor | All three fixed. | 69 |
 
+## Re-test on 0.4.62, after the deploy
+
+| What | Reading |
+|---|---|
+| Speed test to relay B (TCP) | 32.9 MB/s one way, 0 loss, 19.3 ms idle / 25.1 ms loaded, window grown to 64 — was 6.7 MB/s with the fixed window |
+| UDP links to relay B, relay A, node C | 0 spurious timeouts, `rto` 50 ms beside `srtt` 14–20 ms |
+| `transfer_kinds` for the MCP origin | `package`, `app`, `release` — was empty |
+| Mute accepted link (66) | ended at 60 s every time; relay B's listener opens a new one every ~100 s |
+| Wrong-node dials (64) | refused at the handshake, three in eight minutes — but each cost the answering node's healthy link (**71, open**) |
+| Found | a storm of UDP links between our listener and node C's, ~70 a second (**70, open**) |
+
+The MCP tool list was read before the deploy, so `node_speedtest` did not
+offer `bundle` yet; the bundle measurement is still to be read live.
