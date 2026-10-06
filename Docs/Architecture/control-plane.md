@@ -296,6 +296,14 @@ distance may hold, how many records are kept and for how long. A job that
 outlives its own declared ceiling is abandoned and reported failed — the thread
 is let go, never joined, for the reason `gotchas.md` gives about `to_thread`.
 
+Two jobs at once is what a console at a distance gets (`MAX_RUNNING_REMOTE`), and
+a slot stays taken until the job ends — whether or not the page that started it
+is still open. So a page must not spend one on what it does not need (the
+package card used to, see `gotchas.md`), and a refusal **names what holds the
+slots and how long each has left**: "as many jobs as a console at a distance may
+run" with nothing else read as a message left over from something unrelated,
+standing between an operator and the update check.
+
 **A ticket is only readable by the kind of console that could have made it.** A
 job started here is invisible from the mesh, and one started by a console
 holding `govern` cannot be polled by one holding only `manage` — otherwise "make

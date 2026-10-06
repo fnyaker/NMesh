@@ -143,6 +143,10 @@ _RELEASE_SERVE_MAX     = 64     # slices one link may pull from us per window
 _RELEASE_SOURCES_MAX   = 8      # nodes remembered as holding a given release
 _RELEASE_SOURCES_TRACKED = 64   # releases we remember any sources for at all
 _RELEASE_ASK_MAX       = 12     # nodes one fetch may ask before giving up
+# Nodes that filed a record saying they hold a release, asked for its descriptor
+# directly before the DHT is (`_descriptor_for`). Each costs at most one
+# `_DHT_QUERY_TIMEOUT`, so this is the bound on what a dead holder can add.
+_DESCRIPTOR_HOLDERS_ASKED = 3
 _PUBLISH_CONCURRENCY   = 8      # DHT stores in flight while publishing an app
 _HEX_RELEASE = re.compile(r"[0-9a-f]{%d}" % (_RELEASE_ID_LEN * 2))
 _HEX_PKG = re.compile(r"[0-9a-f]{40}")     # a package-directory entry id
@@ -851,6 +855,7 @@ __all__ = [
     "_CONN_HOLE_SUSTAIN",
     "_DEAD_LINK_PROBES",
     "_DEAD_LINK_SILENCE",
+    "_DESCRIPTOR_HOLDERS_ASKED",
     "_DHT_K",
     "_DHT_QUERY_TIMEOUT",
     "_DIAL_LOG_ADDRESSES",

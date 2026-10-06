@@ -149,10 +149,18 @@ const PACKAGES = {
     return ok ? (data.results || []) : [];
   },
 
-  async read(id, fetchDescriptor){
-    const {ok, data} = await this.op(
-      fetchDescriptor ? "packages.describe" : "packages.entry", {record:id});
-    return ok ? data : null;
+  // The record, as the node holds it — never the descriptor it points at. The
+  // card draws nothing from the descriptor, and fetching it made opening a
+  // package a *job* on a node being driven from elsewhere: up to a minute of
+  // the two a remote console may run at once, spent before anything was
+  // drawn, and the update check beside it refused for want of a slot.
+  // Downloading and installing fetch what they need when they are pressed.
+  //
+  // Answers `{row}` or `{error}`: "not found" was the only thing a failure
+  // could say, whatever had actually gone wrong.
+  async read(id){
+    const {ok, data, error} = await this.op("packages.entry", {record:id});
+    return ok ? {row:data} : {error};
   },
 
   kindLabel(row){
@@ -328,11 +336,10 @@ const PACKAGES = {
     // press on /package grew the button that opens /package.
     this.opts = options || {};
     setHTML(element, skeletonHTML(3));
-    const row = await this.read(id, true);
+    const {row, error} = await this.read(id);
     if(!row){
-      setHTML(element, errorHTML("Package not found",
-        "Nothing here holds a record with that id any more, or the console " +
-        "could not answer for it."));
+      setHTML(element, errorHTML("Package not found", error ||
+        "Nothing here holds a record with that id any more."));
       return;
     }
     this.current = row;
@@ -348,7 +355,7 @@ const PACKAGES = {
 
   async repaint(element){
     if(!this.current) return;
-    const row = await this.read(this.current.id, false);
+    const {row} = await this.read(this.current.id);
     if(!row) return;
     this.current = row;
     setHTML(element, this.cardHTML(row, this.opts));

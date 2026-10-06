@@ -1829,3 +1829,97 @@ class TestServingWhatItRuns:
             assert node._recommended == ""
         finally:
             undo(); await publisher.stop(); await node.stop()
+
+
+class TestADescriptorIsAskedOfWhoeverHoldsIt:
+    """A package listed on a node's page that could not be fetched.
+
+    Publishing keeps the descriptor in the publisher's own store and nowhere
+    else until the directory sweep replicates it, a quarter of an hour later.
+    The record pointing at it travels at once — so another node saw the
+    package, asked the DHT for its descriptor, and the DHT asked the nodes
+    closest to the key: never the one that had just signed "I hold this and I
+    serve it"."""
+
+    async def _seen_elsewhere(self, tmp_path):
+        from src.node import _pkg_parse
+        publisher, reader = _node(), _node()
+        await publisher.publish_release(_tree(str(tmp_path)))
+        raw = publisher._package_book.records()[0]
+        reader._package_book.offer(_pkg_parse(raw, reader._identity.verify), raw)
+        record_id = reader.find_packages("nmesh")[0]["id"]
+        return publisher, reader, record_id
+
+    async def test_the_holder_is_asked_before_the_dht(self, tmp_path):
+        publisher, reader, record_id = await self._seen_elsewhere(tmp_path)
+        try:
+            asked = []
+
+            async def find_value_at(node_id, key):
+                asked.append(node_id)
+                return publisher._dht_store.get(key) \
+                    if node_id == publisher.id else None
+
+            async def no_dht(key):
+                pytest.fail("the DHT was asked although the holder answered")
+
+            reader._dht_find_value_at = find_value_at
+            reader.dht_get = no_dht
+            described = await reader.package_descriptor(record_id)
+            assert described is not None and described["version"] == "9.9.9"
+            assert asked == [publisher.id]
+            # Kept, so the next read — and a download — costs nothing.
+            assert reader._dht_store.get(
+                bytes.fromhex(reader.package_entry(record_id)["release"]))
+        finally:
+            await publisher.stop()
+            await reader.stop()
+
+    async def test_a_holder_handing_back_something_else_is_not_believed(
+            self, tmp_path):
+        publisher, reader, record_id = await self._seen_elsewhere(tmp_path)
+        try:
+            fell_back = []
+
+            async def lying(node_id, key):
+                return b"not the descriptor"
+
+            async def dht(key):
+                fell_back.append(key)
+                return None
+
+            reader._dht_find_value_at = lying
+            reader.dht_get = dht
+            assert await reader.package_descriptor(record_id) is None
+            assert fell_back          # and the DHT was still asked
+        finally:
+            await publisher.stop()
+            await reader.stop()
+
+    async def test_the_holders_asked_are_bounded(self, tmp_path):
+        from src.node import _DESCRIPTOR_HOLDERS_ASKED, _pkg_parse
+        publisher, reader, record_id = await self._seen_elsewhere(tmp_path)
+        try:
+            entry = publisher._releases.get(
+                publisher._releases.list()[0]["key"])
+            for _ in range(8):
+                raw, _holder = _somebody_holds(entry)
+                reader._package_book.offer(
+                    _pkg_parse(raw, reader._identity.verify), raw)
+            asked = []
+
+            async def silent(node_id, key):
+                asked.append(node_id)
+                return None
+
+            async def dht(key):
+                return None
+
+            reader._dht_find_value_at = silent
+            reader.dht_get = dht
+            await reader.package_descriptor(record_id)
+            assert len(asked) == _DESCRIPTOR_HOLDERS_ASKED
+            assert asked[0] == publisher.id     # the record's own node first
+        finally:
+            await publisher.stop()
+            await reader.stop()
