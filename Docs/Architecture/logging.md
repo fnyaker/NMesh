@@ -110,7 +110,7 @@ one), and the same label is on every trace event that crossed it.
 | source / topic | line | level | what it carries |
 |---|---|---|---|
 | `peers` / `link` | `link up` | info | node, link, address, dialled or accepted |
-| `peers` / `link` | `link dropped` | **warn** if it died on its own, info if we closed it | node, link, address, **reason**, age, seconds since it last answered, recent loss %, the medium's counters (zeros left out) |
+| `peers` / `link` | `link dropped` | **warn** if it died on its own, info if we closed it | node, link, address, **reason**, age, seconds since it last answered, recent loss %, the medium's counters (zeros left out). Every path that takes a link out of the list writes it — a dial that reached somebody else, a node the operator forgot and a failed join included (`unauthenticated link ended`, debug, for a link that never proved an identity) |
 | `transport` / `link` | whatever the medium says (`BaseTransport.note`) | the medium's | the peer closed the link; the peer went silent; a retransmit timeout dropped the window; a send was refused — each with the medium's figures |
 | `peers` / `link` | `a probe could not be sent` | warn | why, and the link's figures — once a minute per link |
 | `peers` / `link` | `link failing: it loses too many probes` / `link recovered` | warn / info | on the crossing only, with the figures |
@@ -170,7 +170,9 @@ Two details make the cursor trustworthy, and both were missing:
 Filters, the same for both readers: `level` (a **floor**, not an equality),
 `source` (substring), `topic` (exact), `contains` (message *and* fields — a field
 must not be a place to put something a search can never find), `since_time`,
-`until_time`, `limit` (bounded by `MAX_QUERY` whoever asks).
+`until_time` (unix seconds — declared with their own ceiling, since the shared
+one on a count is a million and refused every real time), `limit` (bounded by
+`MAX_QUERY` whoever asks).
 
 Blocks carry their own sequence and time range. A query reads **from the newest
 block backwards and stops once it has a page** — a person reads the end of a

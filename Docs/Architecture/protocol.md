@@ -171,9 +171,17 @@ Groupings (constants):
   its own — `speed` — so a node on a metered connection declines this and
   nothing else. The side asking bounds itself twice over, in bytes and in
   seconds, whichever ends first. It measures in two phases: a few probes one at
-  a time for the latency **at rest**, then a sliding window of
-  `_SPEED_INFLIGHT` probes — a new one leaves as each echo lands — for the rate
-  and the latency **under load**. A probe not echoed within
+  a time for the latency **at rest**, then a sliding window — a new probe
+  leaves as each echo lands — for the rate and the latency **under load**. The
+  window starts at `_SPEED_INFLIGHT` and opens by one per echo, up to
+  `_SPEED_INFLIGHT_MAX` (1 MB in flight), until the round trip under load passes
+  twice the one at rest plus `_SPEED_QUEUE_SLACK_MS` (a queue is filling: the
+  link is full) or a probe is lost (it halves). A fixed eight read at most eight
+  probes per round trip, about 1 MB/s on a 130 ms path whatever the link could
+  carry. With `bundle`, every **direct** member of the node's active bundle is
+  loaded at once, each with its own window, and the answer gives the sum and
+  each link (`links`): a single link cannot show what multi-link adds. Routed
+  members are left out — the far end answers only probes that arrive directly. A probe not echoed within
   `_SPEED_PROBE_TIMEOUT` is counted lost and its slot reused, so one dropped
   datagram costs that slot two seconds rather than the whole test; past the
   deadline nothing new leaves and what is in flight gets a second to land. The

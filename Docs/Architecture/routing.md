@@ -25,8 +25,11 @@ Kademlia with 160 buckets. `NodeEntry` = `node_id`, `addresses`, `dsa_pub`,
   next pass paid another post-quantum handshake to learn the same thing
   (`gotchas.md`, "…and neither of those was the fix"). `add` filters merged
   addresses through `wrong_address(id, address)`; records expire after
-  `WRONG_ADDRESS_TTL` (an address is a lease) and the table is bounded by
-  `MAX_WRONG_ADDRESSES`. Keyed on the **pair**: the address usually belongs to
+  `WRONG_ADDRESS_TTL` (an address is a lease), **doubled each time the same
+  pair answers as the same node again**, up to `WRONG_ADDRESS_TTL_MAX` — the
+  strikes outlive the record by that long, since the record expiring is
+  exactly when the gossip brings the address back — and the table is bounded
+  by `MAX_WRONG_ADDRESSES`. Keyed on the **pair**: the address usually belongs to
   somebody, just not to the node it was filed under. Only ever called on
   something we established ourselves — our own address list, or an identity
   proved by a signature over our own challenge.

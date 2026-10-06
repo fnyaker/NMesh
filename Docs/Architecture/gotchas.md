@@ -124,6 +124,24 @@ The pair, never the address alone: in the trace the address was perfectly good �
 for the node that actually answers there. Holding it against everyone would have
 cut us off from the machine we could reach.
 
+### …and the gossip did not stop
+`WRONG_ADDRESS_TTL` assumed the gossip that taught us a wrong address stops
+repeating it. Between two nodes behind one public IP it never does: each keeps
+advertising it. A live node dialled the same `(node, address)` pair every ten
+minutes, to the second, and each dial cost more than a handshake: the answer
+came from a node we already had a link to, so the link **came up** as one to
+that node — `link up`, a catch-up burst of every announce we hold, each way —
+and was closed as redundant a tenth of a second later. The dial's clean-up
+then stopped the link it had opened without a line in the log, so a healthy
+link to a live node seemed to vanish (`BUGSVULNS.MD` 64, 65).
+
+Now a dial carries the id it is for (`_Peer.expected_id`) and
+`_handle_handshake_ack` refuses an answer from anybody else before the link
+counts; `_wait_for_peer_authenticated` gives up the moment another identity has
+answered instead of waiting out its timeout; and the same pair answering as the
+same node again doubles how long it is held (`WRONG_ADDRESS_TTL_MAX`). Every
+path that takes a link out of the list writes its line.
+
 ### The id that answers nobody, asked after for ever
 The same trace: one id was queried in every lookup round of the whole capture
 and never appeared as the source of a single packet. Every answer from every
@@ -1786,6 +1804,64 @@ fault, and every one of its tests fails on the old transport.
 
 > A test that is lowered until it passes has measured the test. When a
 > measurement shows a medium falling over, fix the medium — and say so.
+
+## A timer that could only learn that the path was fast
+
+During a speed test a live UDP link logged a smoothed round trip of 29 ms and a
+retransmit timeout of 1.6 s — thirty-two times its base — with up to 28 % of
+its probes taking over two seconds. Both figures were right, and the gap between
+them was the bug. Three faults in `transports/udp.py`, one feeding the next:
+
+- **A timeout resent the whole window.** Once the path's round trip grew past
+  the timer (a queue filling under load), every frame in flight expired, every
+  one was resent — and Karn's rule forbids timing a resent frame. Nothing could
+  be measured, so the estimate kept the idle 29 ms, and the next frames
+  expired in their turn. The estimator was censored: it saw only answers
+  faster than its own timer.
+- **Frames a timeout held back doubled the timer again.** What a timeout
+  resends is bounded by the window; the rest waited a round and then, being the
+  oldest by then, counted as a fresh timeout and backed the timer off once
+  more. A loss of one burst walked the timer to its ceiling.
+- **An emptied window reset the backoff** onto the base estimate that had
+  just fired too early, with nothing measured in between — contrary to the
+  code's own comment and to RFC 6298.
+
+The fix is F-RTO (RFC 5682): a first timeout resends the oldest frame alone;
+two ACKs in a row that move the cursor are the originals arriving late, and
+the cut is undone while those frames — sent once — are timed. A duplicate ACK
+is a real loss, and the held-back frames go at once without counting as a new
+timeout. The backoff comes down only on a measurement. Same wire format.
+`tests/test_udp_transport.py::TestATimeoutOnALatePathIsFoundOut` holds each
+fault; all six of its tests fail on the old transport.
+
+What was **not** done, on evidence: raising `_RTO_MIN` to TCP's 200 ms. It
+would have silenced the frequent timeouts an idle link logs (a far end whose
+event loop is busy for a moment), and a model of the path showed it cost
+20–45 % of the throughput on a genuinely lossy one, for 2–3 % on a jittery
+one. Those idle timeouts are cheap; the collapse was the censored estimator.
+
+## A machine that slept, and links that did not know
+
+A laptop resumed after 6 872 s asleep. The node's two UDP links looked a second
+old — `time.monotonic()` stops during a suspend — so it kept sending down them
+for 96 s, to nodes that had dropped them an hour and a half earlier, before
+each link's own 75 s keepalive horizon ran out (measured from the wake). The
+TCP link to the same node lasted its 60 s read timeout the same way; the rescue
+loop dialled replacements in between and they queued behind the dead ones.
+
+The machine *can* tell: `CLOCK_BOOTTIME` keeps counting through a suspend and
+`CLOCK_MONOTONIC` does not, so their difference grows by exactly the time spent
+asleep. `node._check_slept` reads it once per keepalive wake; past
+`_SLEEP_ENDS_LINKS` (90 s, above every default horizon on the far end) every
+link is ended as the loss it is, the reconnect book dials the nodes again, and
+the network monitor re-checks our addressing at once. Both clocks are read by
+name, so a test that pins `time.monotonic` does not look like a machine that
+slept. Where there is no boot clock, nothing changes. Test:
+`tests/test_reconnect.py::TestAMachineThatSlept`.
+
+The network monitor already noticed the same wake ("clock-jump", wall clock
+against monotonic) — and only re-checked the addresses. A detector that tells
+one consumer is a detector the next consumer does not know exists.
 
 ## A page following another node, and the things that cannot carry a header
 

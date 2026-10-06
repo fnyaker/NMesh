@@ -11,6 +11,12 @@ from .uri import _MAX_ADDRESSES, _validate_uri
 # gossip which taught it to us has stopped repeating itself, short enough that a
 # machine changing hands heals on its own.
 WRONG_ADDRESS_TTL = 600.0
+# …and the gossip does not always stop: two nodes behind one public IP keep
+# advertising it, and each expiry buys a post-quantum handshake to learn the
+# same thing. The same pair answering as the same node again doubles how long
+# it is held, up to this; the strikes are remembered for as long again after
+# the record expires, since the expiry is exactly when the address comes back.
+WRONG_ADDRESS_TTL_MAX = 6 * 3600.0
 # Bounded like everything an outsider can grow: the pairs come from what peers
 # advertise, so a flood of invented (node, address) pairs must not be a way to
 # grow this table.
@@ -119,7 +125,8 @@ class RoutingTable:
         self._buckets: list[KBucket] = [KBucket() for _ in range(160)]
         # (node_id, address) -> (what it answered as, when we stop believing it).
         # Oldest first, so the bound evicts what we have believed longest.
-        self._wrong: "OrderedDict[tuple[bytes, str], tuple[bytes, float]]" = OrderedDict()
+        # (node, address) → (who answered, held until, strikes, forgotten at)
+        self._wrong: "OrderedDict[tuple[bytes, str], tuple[bytes, float, int, float]]" = OrderedDict()
 
     def _bucket_index(self, node_id: NodeID) -> int:
         """Which bucket an id belongs in, or -1 for our own.
@@ -233,10 +240,15 @@ class RoutingTable:
         now = time.monotonic()
         self._prune_wrong(now)
         key = (node_id.raw, address)
-        self._wrong.pop(key, None)
+        previous = self._wrong.pop(key, None)
+        strikes = 0
+        if previous is not None and previous[0] == answered_as.raw:
+            strikes = min(previous[2] + 1, 16)
         while len(self._wrong) >= MAX_WRONG_ADDRESSES:
             self._wrong.popitem(last=False)
-        self._wrong[key] = (answered_as.raw, now + WRONG_ADDRESS_TTL)
+        held = min(WRONG_ADDRESS_TTL * (2 ** strikes), WRONG_ADDRESS_TTL_MAX)
+        self._wrong[key] = (answered_as.raw, now + held, strikes,
+                            now + held + WRONG_ADDRESS_TTL_MAX)
 
     def wrong_address(self, node_id: NodeID, address: str) -> bytes | None:
         """Who this address answered as, while we still believe it. ``None``
@@ -244,7 +256,7 @@ class RoutingTable:
         found = self._wrong.get((node_id.raw, address))
         if found is None:
             return None
-        answered_as, until = found
+        answered_as, until = found[0], found[1]
         return answered_as if time.monotonic() < until else None
 
     def wrong_addresses(self) -> list[dict]:
@@ -253,11 +265,11 @@ class RoutingTable:
         return [{"node": node_raw.hex(), "address": address,
                  "answered_as": answered_as.hex(),
                  "for_seconds": round(until - now, 1)}
-                for (node_raw, address), (answered_as, until)
+                for (node_raw, address), (answered_as, until, _s, _f)
                 in self._wrong.items() if now < until]
 
     def _prune_wrong(self, now: float) -> None:
-        for key in [k for k, (_who, until) in self._wrong.items() if now >= until]:
+        for key in [k for k, row in self._wrong.items() if now >= row[3]]:
             self._wrong.pop(key, None)
 
     def evict_and_add(self, node_id: NodeID, addresses: list[str], dsa_pub: bytes = b"") -> None:

@@ -328,6 +328,24 @@ scope. Add yours.
   tests failed with a 502 that read like a relay bug. → After changing a
   signature, `grep -rn` the method name over `tests/` *including*
   `tests/integration`, and run both suites before calling it green.
+- **A fix chosen before its cost was measured.** The test report proposed a
+  higher `_RTO_MIN` for the UDP collapse; a model of the path showed it cost
+  20–45 % of the throughput on a lossy link for 2–3 % on a jittery one, and the
+  next candidate (an "ACK too early to answer the resend" check) could not fire
+  in the very case seen live. Both caught before commit. → Before proposing a
+  fix, run it against the failure *and* against the conditions it must not
+  hurt, and check it triggers on the numbers actually observed.
+- **A test asserting a value that correct code changes.** The F-RTO tests
+  first asserted the timer unchanged after a SACK — but a SACKed original is a
+  valid measurement and rightly brings the timer down. → Assert the property
+  the test is named for (no new timeout, no extra backoff), not every field
+  that happens to hold still on the path you imagined.
+- **History comments, a third time.** Ten docstrings and comments in one
+  branch told the incident ("seen live", "a laptop woken after two hours",
+  "used to") instead of the constraint, after two entries above saying not to.
+  Caught on the pre-commit reread. → Write the incident in `gotchas.md` and
+  `BUGSVULNS.MD` *first*; then the code comment has somewhere to point and only
+  the rule left to say.
 - **An empty log answer read as "nothing happened".** After a restart the log
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not

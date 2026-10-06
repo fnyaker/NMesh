@@ -163,7 +163,8 @@ class NetworkModule:
                    if value is not None}
         if cadence:
             bounds = self._apply(lambda: self._node.set_keepalive_bounds(
-                **{f"{name}_ms": value for name, value in cadence.items()}))
+                **{f"{name}_ms": value for name, value in cadence.items()},
+                strict=True))
             for name, value in zip(_KEEPALIVE, bounds.as_tuple()):
                 self._remember(f"keepalive_{name}_ms", value)
         return {"ok": True, "mlo": self._apply(self._node.mlo_status)}
