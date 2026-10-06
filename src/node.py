@@ -4325,6 +4325,23 @@ class MeshNode:
                                NodeID(b"\xff" * 20).raw, challenge)
         await peer.send(packet)
 
+    def _end_double_accept(self, peer: _Peer) -> None:
+        """Both ends of this link accepted it: each challenged, each waits for
+        the other's handshake, and neither will ever send one.
+
+        A UDP far end that kept talking to a socket that had been through a
+        restart did this — the closed-link memory that answers it with a FIN is
+        in RAM, so the new process took its frames for a new connection, while
+        both ends' keepalives held the link up indefinitely. Taking the dialler's
+        part here instead would answer a datagram from any source address with
+        a ~21 kB handshake, so the link is ended: the FIN tells the far end, and
+        the next dial opens one the normal way. Never raises, never awaits."""
+        if peer in self._peers:
+            self._peers.remove(peer)
+            self._note_change("links")
+        self._spawn_bounded(self._safe_stop_peer(
+            peer, "both ends accepted this link; neither would dial"))
+
     def _unauthenticated_peers(self) -> int:
         """Links that have not proved who they are yet — virtual relay peers
         excluded, because a relayed invitation legitimately sits here for the
@@ -11319,6 +11336,9 @@ Hints come first (the ``have`` byte on an announce, from an
         if peer.relay_only:
             return  # we only use this link to relay — don't authenticate to it
         if not peer.is_client_side:
+            if (peer.authenticated_id is None and peer.pending_challenge is not None
+                    and not isinstance(peer.transport, RelayedTransport)):
+                self._end_double_accept(peer)
             return  # Unsolicited challenge — ignore
         if packet.src_id == self._id.raw:
             # Either the far end of this link is this node, or it is a peer

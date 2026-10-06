@@ -219,3 +219,68 @@ class TestAdmission:
         node._reap_stale_unauthenticated()
         assert peer in node._peers
         await node.stop()
+
+    async def test_a_link_both_ends_accepted_is_ended(self):
+        """Each end challenged and waits for a handshake the other will never
+        send — the far end's challenge is the proof. Ended, so the FIN tells
+        the far end and the next dial opens a link the normal way."""
+        from src.node import CHALLENGE
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        transport = FakeTransport()
+        await node._on_new_transport(transport)
+        peer = node._peers[0]
+        assert peer.pending_challenge is not None
+        transport.inject(Packet.create(CHALLENGE, os.urandom(20),
+                                       b"\xff" * 20, os.urandom(32)))
+        for _ in range(50):
+            if peer not in node._peers:
+                break
+            await asyncio.sleep(0.01)
+        assert peer not in node._peers
+        await node.stop()
+
+    async def test_an_authenticated_link_that_is_challenged_is_kept(self):
+        from src.node import CHALLENGE
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        await node._on_new_transport(FakeTransport())
+        peer = node._peers[0]
+        peer.authenticated_id = NodeID(os.urandom(20))
+        await node._handle_challenge(peer, Packet.create(
+            CHALLENGE, peer.authenticated_id.raw, b"\xff" * 20, os.urandom(32)))
+        await asyncio.sleep(0.02)
+        assert peer in node._peers
+        await node.stop()
+
+    async def test_a_malformed_challenge_ends_nothing(self):
+        from src.node import CHALLENGE
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        await node._on_new_transport(FakeTransport())
+        peer = node._peers[0]
+        await node._handle_challenge(peer, Packet.create(
+            CHALLENGE, os.urandom(20), b"\xff" * 20, os.urandom(31)))
+        await asyncio.sleep(0.02)
+        assert peer in node._peers
+        await node.stop()
+
+    async def test_a_relayed_invitation_waiting_on_its_handshake_is_kept(self):
+        """A relayed virtual peer is challenged on purpose while a join crosses
+        the mesh; it is not the double accept and must not be ended as one."""
+        from src.node import CHALLENGE
+        from src.mesh.peers import RelayedTransport
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        await node._on_new_transport(FakeTransport())
+        via = node._peers[0]
+        via.authenticated_id = NodeID(os.urandom(20))
+        virtual = node._new_peer(RelayedTransport(node, NodeID(os.urandom(20)), via),
+                                 is_client_side=False)
+        virtual.pending_challenge = os.urandom(32)
+        node._peers.append(virtual)
+        await node._handle_challenge(virtual, Packet.create(
+            CHALLENGE, os.urandom(20), b"\xff" * 20, os.urandom(32)))
+        await asyncio.sleep(0.02)
+        assert virtual in node._peers
+        await node.stop()

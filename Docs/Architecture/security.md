@@ -793,6 +793,13 @@ re-join the mesh they had pushed it out of.
 Relayed virtual peers are exempt from the sweep: a relayed invitation
 legitimately sits unauthenticated for the length of a join.
 
+A link both ends accepted is ended without waiting for the sweep: a `CHALLENGE`
+arriving on a link this node accepted and challenged itself means neither end
+will dial (`_end_double_accept`, `gotchas.md` "Both ends accepted the link").
+Ending it costs a FIN; answering it with a handshake would be a ~21 kB reply to
+one datagram from any source address, so this node never takes the dialler's
+part on a link it accepted.
+
 ## Per-hop handshake (establishing a session between two direct peers)
 
 Flow (see `_on_new_transport`, `_handle_challenge`, `initiate_handshake`,
