@@ -1441,6 +1441,14 @@ each kind as what it is — a routed member's numbers come off the path's own
 it does not have, and a cadence is read from the link it rides, because an
 accord is a property of a link and a bundle can be entirely routed.
 
+The same row then said `"remote": null` for a **direct** member that the far end
+had opened — a UDP link accepted on our listener. It read `remote_addr`, which is
+what we *dialled*, and an accepted link dialled nothing. A direct member's
+`remote` is now the far end its transport reports (`medium.endpoints`), the
+`remote_addr` only as a fallback for a medium that reports none —
+`tests/test_mlo.py::TestAMemberSaysWhereItGoes`. Two fields, `dialled` and
+`remote`, already exist on a link's own view for exactly this reason.
+
 ## A diagnostic must not be able to end the surface it is diagnosed through
 
 The same failure, one layer out, and the more serious half: **one field out of
