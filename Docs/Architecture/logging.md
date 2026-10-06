@@ -170,7 +170,9 @@ Two details make the cursor trustworthy, and both were missing:
 Filters, the same for both readers: `level` (a **floor**, not an equality),
 `source` (substring), `topic` (exact), `contains` (message *and* fields — a field
 must not be a place to put something a search can never find), `since_time`,
-`until_time`, `limit` (bounded by `MAX_QUERY` whoever asks).
+`until_time` (unix seconds — declared with their own ceiling, since the shared
+one on a count is a million and refused every real time), `limit` (bounded by
+`MAX_QUERY` whoever asks).
 
 Blocks carry their own sequence and time range. A query reads **from the newest
 block backwards and stops once it has a page** — a person reads the end of a

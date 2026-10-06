@@ -193,6 +193,12 @@ Two rules that are easy to get backwards:
   `limit=trace.MAX_SECONDS`: the same constant, not a second guess at it. Two
   layers with different opinions about "too much" is the bug; one layer
   deferring to the other is not.
+* **A `count` that is not a quantity needs its own `limit`.** The shared
+  ceiling on a count is a million (`app_api.MAX_COUNT`), right for "how many"
+  and wrong for a unix time (~1.8 × 10⁹) or a sequence number a long-running
+  node has walked past: `logs.query` could only filter on 1970 and a follower
+  past a million lines was refused. Time filters declare `limit=2**33`,
+  sequence numbers `limit=2**53`.
 
 ## Origins: what a peer may ask of this node
 

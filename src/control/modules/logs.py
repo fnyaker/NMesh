@@ -42,6 +42,12 @@ from ..plane import operation
 # range can hold an answer — a handful, not the ring.
 _QUICK = 5.0
 _READ = 10.0
+# The time filters are unix seconds, so the shared ceiling on a count (a
+# million) refused every real one: a filter that could only name 1970. Clamped
+# here instead, past any date this ring can hold. Sequence numbers likewise: a
+# busy node writes a million lines, and a follower past that was refused.
+_LATEST = 2 ** 33
+_SEQ_MAX = 2 ** 53
 
 
 class LogsModule:
@@ -65,14 +71,18 @@ class LogsModule:
                    param("source", "text", required=False, default=""),
                    param("topic", "text", required=False, default=""),
                    param("contains", "text", required=False, default=""),
-                   param("since_time", "count", required=False, default=0),
-                   param("until_time", "count", required=False, default=0),
-                   param("before_seq", "count", required=False, default=0),
+                   param("since_time", "count", required=False, default=0,
+                         limit=_LATEST),
+                   param("until_time", "count", required=False, default=0,
+                         limit=_LATEST),
+                   param("before_seq", "count", required=False, default=0,
+                         limit=_SEQ_MAX),
                    param("limit", "count", required=False, default=0,
                          limit=logbook.MAX_QUERY)],
                   remote=True, timeout=_READ),
         operation("since", "Everything after a sequence number, oldest first",
-                  [param("seq", "count", required=False, default=0),
+                  [param("seq", "count", required=False, default=0,
+                         limit=_SEQ_MAX),
                    param("run", "hex", required=False, default="", limit=32),
                    param("level", "choice", required=False, default="",
                          choices=("",) + logbook.LEVELS),
