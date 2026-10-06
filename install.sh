@@ -163,7 +163,7 @@ ensure_termux_services() {
 # directory, no test suite. `tar` is used rather than `cp -r` so modes and
 # symlinks survive and the exclusion list is honoured on every platform.
 TREE_INCLUDE=(src scripts start.sh install.sh requirements.txt pyproject.toml
-              README.md CLAUDE.md Docs docker)
+              README.md AGENTS.md CLAUDE.md Docs docker)
 TREE_EXCLUDE=(--exclude=__pycache__ --exclude=.git --exclude=.venv
               --exclude=data --exclude='*.pyc')
 

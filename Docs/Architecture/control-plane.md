@@ -32,7 +32,7 @@ wrote; each was a consequence of the *shape*.
    (`_CONSOLE_DENIED`: not `/api/fleet/`, not `/api/remote/`, not `/api/chat/`).
    So every route added anywhere in the console became reachable by a peer
    holding `manage` **by default** — the exact inverse of the first principle in
-   `CLAUDE.md`.
+   `AGENTS.md`.
 2. **The front end was pinned to HTTP.** A page knew paths, query strings and
    status codes, so nothing else could ever drive a node: not a command line,
    not a second front end, not a test without a socket.

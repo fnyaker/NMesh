@@ -6,7 +6,7 @@ online at the same time. The medium is a file physically carried from one node
 to another ("a USB stick strapped to a pigeon"). A ``Bundle`` packs many packets into
 one integrity-checked file — the thing you copy onto the removable medium.
 
-Security model (see CLAUDE.md): the medium is hostile territory. Every packet
+Security model (see AGENTS.md): the medium is hostile territory. Every packet
 inside a bundle is already end-to-end encrypted and authenticated by the mesh,
 so the carrier can neither read nor forge them; the node's hardened receive path
 already drops any malformed/forged packet. The bundle adds a SHA-256 over the

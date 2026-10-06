@@ -4,7 +4,7 @@ Content-addressed store for the DHT.
 Values are keyed by their own hash (``sha256(value)[:20]``). ``put`` refuses any
 value whose key doesn't match its content, so a peer can never store arbitrary
 data under a key it chose — the classic DHT poisoning vector is closed by
-construction (see CLAUDE.md). The store is bounded in both entry count and total
+construction (see AGENTS.md). The store is bounded in both entry count and total
 bytes, evicting least-recently-used entries under pressure, so a flood of STOREs
 can't exhaust memory.
 """

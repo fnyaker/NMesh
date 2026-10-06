@@ -356,7 +356,7 @@ class WebConsole:
 
         # Sessions: token -> expiry monotonic deadline.
         # Live sessions, keyed by a **handle** — the SHA-256 of the token —
-        # rather than by the token itself. `CLAUDE.md` says secrets are compared
+        # rather than by the token itself. `AGENTS.md` says secrets are compared
         # in constant time and this was the exception nobody had written down: a
         # dict lookup compares strings, and a session token is a secret. The
         # handle is what the table is indexed on (a digest tells an attacker who
@@ -461,7 +461,7 @@ class WebConsole:
     def _write_private(path: str, data: bytes) -> None:
         """Create 0600 at open time, not by a chmod afterwards — the private
         half of a TLS pair must never exist world-readable, however briefly
-        (the rule CLAUDE.md states for the identity file)."""
+        (the rule AGENTS.md states for the identity file)."""
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)

@@ -380,7 +380,7 @@ Two properties are deliberate:
   per-process random seed instead. The stored value is still the whole id, so
   exactness is untouched; only *where* it lands is unpredictable.
 
-## Invariants (reminder, see CLAUDE.md)
+## Invariants (reminder, see AGENTS.md)
 
 - The header is in the clear but **authenticated** (AAD). The application
   payload is E2E encrypted.
