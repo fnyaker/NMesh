@@ -126,19 +126,35 @@ class TransferModule:
     # -- what exists ------------------------------------------------------
 
     def op_kinds(self, origin) -> dict:
-        from ..plane import REACHED_BY
-        allowed = REACHED_BY.get(origin, ())
         return {"kinds": [dict(entry) for entry in self.KINDS
-                          if entry["reach"] in allowed]}
+                          if self._open_to(entry, origin)]}
+
+    def _open_to(self, entry: dict, origin) -> bool:
+        """May ``origin`` move this kind at all?
+
+        For a console, the kind's reach: how far from this machine it may be
+        moved. An app on this machine is at no distance, so a reach says
+        nothing about it; its answer is the permission a human granted it for
+        the operation that carries the kind (`fetch` down, `offer` up), asked
+        of the plane's own gate."""
+        from ..plane import REACHED_BY, app_of
+        if app_of(origin):
+            provided = getattr(self._context, "provided", None)
+            plane = provided("plane") if provided is not None else None
+            carrier = "transfer.fetch" if entry["way"] == DOWN else "transfer.offer"
+            found = plane.find(carrier) if plane is not None else None
+            return found is not None and plane.permits(origin, carrier, found[1])
+        return entry["reach"] in REACHED_BY.get(origin, ())
 
     def _kind(self, name: str, origin: str, way: str) -> dict:
-        from ..plane import REACHED_BY
         for entry in self.KINDS:
             if entry["name"] != name:
                 continue
-            if entry["reach"] not in REACHED_BY.get(origin, ()):
+            if not self._open_to(entry, origin):
+                from ..plane import app_of
                 raise ControlError(
-                    "refused", f"{name} needs the govern capability"
+                    "refused", f"{name} is not open to this app" if app_of(origin)
+                    else f"{name} needs the govern capability"
                     if entry["reach"] == "govern"
                     else f"{name} cannot be moved from a remote console")
             if entry["way"] != way:

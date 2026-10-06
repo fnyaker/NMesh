@@ -1587,9 +1587,9 @@ class MeshNode:
 
         The window opens as the link shows it can take more: one probe more
         per echo, until the round trip under load passes twice the one at rest
-        (a queue is filling: the link is full) or a probe is lost. A fixed
-        eight in flight read at most eight probes per round trip — about
-        1 MB/s at 130 ms — whatever the link could carry.
+        (a queue is filling: the link is full) or a probe is lost. A window
+        reads at most itself per round trip, so a fixed one is a ceiling on the
+        answer — eight is about 1 MB/s at 130 ms — whatever the link carries.
 
         ``bundle`` loads every direct member of the node's active bundle at
         once, each with a window of its own, and reports them together and one
@@ -2157,18 +2157,34 @@ class MeshNode:
         return self._ka_bounds
 
     def set_keepalive_bounds(self, fast_min_ms=None, fast_max_ms=None,
-                             slow_min_ms=None, slow_max_ms=None) -> mlo.Bounds:
+                             slow_min_ms=None, slow_max_ms=None, *,
+                             strict: bool = False) -> mlo.Bounds:
         """Change what this node offers, and tell every link about it.
 
         The re-proposal goes out **before** anything probes at a new cadence,
         which is what keeps this from being read as a K1 violation on the far
-        side."""
+        side.
+
+        Four values out of order are sorted, as a peer's are. ``strict`` (what
+        `network.mlo` asks, which reports nothing else of what it applied)
+        refuses instead, naming the order. `config.save` sorts and reports what
+        it stored (`adjusted`); the start-up path sorts and logs it, since a
+        node that will not start over a hand-edited file is worse."""
         held = self._ka_bounds
-        self._ka_bounds = mlo.clamp_bounds(
-            held.fast_min if fast_min_ms is None else fast_min_ms,
-            held.fast_max if fast_max_ms is None else fast_max_ms,
-            held.slow_min if slow_min_ms is None else slow_min_ms,
-            held.slow_max if slow_max_ms is None else slow_max_ms)
+        asked = (held.fast_min if fast_min_ms is None else fast_min_ms,
+                 held.fast_max if fast_max_ms is None else fast_max_ms,
+                 held.slow_min if slow_min_ms is None else slow_min_ms,
+                 held.slow_max if slow_max_ms is None else slow_max_ms)
+        if not mlo.well_formed(*asked):
+            if strict:
+                raise ValueError(
+                    "keepalive bounds must read fast_min < fast_max,"
+                    " slow_min < slow_max, and fast below slow at both ends;"
+                    " asked for fast %s–%s ms, slow %s–%s ms" % asked)
+            self.log("keepalive bounds out of order: read as sorted",
+                     source="node", level=logbook.WARN, topic="keepalive",
+                     asked="%s %s %s %s" % asked)
+        self._ka_bounds = mlo.clamp_bounds(*asked)
         for peer in list(self._peers):
             if peer.authenticated_id is None or peer.session is None:
                 continue
@@ -2592,9 +2608,17 @@ class MeshNode:
 
         **A medium that declares `mlo`.** Exactly what the link we hold had to
         prove: the second link is probed ten times a second too, and only the
-        operator knows whether that is cheap on it."""
+        operator knows whether that is cheap on it.
+
+        Among those, one that already failed since the last success goes
+        behind every one that has not: a peer may announce an address that is
+        only reachable from its own network, and taking the first every time
+        would ask it alone, at every backoff, for as long as the node ran."""
         held = {self._peer_scheme(peer)
                 for peer in self._direct_links_to(target)}
+        failed = self._mlo_dial_log.get(target, (0, 0.0, ()))[2:3]
+        failed = failed[0] if failed else ()
+        candidates = []
         for uri in self._known_addresses(target):
             result = _validate_uri(uri)
             if result is None:
@@ -2609,18 +2633,26 @@ class MeshNode:
                     continue
             except Exception:
                 continue
-            return uri
-        return None
+            if uri not in failed:
+                return uri
+            candidates.append(uri)
+        return candidates[0] if candidates else None
 
-    def _note_mlo_dial(self, target: NodeID, linked: bool) -> None:
+    def _note_mlo_dial(self, target: NodeID, linked: bool,
+                       uri: str | None = None) -> None:
         """How the last ask went, so a second address that never answers is not
-        dialled every sweep for the life of the node."""
+        dialled every sweep for the life of the node — and is not the one
+        asked next time either (`_mlo_second_address`)."""
         if linked:
             self._mlo_dial_log.pop(target, None)
             return
-        failures = self._mlo_dial_log.get(target, (0, 0.0))[0] + 1
+        previous = self._mlo_dial_log.get(target, (0, 0.0, ()))
+        failures = previous[0] + 1
+        failed = tuple(previous[2]) if len(previous) > 2 else ()
+        if uri is not None and uri not in failed:
+            failed = (failed + (uri,))[-_MAX_ADDRESSES:]
         delay = min(_MLO_DIAL_MAX, _MLO_DIAL_MIN * (2 ** min(failures - 1, 5)))
-        self._mlo_dial_log[target] = (failures, time.monotonic() + delay)
+        self._mlo_dial_log[target] = (failures, time.monotonic() + delay, failed)
         self._mlo_dial_log.move_to_end(target)
         while len(self._mlo_dial_log) > _MLO_DIAL_TRACKED:
             self._mlo_dial_log.popitem(last=False)
@@ -2648,7 +2680,7 @@ class MeshNode:
                 continue        # no address a bundle could be made of
             made += 1
             peer = await self._dial_uri(target, uri, _RETRY_DIAL_TIMEOUT)
-            self._note_mlo_dial(target, peer is not None)
+            self._note_mlo_dial(target, peer is not None, uri)
             if peer is not None:
                 # Candidacy is what buys the fast probe, and a bundle is formed
                 # from measurements: start both now rather than at the next
@@ -4118,10 +4150,9 @@ class MeshNode:
 
         The monotonic clock every timer here runs on stops while the machine
         sleeps; the boot clock does not, and the gap between the two grows by
-        exactly the time spent asleep. A laptop woken after two hours held a
-        UDP link that looked a second old, sent everything down it for 96 s to
-        a node that had forgotten it, and found out only when the link's own
-        keepalive horizon ran out — a horizon measured, again, from the wake.
+        exactly the time spent asleep. Without this, every link looks as fresh
+        on waking as when the machine dozed off, and traffic goes down it until
+        its own horizon runs out — measured, again, from the wake.
 
         Past `_SLEEP_ENDS_LINKS` there is nothing to probe: the far ends have
         already let these links go, so they are ended here as the losses they
@@ -4501,11 +4532,10 @@ class MeshNode:
     def _reap_mute_accepted(self) -> None:
         """End links we accepted that have not sent a single packet.
 
-        Seen live: a UDP far end kept a link to us up for 991 s on transport
-        keepalives alone and never sent a challenge, so the double-accept guard
-        (which waits for one) never fired, and `_reap_stale_unauthenticated`
-        runs only when the unauthenticated ceiling is reached. The link held a
-        slot and a line in the console for nothing.
+        A medium's own keepalives can hold a link up indefinitely with nothing
+        above them. The double-accept guard needs a challenge to react to, and
+        `_reap_stale_unauthenticated` runs only at the unauthenticated ceiling,
+        so a far end that never speaks is out of reach of both.
 
         Narrow on purpose, because some links are unauthenticated by design: a
         relay's joiner link stays so for as long as a relayed join lives — and
@@ -11935,11 +11965,10 @@ Hints come first (the ``have`` byte on an announce, from an
             return self._refuse_handshake(packet, "the identity presented is our own")
         if peer.expected_id is not None and server_id != peer.expected_id:
             # We dialled one node and another answered — two nodes behind one
-            # public IP, most often. The dialler drops this link either way; it
-            # used to do so only after the link had come up as one to whoever
-            # answered, so every such dial cost that node a whole link: a
-            # catch-up burst each way, then a close as redundant a tenth of a
-            # second later. Ending it here costs the handshake and nothing else.
+            # public IP, most often. The dialler drops this link either way, and
+            # past this point it would first come up as a link to whoever
+            # answered, catch-up burst and redundant close included. Ending it
+            # here costs the handshake and nothing else.
             return self._refuse_handshake(
                 packet, "the address answered as another node than the one dialled")
 

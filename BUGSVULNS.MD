@@ -148,6 +148,15 @@ like the regression.
 | 58 | **medium** | Local addresses sorted alphabetically: Docker bridges dialled first, the real LAN address cut from LAN discovery |
 | 59 | **low** | A bundle member opened by the far end showed `remote: null` |
 | 60 | **medium** | A console holding `govern` reached every operation an app declared, those it kept at home included |
+| 61 | **high** | A UDP timeout resent the whole window, so nothing could be timed and the timer climbed to its ceiling on a path that was only slower |
+| 62 | **medium** | A machine that slept kept links its peers had dropped, black-holing traffic for a minute and a half |
+| 63 | **medium** | *Open* — one UDP frame per mesh packet: anything above the MTU is fragmented by IP, and one lost fragment loses the frame |
+| 64 | **medium** | An address two nodes share cost a handshake and a whole redundant link every ten minutes |
+| 65 | **low** | A link closed by a dial's clean-up, a forget or a failed join left no line in the log |
+| 66 | **low** | An accepted UDP link that never sent a packet was held for ever |
+| 67 | **low** | A log could not be filtered by time, nor followed past a million lines |
+| 68 | **medium** | The speed test's fixed window could not read the speed the charter names, nor measure a bundle |
+| 69 | **low** | Keepalive bounds swapped in silence; no transfer kind open to any app; the MLO second link stuck on its first candidate |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -3146,4 +3155,26 @@ round trip: ~1 MB/s at the 130 ms a loaded path showed live, whatever the link
 carried, against a 4 MB/s goal. On a 20 ms path the same window read 6.7 MB/s,
 which is the window again, not the link. And it loaded one link, so what MLO
 adds could not be measured at all.
+
+---
+
+## 69 — low — Three small ones from the live test
+
+> **Status — fixed.** Tests: `tests/test_config_live.py::TestBoundsOutOfOrderFromAConsole`,
+> `tests/test_app_perms.py::TestAnAppMovesWhatItsPermissionsAllow`,
+> `tests/test_mlo.py::TestOpeningTheSecondLink::test_an_address_that_failed_goes_behind_the_others`.
+
+- **Keepalive bounds out of order were swapped in silence.** `network.mlo` with
+  `fast_min` 5000 and `fast_max` 1000 applied 1000–5000 and said nothing. Now
+  refused with the order named (`set_keepalive_bounds(strict=True)`).
+- **`transfer.kinds` was empty for every app.** A kind's reach is a distance,
+  and an app on this machine is at none, so no kind was ever open to one —
+  contrary to `Docs/AppPermissions/guide`, where `readstate.updates` and
+  `control.updates` cover transfers. An app's answer is now the gate's, for the
+  operation that carries the kind.
+- **The MLO second link always asked the first candidate.** JeffreyEpstein's
+  private `udp://10.200.199.10:9001` was dialled at every backoff; an address
+  that failed now goes behind the others. If a peer announces nothing else of
+  that medium there is still nothing better to dial — that is the peer's
+  announcement, not this node's choice.
 

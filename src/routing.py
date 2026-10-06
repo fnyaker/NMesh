@@ -11,13 +11,11 @@ from .uri import _MAX_ADDRESSES, _validate_uri
 # gossip which taught it to us has stopped repeating itself, short enough that a
 # machine changing hands heals on its own.
 WRONG_ADDRESS_TTL = 600.0
-# …and the gossip does not always stop. Two nodes behind one public IP keep
-# advertising it, so every ten minutes the record expired and the next dial
-# bought a post-quantum handshake — and a whole link to the node that does own
-# the address, with its catch-up burst, closed again as redundant a tenth of a
-# second later. The same pair answering as the same node again doubles how long
+# …and the gossip does not always stop: two nodes behind one public IP keep
+# advertising it, and each expiry buys a post-quantum handshake to learn the
+# same thing. The same pair answering as the same node again doubles how long
 # it is held, up to this; the strikes are remembered for as long again after
-# the record expires, so a pair that keeps coming back keeps climbing.
+# the record expires, since the expiry is exactly when the address comes back.
 WRONG_ADDRESS_TTL_MAX = 6 * 3600.0
 # Bounded like everything an outsider can grow: the pairs come from what peers
 # advertise, so a flood of invented (node, address) pairs must not be a way to
