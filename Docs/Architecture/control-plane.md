@@ -227,9 +227,20 @@ Reach, written once, in `plane.REACHED_BY`:
 | Origin | Reaches |
 |---|---|
 | `LOCAL` | everything |
-| `GOVERN` | `govern=True` and `remote=True` |
-| `REMOTE` | `remote=True` |
+| `FULL` | everything — a peer holding the fleet's `full` |
+| `GOVERN`, `GOVERN_APPS` | `govern=True` and `remote=True` |
+| `REMOTE`, `REMOTE_APPS` | `remote=True` |
 | `app:<id>` | what a person granted that app — asked of the gate, not of this table |
+
+`FULL` is answered as `LOCAL` is and is still **at a distance**
+(`at_a_distance`): what the relay cannot carry — a call longer than
+`REMOTE_BUDGET`, a reply past `MAX_REPLY`, more jobs than `MAX_RUNNING_REMOTE` —
+is held to the same bounds as for any console elsewhere, because those are
+about the wire and not about trust. The `_APPS` pair adds nothing to the node's
+own operations; it changes one thing, below — which of an app's operations
+that console reaches (`carries_apps`). Each comes from a header the relay wrote
+out of its own ledger (`FULL_HEADER`, `APPS_HEADER`), read only beside the
+replay marker.
 
 ### Origins: and an app on this machine
 
@@ -436,11 +447,13 @@ keeps working, with one implementation behind it.
 `\*` needs the fleet's `govern` capability as well as `manage`. `~` travels as a
 **job** — `jobs.start` hands back a ticket, `jobs.poll` answers what became of
 it — because it declares more than `REMOTE_BUDGET` and the relay cannot hold a
-call open that long. `°` never leaves this machine, and there are exactly two:
-`apps.token` (the credential an app connects with — the connector listens on
-this machine only) and `web.request` (the routes chat's and fleet's pages call
-— a managed node is not a jump host). **Nothing else is local-only**, and
-`tests/test_control_plane.py` asserts it operation by operation.
+call open that long. `°` leaves this machine only for a console holding the
+fleet's `full`, and there are exactly two: `apps.token` (the credential an app
+connects with — the connector listens on this machine only) and `web.request`
+(the routes chat's and fleet's pages call — a managed node is not a jump host
+unless it granted `full`, which is the grant that says it is). **Nothing else
+is local-only**, and `tests/test_control_plane.py` asserts it operation by
+operation.
 
 
 ### What is still not on the plane
@@ -461,9 +474,10 @@ list than it used to be, and each entry is outside for a reason that is not
 * **The relay and connect blocks.** 32 kB by their own ceiling
   (`node._RELAY_BLOCK_MAX_LEN`), larger than a frame — and pasted into the
   console of the machine you are sitting at anyway.
-* **Chat and fleet's own page surfaces.** By design, not by omission: a managed
-  node is not a jump host. What those apps choose to expose *as operations*
-  travels on the plane like everything else.
+* **Chat and fleet's own page surfaces.** Relayed by path, each behind a grant
+  of its own: chat's with `apps`, fleet's with `full` — the one grant that
+  makes a managed node a jump host. What those apps choose to expose *as
+  operations* travels on the plane like everything else.
 
 The path relay (`console_path_refusal`) therefore still governs the older routes
 that have not moved, and shrinks as they do. The rule to hold on to: **a route
@@ -480,12 +494,19 @@ same gate:**
 * the plane's own `remote` on `apps.call` — may a remote console reach the app
   surface at all;
 * the app's per-operation `remote` — which of its operations that console may
-  then call.
+  then call. Unless that console holds the fleet's **`apps`** (or `full`)
+  grant: then every operation the app declares is reachable, which is what that
+  grant was asked for and given.
 
 Both default to no. So an app added tomorrow is unreachable from a distance
-until its author writes down what may travel, and the enforcement is in one
-place: the plane, which is the layer that knows who is asking. An app never has
-to work that out for itself.
+until its author writes down what may travel or a human grants `apps`, and the
+enforcement is in one place: the plane, which is the layer that knows who is
+asking. An app never has to work that out for itself.
+
+The question `_reachable` asks is "is this one of the consoles that carry
+apps?", never "is this the plain remote one?" — the second was the gate once,
+and its `else` let a console holding `govern` reach every operation chat kept
+at home. `govern` decides what a node trusts and says nothing about its apps.
 
 The built-in apps declare almost nothing. Chat declares none — somebody else's
 conversations were never part of managing their machine. Fleet declares
@@ -508,10 +529,12 @@ the page's script bundle, scanned for its `api(...)` calls and the method of eac
 (`src/app_web.py`) — and `web.request` calls one exactly as listed, replayed over
 the loopback against this console under a session that lives for that one call.
 
-`web.request` is one of the two operations that **never leave this machine**
-(`°` in the table, with `apps.token`): a managed node is not a jump host, and a
-remote console reaching chat's and fleet's page surfaces would make it one. An app
-reaches it only with `control.appweb`.
+`web.request` is one of the two operations that **do not leave this machine**
+short of `full` (`°` in the table, with `apps.token`): a managed node is not a
+jump host, and a remote console reaching chat's and fleet's page surfaces would
+make it one — which is exactly what `full` was granted for. A console holding
+only `apps` reaches chat's routes by path instead (`console_path_refusal`), and
+never fleet's. An app reaches `web.request` only with `control.appweb`.
 
 ## The internal API, listed
 

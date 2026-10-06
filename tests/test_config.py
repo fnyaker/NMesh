@@ -424,6 +424,20 @@ class TestPasswordScript:
         salt, digest = console_auth.read(str(tmp_path / "console.cred"))
         assert console_auth.check(password, salt, digest)
 
+    def test_a_reset_ends_the_sessions_that_outlive_restarts(self, tmp_path):
+        """Resetting the password is what somebody does who thinks a way in was
+        stolen. The sessions `nmeshctl login --for` keeps are written beside
+        the credential, so this script — which changes the credential without
+        the console — has to end them itself."""
+        from src import console_sessions
+        sessions = console_sessions.LastingSessions(
+            console_sessions.path_for(str(tmp_path)))
+        token, _ = sessions.issue(3600)
+        result = self.run(str(tmp_path))
+        assert result.returncode == 0, result.stderr
+        assert not console_sessions.LastingSessions(
+            console_sessions.path_for(str(tmp_path))).valid(token)
+
     def test_stdout_carries_the_password_and_nothing_else(self):
         """install.sh captures stdout: a banner slipping in there would become
         the password."""

@@ -117,7 +117,16 @@ class Origin:
     LOCAL = "local"
     GOVERN = "govern"
     REMOTE = "remote"
-    ALL = (LOCAL, GOVERN, REMOTE)
+    # The same two, holding the fleet's `apps` grant as well: the operations
+    # an app declares are theirs, not only the ones it marked as travelling.
+    REMOTE_APPS = "remote+apps"
+    GOVERN_APPS = "govern+apps"
+    # The peer holding `full`: answered as an operator at this machine would
+    # be — and still at a distance, so what the relay cannot carry in one call
+    # (a job's ceiling, a reply's size) is held to the same bounds as any
+    # other console elsewhere.
+    FULL = "full"
+    ALL = (LOCAL, GOVERN, REMOTE, REMOTE_APPS, GOVERN_APPS, FULL)
 
     # An app on this machine, reaching the plane through the data connector
     # under the identity it authenticated as. Its reach is not a distance at
@@ -147,9 +156,28 @@ def app_of(origin) -> str:
 # one place in the plane where being wrong is being open.
 REACHED_BY = {
     Origin.LOCAL: ("local", "govern", "remote"),
+    Origin.FULL: ("local", "govern", "remote"),
     Origin.GOVERN: ("govern", "remote"),
+    Origin.GOVERN_APPS: ("govern", "remote"),
     Origin.REMOTE: ("remote",),
+    Origin.REMOTE_APPS: ("remote",),
 }
+
+# The consoles whose reach over an app's operations is not the app's own
+# `remote` mark: this machine's, and a peer granted `apps` or `full`.
+_CARRIES_APPS = (Origin.LOCAL, Origin.FULL, Origin.REMOTE_APPS,
+                 Origin.GOVERN_APPS)
+
+
+def carries_apps(origin) -> bool:
+    """May ``origin`` call *every* operation an app declares, not only those
+    the app marked as reachable from a distance?"""
+    return origin in _CARRIES_APPS
+
+
+def at_a_distance(origin) -> bool:
+    """Is ``origin`` a console on another machine, whatever it was granted?"""
+    return origin in Origin.ALL and origin != Origin.LOCAL
 
 
 def reaches(origin: str, entry: dict) -> bool:

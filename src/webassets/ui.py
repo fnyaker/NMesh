@@ -879,8 +879,9 @@ CSS = TOKENS + BASE + COMPONENTS + SHELL
 # screen that must never be wrong.
 #
 # `data-ctx-local` on the page's <body> says what this particular page cannot do
-# for that node — chat and fleet run here whatever is on screen, because the far
-# console refuses them by design (see Docs/Apps/fleet).
+# for that node, and `data-ctx-needs` the grant that lifts it: chat follows the
+# node being driven where it granted `apps`, fleet where it granted `full`, and
+# runs here otherwise (see Docs/Apps/fleet).
 
 def ctx_bar(leave: bool = True) -> str:
     """The strip that says which machine this page is describing.
@@ -1061,22 +1062,27 @@ const SESSION = {
 // carries it and the console relays the call over the mesh. One place to
 // change, so no view can forget it and quietly act on the wrong machine.
 //
-// Three families are never relayed, and the far side refuses them anyway
-// (`_CONSOLE_DENIED` in src/apps/fleet.py): `/api/fleet/`, because a managed
-// node is not a jump host; `/api/remote/`, because that is the proxy driving
-// the proxy; `/api/chat/`, because somebody else's conversations were never
-// part of managing their machine. Signing in and out are this console's own.
-// The rule is written on both sides on purpose — sending the header anyway
-// would turn a designed refusal into a 403 every page has to explain.
+// Some families travel only with a grant of their own, and the far side
+// refuses them otherwise (`console_path_refusal` in src/apps/fleet.py):
+// `/api/chat/` needs `apps` — somebody else's conversations are not part of
+// managing their machine unless they said so — and `/api/fleet/` needs `full`,
+// because without it a managed node is not a jump host. `CONTEXT.caps` is what
+// the node being driven granted us (`full` already expanded), so each page
+// follows the node exactly as far as that node allows. The rule is written on
+// both sides on purpose: sending the header anyway would turn a designed
+// refusal into a 403 every page has to explain.
 //
-// This list is what is left of that idea: an operation on the control plane
-// says for itself whether a remote console may reach it, so `CHANNEL` needs no
-// list at all (`src/control/plane.py`). These are the routes that have not
-// moved onto the plane yet — `Docs/Architecture/control-plane.md` keeps the
-// ledger, and this shrinks as it advances.
-const LOCAL_ONLY = ["/api/remote/", "/api/fleet/", "/api/chat/",
-                    "/api/login", "/api/logout"];
-const local = (path) => LOCAL_ONLY.some((prefix) => path.startsWith(prefix));
+// `/api/remote/` is this console's own sessions, and signing in and out is
+// this console's own door: those never travel, whatever was granted.
+//
+// An operation on the control plane says for itself whether a remote console
+// may reach it, so `CHANNEL` needs no list at all (`src/control/plane.py`).
+// These are the routes that have not moved onto the plane yet.
+const ALWAYS_HERE = ["/api/remote/", "/api/login", "/api/logout", "/api/session"];
+const NEEDS_GRANT = [["/api/chat/", "apps"], ["/api/fleet/", "full"]];
+const local = (path) => ALWAYS_HERE.some((prefix) => path.startsWith(prefix)) ||
+  NEEDS_GRANT.some(([prefix, grant]) => path.startsWith(prefix) &&
+                                        !CONTEXT.caps.includes(grant));
 
 // A reply is stale when the node it came from is no longer the node on screen.
 // Thrown rather than returned: every caller already has a catch, and the one
@@ -1088,6 +1094,10 @@ const isStale = (error) => !!(error && error.stale);
 
 const CONTEXT = {
   node: "", label: "",
+  // What the node being driven granted this one, `full` expanded. Read from
+  // this console's own list (`/api/remote/targets`), so it is a fact about our
+  // ledger and never a claim a URL made.
+  caps: [],
   // Bumped on every switch. A request records it and its reply is dropped if
   // it no longer matches: a page that switched machines mid-flight used to
   // paint the one it had just left, and with auto-refresh off it stayed that
@@ -1103,7 +1113,8 @@ const CONTEXT = {
   save(){
     try{
       if(this.node) sessionStorage.setItem("nmesh_context",
-                                           JSON.stringify({node:this.node, label:this.label}));
+                                           JSON.stringify({node:this.node, label:this.label,
+                                                           caps:this.caps}));
       else sessionStorage.removeItem("nmesh_context");
     }catch(_){}
   },
@@ -1125,6 +1136,7 @@ const CONTEXT = {
       if(/^[0-9a-f]{40}$/.test(asked)){
         this.node = asked;
         this.label = "";
+        this.caps = [];
         this.save();
         return this.node;
       }
@@ -1134,14 +1146,17 @@ const CONTEXT = {
       if(stored && /^[0-9a-f]{40}$/.test(stored.node || "")){
         this.node = stored.node;
         this.label = typeof stored.label === "string" ? stored.label : "";
+        this.caps = Array.isArray(stored.caps)
+          ? stored.caps.filter((cap) => typeof cap === "string") : [];
       }
     }catch(_){}
     return this.node;
   },
 
-  set(node, label){
+  set(node, label, caps){
     this.node = /^[0-9a-f]{40}$/.test(node || "") ? node : "";
     this.label = this.node ? (label || "") : "";
+    this.caps = this.node && Array.isArray(caps) ? caps.slice() : [];
     this.epoch += 1;
     this.save();
     this.paint();
@@ -1204,7 +1219,13 @@ const CONTEXT = {
       const {data} = await apiJson("/api/remote/targets");
       const target = (data.targets || []).find((entry) => entry.id === this.node);
       if(target && target.connected){
-        if(target.label && target.label !== this.label) this.set(this.node, target.label);
+        const caps = Array.isArray(target.caps) ? target.caps : [];
+        // A different set of grants changes which calls go where, so it is a
+        // switch like any other — never a quiet edit under a page in flight.
+        if((target.label && target.label !== this.label) ||
+           caps.join(",") !== this.caps.join(",")){
+          this.set(this.node, target.label || this.label, caps);
+        }
         return;
       }
     }catch(_){}
@@ -1223,8 +1244,11 @@ const CONTEXT = {
     // What this page can and cannot do for the node being managed. Chat and
     // fleet run here whatever is on screen (the far console refuses them), and
     // a bar that did not say so would be the whole point of the bar missed.
+    // The note is only true while the grant the page needs is missing.
     const note = $("ctx-note");
-    if(note) note.textContent = document.body.dataset.ctxLocal || "";
+    const needs = document.body.dataset.ctxNeeds || "";
+    if(note) note.textContent = needs && this.caps.includes(needs)
+      ? "" : (document.body.dataset.ctxLocal || "");
     document.body.dataset.appName = this.remote
       ? "NMesh — " + (this.label || shortId(this.node))
       : (document.body.dataset.appHome || document.body.dataset.appName || "NMesh");
@@ -1280,6 +1304,63 @@ async function apiJson(path, method, body, options){
   const data = await response.json().catch(() => ({}));
   return {ok: response.ok, status: response.status, data};
 }
+
+// ---- media from the node being driven ---------------------------------------
+// An <img src> or a download link cannot carry a header, so on its own it
+// always asks the console serving the page — the wrong machine whenever a page
+// follows another node. A page writes `MEDIA.attr(path, "src")` instead of the
+// attribute: here, that *is* the attribute; there, it is `data-media`, and the
+// file is fetched through `api()` and shown from memory. One observer for the
+// whole document, so a view added later cannot be the one that forgot.
+const MEDIA = {
+  MAX: 128,
+  held: new Map(),
+  attr(path, name){
+    const where = name === "href" ? "href" : "src";
+    if(local(path) || !CONTEXT.node) return where + '="' + esc(path) + '"';
+    return 'data-media="' + esc(path) + '" data-media-attr="' + where + '"';
+  },
+  async resolve(el){
+    const path = el.getAttribute("data-media");
+    const where = el.getAttribute("data-media-attr") === "href" ? "href" : "src";
+    el.removeAttribute("data-media");
+    if(!path) return;
+    try{
+      let url = this.held.get(path);
+      if(!url){
+        const response = await api(path);
+        if(!response.ok) return;
+        url = URL.createObjectURL(await response.blob());
+        this.held.set(path, url);
+        // Bounded, oldest first: a long conversation must not hold every image
+        // it ever showed.
+        while(this.held.size > this.MAX){
+          const [oldest, gone] = this.held.entries().next().value;
+          this.held.delete(oldest);
+          URL.revokeObjectURL(gone);
+        }
+      }
+      el.setAttribute(where, url);
+    }catch(_){}
+  },
+  forget(){
+    this.held.forEach((url) => URL.revokeObjectURL(url));
+    this.held.clear();
+  },
+  watch(){
+    const sweep = (root) => {
+      if(!root.querySelectorAll) return;
+      if(root.hasAttribute && root.hasAttribute("data-media")) this.resolve(root);
+      root.querySelectorAll("[data-media]").forEach((el) => this.resolve(el));
+    };
+    new MutationObserver((changes) => changes.forEach((change) =>
+      change.addedNodes.forEach(sweep))).observe(document.documentElement,
+                                                 {childList: true, subtree: true});
+    sweep(document.documentElement);
+  },
+};
+CONTEXT.subscribe(() => MEDIA.forget());
+if(typeof MutationObserver !== "undefined") MEDIA.watch();
 
 // ---- reading a feed --------------------------------------------------------
 // What a page holds, and how it stays in step with the node holding the truth.

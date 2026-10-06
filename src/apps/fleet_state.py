@@ -42,7 +42,12 @@ from . import fleet_logs
 # What an operator may be granted. Ordered from harmless to total.
 CAPABILITIES = ("status", "logs", "links", "invite", "update", "scan",
                 "provision", "shell", "docker", "manage", "govern",
-                "passwordless")
+                "passwordless", "apps", "full")
+# The one capability that implies the others: whoever holds it is answered as
+# an operator sitting at this machine would be. Every check of a grant goes
+# through `effective_caps`, so "holds `full`" and "holds everything" cannot be
+# two answers.
+FULL = "full"
 CAP_DESCRIPTIONS = {
     "status": "read uptime, load, memory and disk usage",
     # Deliberately separate from "manage": handing somebody the whole console
@@ -91,6 +96,20 @@ CAP_DESCRIPTIONS = {
     # a session, and `manage` is what carries a call.
     "passwordless": "open this node's console with no password — the grant is "
                     "the only key (needs `manage` too)",
+    # `manage` drives the console and stops at the apps: somebody else's
+    # conversations were never part of managing their machine. This is the
+    # grant that says they are — chat's page, and every operation an app
+    # declares, reached on that node from the operator's console. Fleet's own
+    # page stays out of it: acting through that node towards the nodes *it*
+    # manages is `full`'s, not this one's.
+    "apps": "use this node's apps from a remote console: chat, and every "
+            "operation an app declares (needs `manage` too)",
+    # Everything, said once. Every other capability, the console answered as
+    # if the operator sat at this machine — operations that never travel
+    # included — and the relay no longer stops at this node: through it, the
+    # operator reaches the nodes it manages with the rights it holds there.
+    "full": "everything: every capability above, every console operation as "
+            "if at this machine, and the nodes this one manages through it",
 }
 
 MAX_OPERATORS = 64
@@ -111,6 +130,14 @@ MAX_SECRET_BYTES = 4096
 _STATE_KEY = "fleet-state"
 _STATE_BUDGET = 200 * 1024        # serialised ledger ceiling (under the drawer cap)
 PENDING_TTL = 7 * 86400           # an unanswered request expires after a week
+
+
+def effective_caps(caps) -> list[str]:
+    """What a stored grant actually allows: ``full`` stands for every
+    capability. Applied wherever a grant is *checked*, never where one is
+    stored or shown — the ledger keeps what a human ticked."""
+    held = clean_caps(caps)
+    return list(CAPABILITIES) if FULL in held else held
 
 
 def clean_caps(caps) -> list[str]:
@@ -280,7 +307,7 @@ class FleetState:
         one."""
         with self._lock:
             entry = self._operators.get(node_hex)
-            return bool(entry) and capability in (entry.get("caps") or [])
+            return bool(entry) and capability in effective_caps(entry.get("caps"))
 
     def add_operator(self, node_hex: str, public_key: bytes, *,
                      caps: list[str], label: str = "",
@@ -547,7 +574,7 @@ class FleetState:
         be refused is noise the operator has to interpret."""
         with self._lock:
             entry = self._managed.get(node_hex)
-            return bool(entry) and capability in (entry.get("caps") or [])
+            return bool(entry) and capability in effective_caps(entry.get("caps"))
 
     def remove_managed(self, node_hex: str) -> bool:
         with self._lock:

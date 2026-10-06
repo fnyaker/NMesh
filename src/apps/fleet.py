@@ -68,8 +68,8 @@ from ..app_channel import builtin_id
 from ..node_id import NodeID
 from . import (fleet_console, fleet_docker, fleet_files, fleet_host,
                fleet_portainer, fleet_provision, fleet_ssh)
-from .fleet_state import (CAPABILITIES, FleetState, clean_caps, clean_label,
-                          clean_stack_names)
+from .fleet_state import (CAPABILITIES, FleetState, _is_node_hex, clean_caps,
+                          clean_label, clean_stack_names)
 
 FLEET_APP_ID = builtin_id("fleet")
 
@@ -1133,7 +1133,8 @@ class FleetApp:
 
     async def console_call(self, target: NodeID, method: str, path: str,
                            body: bytes | None = None,
-                           token: str | None = None) -> tuple:
+                           token: str | None = None,
+                           then: str | None = None) -> tuple:
         """Operator side: run one console call on ``target``.
 
         Returns ``(status, content_type, body)``. Raises ``ConsoleProxyError``
@@ -1156,6 +1157,8 @@ class FleetApp:
         document = {"rid": rid, "method": method, "path": path}
         if token:
             document["token"] = token
+        if then:
+            document["node"] = then
         if body:
             document["body"] = base64.b64encode(body).decode("ascii")
         await self._send(target, self._signed_frame(
@@ -1280,10 +1283,31 @@ class FleetApp:
         if method not in ("GET", "POST"):
             self._fail(src, rid, "unsupported method")
             return
-        refusal = console_path_refusal(path)
+        # The grants, read here and from the ledger — never from the document
+        # that arrived. A peer describes what it wants done; what it is allowed
+        # to ask for is ours to say, and saying it once, at the door, is what
+        # keeps `govern`, `apps` and `full` from becoming words a caller writes.
+        key = src.raw.hex()
+        grants = {cap: self.state.allows(key, cap)
+                  for cap in ("govern", "apps", "full")}
+        refusal = console_path_refusal(path, apps=grants["apps"],
+                                       full=grants["full"])
         if refusal:
             self._fail(src, rid, refusal)
             return
+        # The next hop, when the operator reaches *through* this node to one it
+        # manages. Only ever under `full`: anything less and this node is not a
+        # jump host.
+        then = document.get("node")
+        if then is not None:
+            if not grants["full"]:
+                self._fail(src, rid, "reaching on through this node needs the "
+                                     "full capability")
+                return
+            then = str(then).strip().lower()
+            if not _is_node_hex(then):
+                self._fail(src, rid, "bad node id")
+                return
         body = None
         raw = document.get("body")
         if raw is not None:
@@ -1298,27 +1322,26 @@ class FleetApp:
         token = document.get("token")
         token = str(token)[:256] if isinstance(token, str) else None
         # A peer cannot make us open an unbounded number of local sockets.
-        key = src.raw.hex()
         if self._console_hosted.get(key, 0) >= MAX_CONSOLE_CALLS:
             self._fail(src, rid, "too many calls in flight")
             return
-        # The second grant, read here and from the ledger — never from the
-        # document that arrived. A peer describes what it wants done; what it is
-        # allowed to ask for is ours to say, and saying it once, at the door,
-        # is what keeps `govern` from becoming a word a caller can write.
-        govern = self.state.allows(key, "govern")
         self._console_hosted[key] = self._console_hosted.get(key, 0) + 1
         self._spawn(self._run_console_call(src, rid, method, path, body, token,
-                                           govern))
+                                           grants, then))
 
     async def _run_console_call(self, src: NodeID, rid: str, method: str,
                                 path: str, body: bytes | None,
-                                token: str | None, govern: bool = False) -> None:
+                                token: str | None, grants=None,
+                                then: str | None = None) -> None:
         key = src.raw.hex()
+        grants = grants or {}
         try:
             status, ctype, payload = await fleet_console.bounded(
-                lambda: self._local_console.call(method, path, body, token,
-                                                 govern=govern),
+                lambda: self._local_console.call(
+                    method, path, body, token,
+                    govern=bool(grants.get("govern")),
+                    apps=bool(grants.get("apps")),
+                    full=bool(grants.get("full")), node=then),
                 fleet_console.CALL_TIMEOUT)
         except fleet_console.ConsoleError as exc:
             status, ctype = 502, "application/json"
@@ -3175,22 +3198,34 @@ class ConsoleProxyTimeout(ConsoleProxyError):
 
 # What a remote operator may reach through the proxy. Everything under /api/ is
 # the console's own surface and already behind its session — except three
-# families that must not be reachable this way:
+# families, each opened by a grant of its own and by nothing less:
 #
-#   /api/fleet/  — a managed node is not a jump host. Without this, one grant
-#                  would chain into every node *that* node manages.
-#   /api/remote/ — the proxy driving the proxy: a loop with a mesh hop in it.
 #   /api/chat/   — someone else's conversations are not part of managing their
-#                  node, and the grant was never asked for that.
-_CONSOLE_DENIED = ("/api/fleet/", "/api/remote/", "/api/chat/")
+#                  node: `apps` is the grant that says they are.
+#   /api/fleet/  — a managed node is not a jump host. Without `full`, one grant
+#                  would chain into every node *that* node manages.
+#   /api/remote/ — the proxy driving the proxy, which is `full`'s too: the
+#                  operator reaching on through this node.
+_NEEDS_APPS = ("/api/chat/",)
+_NEEDS_FULL = ("/api/fleet/", "/api/remote/")
 
 
-def console_path_refusal(path: str) -> str:
-    """Empty when the path may be proxied, otherwise the reason it may not."""
+def console_path_refusal(path: str, *, apps: bool = False,
+                         full: bool = False) -> str:
+    """Empty when the path may be proxied, otherwise the reason it may not.
+
+    ``apps`` and ``full`` are grants read from a ledger by the caller — the
+    agent's of its operator, the operator's of the node it is driving — never
+    anything a request carried."""
     if not path.startswith("/api/"):
         return "only the console API can be driven remotely"
-    if any(path.startswith(prefix) for prefix in _CONSOLE_DENIED):
-        return f"{path.split('/')[2]} is not reachable through a remote console"
+    if full:
+        return ""
+    family = path.split("/")[2] if path.count("/") >= 2 else ""
+    if any(path.startswith(prefix) for prefix in _NEEDS_FULL):
+        return f"{family} needs the full capability on that node"
+    if not apps and any(path.startswith(prefix) for prefix in _NEEDS_APPS):
+        return f"{family} needs the apps capability on that node"
     return ""
 
 

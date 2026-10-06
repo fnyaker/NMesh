@@ -273,12 +273,20 @@ never get wrong.
   changes, so a switch on `/chat` or `/node` resets as thoroughly as one on the
   console.
 
-- **What cannot be driven remotely says so, rather than failing.** A managed
-  node refuses `/api/fleet/`, `/api/remote/` and `/api/chat/` by design (a
-  managed node is not a jump host; the proxy must not drive the proxy; somebody
-  else's conversations were never part of managing their machine). The page
-  knows the same list, so those calls are never *addressed* to it — and the
-  strip on `/chat` and `/fleet` says in words that the app runs here. For
+- **The apps follow the node exactly as far as it granted.** A managed node
+  opens `/api/chat/` to a console holding its **`apps`** grant and `/api/fleet/`
+  to one holding **`full`**, and refuses them otherwise (somebody else's
+  conversations are not part of managing their machine unless they said so; a
+  managed node is not a jump host unless they said so). `/api/remote/` is this
+  console's own sessions and never travels from a page. The page knows what the
+  node being driven granted (`CONTEXT.caps`, read from this console's own
+  `/api/remote/targets`), so a call is addressed to that node only when it will
+  be answered — and the strip on `/chat` and `/fleet` says in words that the
+  app runs here while the grant is missing. With it, chat's conversations,
+  avatars and images, and fleet's nodes and shells, are that node's: a picture
+  cannot carry a header, so `MEDIA` fetches it through the same call path and
+  shows it from memory. A file too large for one relayed answer (512 kB) is
+  refused with a sentence, never cut. For
   everything on the control plane the page does not need a list at all: it reads
   the far node's catalogue (`control.catalogue`, filtered by who is asking) and
   draws the buttons that node will actually answer. A view
@@ -715,9 +723,10 @@ now answers `{"error": …}` with the same status.
 
 | Method | Route            | Role                                           |
 |---------|------------------|------------------------------------------------|
-| POST    | `/api/control`   | the control channel: `{v:1, id, op, params}` → `{v:1, id, ok, result}` or `{ok:false, code, error, detail?}`. With `X-NMesh-Node` the **same frame** is relayed to that node and its answer handed back — the status then describes this console (200: it answered) and the frame describes that node |
-| POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
+| POST    | `/api/control`   | the control channel: `{v:1, id, op, params}` → `{v:1, id, ok, result}` or `{ok:false, code, error, detail?}`. With `X-NMesh-Node` the **same frame** is relayed to that node and its answer handed back — the status then describes this console (200: it answered) and the frame describes that node. With `X-NMesh-Then` beside it, that node relays it once more, to a node *it* manages — only where it granted `full` |
+| POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie. With `for` (seconds, at most 24 h) and an optional `label`: a session that **outlives the node's restarts**, ending on that date whatever happens — `{token, expires_at}`, no cookie. What `nmeshctl login --for` asks for ([`Docs/CLI/guide`](../CLI/guide)); stored hashed in `console.sessions` (0600), ended by sign-out and by a password change or reset |
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
+| GET     | `/api/session`   | the caller's own session: `{lasting, expires_at, sessions, node}` — whether it outlives a restart and until when, and the lasting ones this console holds (label and dates, never a token). Local only |
 | POST    | `/api/control`   | …and `node.speedtest`, the one reading that **loads** a link rather than watching it: a bounded burst of padding echoed back by the peer, answered only over a direct authenticated link. It runs as a job (ten seconds at most), so the node card's **Speed test** button works the same whether the console is on this machine or driving another. The card draws the result as its own block — the rate each way (with its Mbit/s), the latency at rest and under load, the share lost, and one sentence saying what they add up to; expert mode adds both-ways, best round trip, probes and bytes sent |
 | GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`, `trust`) — `node.state`. Also `broken`: the sections that could not be built, empty on a healthy node. One diagnostic raising used to take the whole document with it, and with it every page of the console; now it degrades alone, says so, and writes its traceback to the node's log |
 | POST    | `/api/control`   | …and **files**, on that same channel: `transfer.offer`/`put`/`commit` sends a named set of byte streams a chunk per frame, `transfer.fetch`/`take` reads one back. What the bytes are *for* is a **kind**, with its own reach and its own ceiling — `package` to any console holding `manage`, `app` and `release` behind `govern` |
@@ -862,6 +871,10 @@ The node ships a **default chat app**, plugged into the mesh like any other app
 - the `/api/chat/*` endpoints require the **same token** as the rest of the
   console. With no chat app attached, neither `/chat` nor `/api/chat/*` exists
   (404) and the app list is empty.
+- driving another node that granted this one **`apps`**, `/chat` is *that*
+  node's chat — its conversations, its contacts, its pictures — reached through
+  the relay like the rest of the console. Without the grant it stays this
+  node's, and the strip says so.
 
 Wiring: pass a `chat_bridge` (a `src.apps.chat_web.ChatBridge` wrapping a
 `ChatApp`) to `WebConsole(...)`. The `scripts/nmesh_node.py` launcher does it by
@@ -892,6 +905,11 @@ The `/api/fleet/*` routes require the **same session** as the rest of the
 console, and do not exist (404) when the app is disabled. They only allow
 *asking*: the three authorisation gates live on the target node, and this
 console can grant itself nothing. See [`Docs/Apps/fleet`](../Apps/fleet).
+
+Driving a node that granted this one **`full`**, `/fleet` is *that* node's
+fleet: its requests to approve, the nodes it manages, the shells it opens — the
+full-screen terminal included, which is handed the context as `ctx` beside the
+shell's own `node`. Without `full` the page stays this node's.
 
 ## Built-in apps: install, enable, disable
 

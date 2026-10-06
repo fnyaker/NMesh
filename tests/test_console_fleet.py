@@ -1342,7 +1342,7 @@ class TestRemoteSessionAcrossARestart:
         bridge._call = lambda coro, timeout=None: asyncio.run(coro)
         calls = []
 
-        def raw(_node, token, method, path, body):
+        def raw(_node, token, method, path, body, then=None):
             calls.append(token)
             if token == "stale":
                 return 401, "application/json", b'{"error":"unauthorized"}'

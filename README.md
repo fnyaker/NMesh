@@ -225,6 +225,21 @@ what a peer may do to a node is a list that node keeps about itself rather than
 a rule about the shape of a URL.
 → [`Docs/Architecture/control-plane.md`](Docs/Architecture/control-plane.md)
 
+### And from a terminal: `nmeshctl`
+
+The same channel, for an operator who reached the machine over SSH. The
+installer puts `nmeshctl` on the path; every operation the node declares is a
+command, read from its own catalogue:
+
+```bash
+nmeshctl login --for 8h                  # stays signed in across the node's restarts
+nmeshctl node state
+nmeshctl --node web-01 config get        # a node this one manages
+nmeshctl fleet requests                  # who asks to manage this node
+nmeshctl fleet approve <id> status,manage
+```
+→ [`Docs/CLI/guide`](Docs/CLI/guide)
+
 ## Plugging an application in
 
 The **data** plane: an app (same host or a container) connects to the connector
@@ -325,7 +340,8 @@ no hostile byte crashes a parser. Details and priorities:
 ```
 src/              the core: node, crypto, packets, routing, transports, console, connector
 src/control/      the management plane: one declared operation per thing a node can be asked
-scripts/          nmesh_node.py (launcher), nmesh_config.py, nmesh_password.py, build_pyz.py
+scripts/          nmesh_node.py (launcher), nmeshctl.py (the command line), nmesh_config.py,
+                  nmesh_password.py, build_pyz.py
 start.sh          installs dependencies and runs a node from the current tree
 install.sh        installs the tree for good + a start-at-boot service, then runs it
 docker/           relay-node image and compose file
