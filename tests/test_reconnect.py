@@ -31,7 +31,8 @@ from src.node import (MeshNode, _Peer, _MAX_MALFORMED, _DEAD_LINK_PROBES,
                       _RECONNECT_BACKOFF_MAX, _RECONNECT_FIRST_DELAY,
                       _RECONNECT_MAX_IN_FLIGHT, _RECONNECT_MIN_TICK,
                       _RECONNECT_NODES_TRACKED, _RECONNECT_PATIENT_MAX,
-                      _RECONNECT_WINDOW)
+                      _RECONNECT_WINDOW, _SLEEP_ENDS_LINKS)
+from src import node as node_module
 from src.node_id import NodeID
 from src.reputation import MAX_WEIGHT, OK
 from tests.conftest import FakeTransport, make_manager
@@ -559,3 +560,52 @@ class TestAMembershipTakenBackEndsIt:
         assert TARGET in node._reconnect
         await node.console_forget_node(TARGET.raw.hex())
         assert TARGET not in node._reconnect
+
+
+class TestAMachineThatSlept:
+    """The monotonic clock stops while the machine sleeps. A laptop woken after
+    two hours held links that looked a second old, sent traffic down them for a
+    minute and a half to nodes that had long forgotten them, and found out only
+    when each link timed out again — measured from the wake."""
+
+    @staticmethod
+    def _asleep(monkeypatch, node: MeshNode, seconds) -> None:
+        node._slept_mark = 1000.0
+        monkeypatch.setattr(
+            node_module, "_slept_total",
+            lambda: None if seconds is None else 1000.0 + seconds)
+
+    async def test_a_long_sleep_ends_every_link_and_dials_the_nodes_again(self, monkeypatch):
+        node = _node()
+        _link(node, TARGET)
+        _link(node, TARGET, uri="udp://a:2")
+        _link(node, OTHER, uri="fake://b:1")
+        self._asleep(monkeypatch, node, _SLEEP_ENDS_LINKS + 1.0)
+        node._check_slept()
+        assert node._peers == []
+        assert TARGET in node._reconnect and OTHER in node._reconnect
+
+    async def test_a_short_sleep_ends_nothing(self, monkeypatch):
+        """Under every far end's horizon the links may well be alive, and
+        cutting them would cost a handshake each for nothing."""
+        node = _node()
+        peer = _link(node, TARGET)
+        self._asleep(monkeypatch, node, _SLEEP_ENDS_LINKS - 1.0)
+        node._check_slept()
+        assert node._peers == [peer]
+
+    async def test_a_sleep_is_acted_on_once(self, monkeypatch):
+        node = _node()
+        _link(node, TARGET)
+        self._asleep(monkeypatch, node, _SLEEP_ENDS_LINKS + 1.0)
+        node._check_slept()
+        fresh = _link(node, OTHER)
+        node._check_slept()
+        assert node._peers == [fresh]
+
+    async def test_without_a_boot_clock_nothing_is_ended(self, monkeypatch):
+        node = _node()
+        peer = _link(node, TARGET)
+        self._asleep(monkeypatch, node, None)
+        node._check_slept()
+        assert node._peers == [peer]

@@ -624,6 +624,16 @@ UDP is connectionless and unreliable → a **reliability layer**:
     event** — a loss among frames sent before the last reduction is the same
     event — and dropped to its floor on a timeout. What a timeout resends at
     once is bounded by the window too;
+  - **F-RTO** (RFC 5682) on a first timeout: the oldest frame is resent
+    **alone**, and the next two ACKs decide. Two in a row that move the cursor
+    are originals arriving late — the cut to the window is undone
+    (`spurious timeouts` in the link's stats) and those frames, sent once, are
+    timed, so the estimate learns how slow the path has become. A duplicate
+    ACK at either step is a real loss and the rest goes as before. Frames
+    held back by that recovery coming due later neither count as a new timeout
+    nor back the timer off again, and a backed-off timer comes down only on a
+    measurement — never because the window emptied (`gotchas.md`, "A timer
+    that could only learn that the path was fast");
   - **fast retransmit**: a hole with `_DUP_THRESHOLD` selectively acknowledged
     frames above it is resent at once, not after the timer;
   - **SACK bit `i` is sequence `ack + 1 + i`**, on both sides. Bit 0 is the
@@ -679,7 +689,12 @@ UDP is connectionless and unreliable → a **reliability layer**:
   so a parked `receive()` is never left waiting for a link that has gone.
 - Link death: `_KEEPALIVE_TIMEOUT = 75 s` (3 × the 25 s interval, and above the
   20 s mesh PING cadence) — below that, a healthy but silent punched link was
-  killed when the phases lined up (route flapping).
+  killed when the phases lined up (route flapping). Measured on the monotonic
+  clock, which stops while the machine sleeps: a node that slept past
+  `_SLEEP_ENDS_LINKS` ends its links itself on waking (`node._check_slept`).
+- **One mesh packet is one datagram**, up to `_MAX_PAYLOAD` (60 000 bytes), so
+  anything above the path MTU is fragmented by IP, and losing one fragment
+  loses the frame. Open: `BUGSVULNS.MD` 63.
 - **A FIN ends the link** — on the side that receives it, at once
   (`_peer_finished`). It used to be counted as an *arrival*, like a keepalive:
   it refreshed the liveness it announced the end of. The side that missed a
