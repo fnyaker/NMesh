@@ -279,11 +279,15 @@ _SPEED_WINDOW          = 60.0              # what the *answering* side allows…
 _SPEED_MAX_PER_WINDOW  = 1200              # …in echoes, per identity, per window
 # Probes outstanding at once — a *sliding* window: a new probe leaves as each
 # echo lands, so the link is never idle waiting for the slowest of a batch.
-# Eight is enough to fill the link: past it the transport's own window decides
-# the rate, and more in flight only queues — on loopback UDP, 32 measured the
-# same rate as 8 with five times the latency under load. (Sixteen used to
-# collapse the UDP transport outright; see `gotchas.md`.)
+# It starts at eight and opens by one per echo, up to the ceiling, until the
+# round trip under load passes twice the one at rest plus the slack (a queue is
+# filling, so the link is full) or a probe is lost (then it halves). A fixed
+# eight measured the same as more on loopback, where a round trip is nothing,
+# and capped a 130 ms path at about 1 MB/s. (Sixteen once collapsed the UDP
+# transport outright; see `gotchas.md`.) The ceiling is 1 MB in flight.
 _SPEED_INFLIGHT        = 8
+_SPEED_INFLIGHT_MAX    = 64
+_SPEED_QUEUE_SLACK_MS  = 5.0
 # A probe not echoed within this is counted lost and its slot reused. Without
 # it one dropped datagram held the whole test until the deadline.
 _SPEED_PROBE_TIMEOUT   = 2.0
@@ -1081,10 +1085,12 @@ __all__ = [
     "_SPEED_CHUNK",
     "_SPEED_IDLE_PROBES",
     "_SPEED_INFLIGHT",
+    "_SPEED_INFLIGHT_MAX",
     "_SPEED_MAX_BYTES",
     "_SPEED_MAX_PER_WINDOW",
     "_SPEED_MAX_SECONDS",
     "_SPEED_PROBE_TIMEOUT",
+    "_SPEED_QUEUE_SLACK_MS",
     "_SPEED_WINDOW",
     "_STATE_WRITE_INTERVAL",
     "_STORE_RATE_MAX",

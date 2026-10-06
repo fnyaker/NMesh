@@ -3131,3 +3131,19 @@ run a release older than either guard; the far end's cause is not known.
 had written a million log lines, or moved a million changes, would have refused
 the console following it.
 
+---
+
+## 68 — medium — The speed test could not read the speed the charter names
+
+> **Status — fixed.** The probe window opens with the link (one more per echo,
+> up to 1 MB in flight) until a queue builds or a probe is lost, and `bundle`
+> loads every direct member of a bundle at once. Tests:
+> `tests/test_speedtest.py::TestTheWindowOpensToWhatTheLinkTakes`,
+> `::TestABundleIsMeasuredAsOne`.
+
+**What happens** — eight 16 kB probes in flight, fixed, read at most eight per
+round trip: ~1 MB/s at the 130 ms a loaded path showed live, whatever the link
+carried, against a 4 MB/s goal. On a 20 ms path the same window read 6.7 MB/s,
+which is the window again, not the link. And it loaded one link, so what MLO
+adds could not be measured at all.
+
