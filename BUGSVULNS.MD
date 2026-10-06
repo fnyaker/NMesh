@@ -141,6 +141,9 @@ like the regression.
 | 50 | **medium** | A full send queue was read as a dead link, and the link torn down |
 | 52 | **medium** | *Open* — receive loops still await their sends: a busy next hop holds an ingress link |
 | 53 | **low** | *Open* — every new link costs a ~360 kB catch-up burst each way |
+| 54 | **high** | The UDP SACK was one bit off: a lost frame was retired as delivered, and the link stalled for ever |
+| 55 | **medium** | A UDP link both ends accepted after a restart held a slot for ever, never authenticating |
+| 56 | **low** | Link-local addresses were advertised, and every peer paid a failed dial for each |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -2829,3 +2832,82 @@ particular `protocol.md`'s gate order (for **3**), `security.md`'s invitation
 lockout (for **32**) and its handshake section (for **1**), `transports.md` for
 the UDP findings, and a new `gotchas.md` entry for anything that turns out to
 have been load-bearing.
+
+---
+
+## 54 — high — The UDP SACK was one bit off
+
+> **Status — fixed.** The receiver sets bit `i` for `ack + 1 + i`, the meaning
+> the sender always read (`_ReliableLink._recompute_sack`, `process_incoming`).
+> Tests: `tests/test_udp_transport.py::TestTheTwoHalvesAgreeOnTheSack`.
+
+**Where** — `src/transports/udp.py`, `_ReliableLink`.
+
+**Reach** — every UDP link, every version until this one; any loss followed by
+a later frame, which is to say any loss under load.
+
+**What happens** — the receiver set bit `i` for `ack + 2 + i`, the sender
+retired `ack + 1 + i`. The frame the receiver was missing was dropped from the
+sender's book as delivered and never resent; the receiver's cursor waited on it
+for ever, the reorder buffer filled, and the link carried nothing while its
+keepalives kept it alive. Found on a live node: reorder buffer 256/256, 803
+probes unanswered, cut by the mesh probes after 81 s.
+
+**Impact** — no adversary needed. Any loss under load costs a UDP link and the
+traffic in flight on it; a bundle loses its UDP member; the 80 s until the cut
+is 80 s of routing still choosing a dead link.
+
+**Fixing it without breaking something** — fixed on the receiver, not the
+sender: a fixed node is then right at once with every sender, old or new, for
+what it receives. Bit 0 is never set (the hole itself), so the bitmap names
+`ack + 2` to `ack + 32`.
+
+---
+
+## 55 — medium — A UDP link both ends accepted held a slot for ever
+
+> **Status — fixed.** A `CHALLENGE` on a link this node accepted and challenged
+> itself ends that link (`MeshNode._end_double_accept`). Tests:
+> `tests/test_node.py::TestAdmission::test_a_link_both_ends_accepted_is_ended`
+> and its three neighbours.
+
+**Where** — `src/node.py`, `_handle_challenge`.
+
+**Reach** — a node restarting while a peer still talks to its UDP listener; a
+hole punch whose keepalive frames crossed before either side adopted the link.
+
+**What happens** — the closed-link memory (`remember_closed`, finding 49) is in
+RAM, so after a restart the far end's frames were taken for a new connection,
+and the far end did the same with ours. Both ends challenged, both ignored the
+other's challenge, both waited for a handshake, and both ends' keepalives held
+the link up. `_reap_stale_unauthenticated` runs only at `_MAX_UNAUTH_PEERS`, so
+on a quiet node the link lived as long as the process: seen at 15 minutes and
+counting, 2 packets each way.
+
+**Impact** — a slot of the unauthenticated ceiling held indefinitely, and on a
+punched address `_complete_punch` finds the address held and does not open the
+link it came for.
+
+**Fixing it without breaking something** — never answer by dialling: a
+handshake in reply to one datagram from any source is a ~21 kB reflector. Never
+sweep every unauthenticated link on a timer either: a relayed join's links stay
+unauthenticated for as long as its session lives. Relayed virtual peers are
+exempt.
+
+---
+
+## 56 — low — Link-local addresses were advertised
+
+> **Status — fixed.** `expand_listen_uri` leaves link-local addresses out of a
+> wildcard's expansion. Tests: `tests/test_ip_utils.py::TestExpand`.
+
+**Where** — `src/ip_utils.py`, `expand_listen_uri`.
+
+**What happens** — a wildcard listener was expanded over every local address,
+`fe80::` ones included, without the zone id they need and that only this machine
+knows. A host with containers advertised thirteen of them per transport; every
+peer that tried them failed instantly, once per address per pass.
+
+**Impact** — wasted dials and a longer address list in every PING and
+`FOUND_NODE`. Nothing an adversary gains.
+

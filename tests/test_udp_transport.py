@@ -720,3 +720,105 @@ class TestABurstDoesNotCollapseTheLink:
         assert not pending.done()
         transport._link._send_queue.get_nowait()        # room appears
         await asyncio.wait_for(pending, 1)
+
+
+class TestTheTwoHalvesAgreeOnTheSack:
+    """Each half was tested alone, against its own idea of what bit ``i`` names,
+    and the two ideas were one apart: the receiver set bit ``i`` for
+    ``ack + 2 + i`` and the sender read ``ack + 1 + i``. A lost frame followed
+    by any other was therefore retired by the sender as delivered, never resent,
+    and the receiver's cursor waited on it for ever — a live link carrying
+    nothing, reorder buffer full, until the mesh probes cut it."""
+
+    @staticmethod
+    def _pair():
+        sender, receiver = _ReliableLink(), _ReliableLink()
+        receiver.process_incoming(sender._send_seq, FLAG_KEEPALIVE, b"")
+        return sender, receiver
+
+    @staticmethod
+    def _deliver(receiver, frame):
+        seq, _ack, _sack, flags, length = _FRAME.unpack_from(frame, len(_MAGIC))
+        return receiver.process_incoming(
+            seq, flags, frame[len(_MAGIC) + _FRAME.size:])
+
+    def test_a_lost_frame_stays_with_the_sender(self):
+        sender, receiver = self._pair()
+        frames = [sender.build_frame(make_packet(bytes([i]) * 50))
+                  for i in range(5)]
+        for frame in frames[1:]:
+            assert self._deliver(receiver, frame) == []
+        sender.process_ack(*receiver._build_ack())
+        assert list(sender._unacked) == [_seq_of(frames[0])]
+
+    def test_the_hole_is_resent_and_the_link_moves_on(self):
+        sender, receiver = self._pair()
+        frames = [sender.build_frame(make_packet(bytes([i]) * 50))
+                  for i in range(5)]
+        for frame in frames[1:]:
+            self._deliver(receiver, frame)
+        resend = sender.process_ack(*receiver._build_ack())
+        assert resend == [frames[0]]
+        delivered = self._deliver(receiver, resend[0])
+        assert [Packet.unpack(raw).payload[0] for raw in delivered] == [0, 1, 2, 3, 4]
+        sender.process_ack(*receiver._build_ack())
+        assert not sender._unacked
+
+    def test_the_bit_for_the_hole_is_never_set(self):
+        sender, receiver = self._pair()
+        frames = [sender.build_frame(make_packet(b"p")) for _ in range(40)]
+        for frame in frames[1:]:
+            self._deliver(receiver, frame)
+        _ack, sack = receiver._build_ack()
+        assert not sack & 1
+        assert sack == 0xFFFFFFFE      # ack+2 .. ack+32, the most 32 bits hold
+        sender.process_ack(*receiver._build_ack())
+        assert _seq_of(frames[0]) in sender._unacked
+
+    def test_a_lossy_exchange_delivers_everything_in_order(self):
+        """Every third frame lost on its first crossing, both directions of the
+        exchange driven by the real code: nothing may be lost or stall."""
+        sender, receiver = self._pair()
+        got: list[int] = []
+        sent = 0
+        for _round in range(200):
+            while sent < 120 and sender.can_send(200):
+                frame = sender.build_frame(make_packet(sent.to_bytes(2, "big")))
+                if sent % 3 != 1:
+                    got.extend(int.from_bytes(Packet.unpack(raw).payload[:2], "big")
+                               for raw in self._deliver(receiver, frame))
+                sent += 1
+            for frame in sender.process_ack(*receiver._build_ack()):
+                got.extend(int.from_bytes(Packet.unpack(raw).payload[:2], "big")
+                           for raw in self._deliver(receiver, frame))
+            _expire_all(sender)
+            for frame in sender.get_retransmit_frames():
+                got.extend(int.from_bytes(Packet.unpack(raw).payload[:2], "big")
+                           for raw in self._deliver(receiver, frame))
+            if sent == 120 and not sender._unacked:
+                break
+        assert got == list(range(120))
+        assert not receiver._reorder
+
+    async def test_a_frame_lost_on_the_wire_still_arrives(self, udp_pair):
+        """The same over real sockets: the first data frame of a run is dropped
+        on its way out, the rest cross. Before, the run never arrived at all."""
+        _server, srv, client = udp_pair
+        assert srv is not None
+        real_send, dropped = client._send_raw, []
+
+        def lossy(frame):
+            flags = _FRAME.unpack_from(frame, len(_MAGIC))[3]
+            if flags & FLAG_DATA and not dropped:
+                dropped.append(frame)
+                return
+            real_send(frame)
+
+        client._send_raw = lossy
+        packets = [make_packet(f"lost{i}".encode()) for i in range(10)]
+        for packet in packets:
+            await client.send(packet)
+        for packet in packets:
+            received = await asyncio.wait_for(srv.receive(), timeout=5.0)
+            assert received.pack() == packet.pack()
+        assert dropped

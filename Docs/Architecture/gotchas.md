@@ -20,6 +20,26 @@ The receive loop swallows handler exceptions (`except Exception: pass` — one b
 packet must never kill a link), so any bug in that block is invisible. That is
 the reason to order it this way rather than to trust it.
 
+### Both ends accepted the link, and both wait
+Seen on a live node: a UDP link 9001↔9001 accepted 0.2 s after a restart and
+never authenticated, 2 packets and 322 bytes each way — each end's capabilities
+and `CHALLENGE`. The far end had been talking to the process before the restart;
+the closed-link memory that would have answered it with a FIN
+(`remember_closed`) is in RAM, so the new process took its frames for a new
+connection, and the far end did the same with ours. `_handle_challenge` ignored a
+challenge on an accepted link, both ends' keepalives held the link up, and the
+only sweep (`_reap_stale_unauthenticated`) runs at the unauthenticated ceiling,
+which a quiet node never reaches.
+
+A `CHALLENGE` arriving on a link we accepted and challenged ourselves is proof
+neither end will dial, so `_end_double_accept` ends it: the FIN tells the far
+end, and the next dial opens the link the normal way. **Not** by taking the
+dialler's part instead — that answers a datagram from any source address with a
+~21 kB handshake, a reflector. And **not** by sweeping every unauthenticated link
+on a timer: a relayed join's links (`relay_only` on the joiner, the joiner's
+link on the relay) stay unauthenticated on purpose for as long as the join's
+session lives. Relayed virtual peers are exempt here for the same reason.
+
 ### Reading a trace that stops at `HANDSHAKE`
 `Trace.record("in", …)` runs in the receive loop **before** the handler, and
 `record("out", …)` after `transport.send()` returned. So:
@@ -1758,6 +1778,34 @@ fault, and every one of its tests fails on the old transport.
 
 > A test that is lowered until it passes has measured the test. When a
 > measurement shows a medium falling over, fix the medium — and say so.
+
+## A SACK one bit off: the lost frame retired as delivered
+
+Seen on a live node: a UDP link with its reorder buffer full (256 of 256), its
+`reordered` count frozen, 803 probes unanswered — and alive by every measure the
+transport had, because keepalives kept arriving. The mesh probes cut it after
+81 s of nothing.
+
+The receiver set SACK bit `i` for `ack + 2 + i`; the sender reads bit `i` as
+`ack + 1 + i`. One frame lost and the next one arrived: the receiver said "I
+hold `ack + 2`" in bit 0, the sender read "`ack + 1` arrived" and dropped the
+missing frame from its book. Never resent, so the cursor waited on it for ever
+and everything behind it piled into the reorder buffer until that was full.
+Only a loss *followed by other frames* did it — an isolated loss on a quiet
+link was resent by the timer before any successor — so it struck under load,
+which is when it matters.
+
+It lived since the first version of the transport because **each half was
+tested alone**, against its own idea of the bitmap, and the two ideas were one
+apart. `TestTheTwoHalvesAgreeOnTheSack` drives a real sender against a real
+receiver, including over loopback with a frame dropped on the wire.
+
+> A protocol tested one end at a time is two protocols. When a field is
+> written in one function and read in another, one test must run both.
+
+The fix is on the receiver, to the meaning senders always used: a fixed node is
+right at once with every peer for what it receives, and an old peer stays wrong
+only for what *it* receives, until it updates.
 
 ## Links that came and went under load, and a log that could not say why
 
