@@ -44,11 +44,17 @@ class MyTransport(BaseTransport):
         raise NotImplementedError
 
     async def send(self, packet: Packet) -> None:
-        """Serialise and send the packet."""
+        """Serialise and send the packet.
+
+        Bounded: wait for room a few seconds at most, then raise `LinkBusy`
+        (from `src.transports.contract`) *before* writing anything — the link
+        is full, not gone, and the node keeps it. Raise `ConnectionError` only
+        when the link itself has died. See "What `send()` promises" in the
+        guide."""
         data = packet.pack()
-        # TODO: stream → prefix the size
+        # TODO: stream → wait (bounded) for room, then prefix the size
         #   frame = struct.pack('!H', len(data)) + data
-        #   await self._writer.write(frame)
+        #   self._writer.write(frame)
         # TODO: datagram → send it directly
         raise NotImplementedError
 

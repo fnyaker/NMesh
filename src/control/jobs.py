@@ -111,6 +111,7 @@ class JobBook:
         # they can read rather than a ticket that fails a minute later.
         self._plane.check(op, params, origin=origin)
         with self._lock:
+            now = self._clock()
             # `room=1`: tidying has to leave space for the job being started,
             # or a book full of *finished* records refuses new work for as long
             # as the oldest answer is worth keeping. A bound that stops the node
@@ -122,12 +123,20 @@ class JobBook:
                 raise ControlError("conflict",
                                    "this node is already running as many jobs "
                                    "as it will run at once")
-            if origin != Origin.LOCAL and len([
-                    job for job in running
-                    if job["origin"] != Origin.LOCAL]) >= MAX_RUNNING_REMOTE:
+            remote = [job for job in running if job["origin"] != Origin.LOCAL]
+            if origin != Origin.LOCAL and len(remote) >= MAX_RUNNING_REMOTE:
+                # Named, with how long each has left. Without it this read as a
+                # message left over from something else — it is about work
+                # started earlier, often by a page already closed — and a
+                # button refused for a reason nobody can see is a button people
+                # stop trusting.
+                busy = ", ".join(
+                    f"{job['op']} (up to {max(0, round(job['deadline'] - now))} s"
+                    f" more)" for job in remote)
                 raise ControlError("conflict",
-                                   "as many jobs as a console at a distance "
-                                   "may run at once are already running")
+                                   "this node is already running as many jobs "
+                                   "for a console at a distance as it will: "
+                                   f"{busy}. Try again when one finishes")
             if len(self._jobs) >= MAX_JOBS:
                 raise ControlError("conflict", "too many jobs are remembered")
             ident = secrets.token_hex(8)

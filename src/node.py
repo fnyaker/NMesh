@@ -24,7 +24,7 @@ from . import faults
 from .transports import medium
 from . import routed
 from .routing import RoutingTable, NodeEntry
-from .transports.contract import BaseTransport
+from .transports.contract import BaseTransport, LinkBusy
 from .packet import Packet
 from .seen import SeenSet
 from .activity import Activity
@@ -128,6 +128,10 @@ for _part in (_messages, _constants, _codecs, _peers):
         globals()[_name] = getattr(_part, _name)
 del _part, _name
 
+
+
+# Field names a medium's note may not use: the line's own.
+_NOTE_RESERVED = frozenset({"message", "source", "level", "topic", "node", "link"})
 
 
 def _running_version() -> str:
@@ -458,6 +462,9 @@ class MeshNode:
         # other end of that hold, for a trace that runs out on its own as well
         # as one somebody stopped.
         self.trace.on_stop = lambda: self.logs.release(logbook.TRACE)
+        # Keys of the lines written at most once per `_LOG_THROTTLE`, and what
+        # was folded into each since (`_log_throttled`).
+        self._log_folds: OrderedDict = OrderedDict()
         # What is wrong here, as a human would want it said — a notice board
         # rather than a recording, so it is always on and deliberately poorer
         # than the ring beside it (`src/alerts.py`). An operator must be able to
@@ -1500,7 +1507,8 @@ class MeshNode:
 
     def _speed_allowed(self, peer: '_Peer') -> bool:
         return self._gossip_allowed(self._speed_rate, peer,
-                                    _SPEED_WINDOW, _SPEED_MAX_PER_WINDOW)
+                                    _SPEED_WINDOW, _SPEED_MAX_PER_WINDOW,
+                                    plane="speed")
 
     async def _handle_speed_probe(self, peer: _Peer, packet: Packet) -> None:
         """Answer one probe with exactly what it carried, or answer nothing."""
@@ -1774,11 +1782,20 @@ class MeshNode:
                 if peer.ka_due > now:
                     continue
                 try:
-                    await self.ping(peer)
-                except Exception:
+                    # Bounded, because the links are probed one after another:
+                    # a send that waits is a wait every link after it pays.
+                    # One full UDP queue used to stop every probe on every link
+                    # for ten seconds (`_SEND_WAIT`), healthy ones included.
+                    async with asyncio.timeout(_KA_SEND_WAIT):
+                        await self.ping(peer)
+                except Exception as exc:
                     # `ping` sets the next due before it sends, so a send that
-                    # failed must not leave this link due for ever.
-                    peer.ka_due = now + _LINK_KEEPALIVE_INTERVAL
+                    # failed must not leave this link due for ever. A probe that
+                    # was refused is not withdrawn: it expires as lost, which
+                    # is what it is — the link could not carry it.
+                    if peer.ka_due <= now:
+                        peer.ka_due = now + _LINK_KEEPALIVE_INTERVAL
+                    self._note_probe_failed(peer, exc)
             if now >= next_sweep:
                 next_sweep = now + _LINK_KEEPALIVE_INTERVAL
                 self._reap_silent_links()
@@ -1806,6 +1823,25 @@ class MeshNode:
                         and self._neighbor_idle_cycles == 0):
                     self._wake_neighbor_maintenance()
 
+    def _note_probe_failed(self, peer: '_Peer', exc: BaseException) -> None:
+        """A probe could not be put on a link. Once a minute per link."""
+        if not self.logs.enabled:
+            return
+        now = time.monotonic()
+        if now - getattr(peer, "busy_noted_at", 0.0) < 60.0:
+            return
+        peer.busy_noted_at = now
+        if isinstance(exc, TimeoutError):
+            what = f"not queued within {_KA_SEND_WAIT:g} s"
+        elif isinstance(exc, LinkBusy):
+            what = "the link is full"
+        else:
+            what = f"{type(exc).__name__}: {' '.join(str(exc).split())[:80]}"
+        self.log("a probe could not be sent", source="peers",
+                 level=logbook.WARN, topic="link",
+                 node=self._short_id(peer.authenticated_id), link=self._label(peer),
+                 why=what, **self._link_figures(peer))
+
     def _keepalive_wait(self, next_sweep: float) -> float:
         """How long until the next thing this loop owes anybody.
 
@@ -1832,10 +1868,20 @@ class MeshNode:
         very thing it was told about."""
         self._keepalive_wakeup.clear()
         wait = self._keepalive_wait(next_sweep)
+        started = time.monotonic()
         try:
             async with asyncio.timeout(wait):
                 await self._keepalive_wakeup.wait()
         except TimeoutError:
+            # How much later than asked: the event loop's own lag, read off a
+            # timer that already runs. Every link on this node waits that long
+            # too, and a far end reads it as loss.
+            late = time.monotonic() - started - wait
+            if late >= _LOOP_LAG_WARN:
+                self._log_throttled(
+                    "loop-lag", "the event loop ran late", source="node",
+                    level=logbook.WARN, topic="load",
+                    late_ms=round(late * 1000), links=len(self._peers))
             return
         # Woken early. **A wake may shorten this wait, never remove it.** What
         # sets the event is reachable from a peer — a capability record, a
@@ -1881,14 +1927,19 @@ class MeshNode:
                 continue
             if silent >= _DEAD_LINK_PROBES and quiet_for >= _DEAD_LINK_SILENCE:
                 dead.append(peer)
+        reasons = {
+            id(peer): (f"cut: {peer.quality.since_pong} probes unanswered, "
+                       f"nothing back for {now - peer.quality.answered_at:.0f} s")
+            for peer in dead}
         for peer in dead:
+            self._log_link_end(peer, reasons[id(peer)])
             if peer in self._peers:
                 self._peers.remove(peer)
         # Removed first, then judged: two dead links to one node would each see
         # the other still listed and conclude the node was still reached.
         for peer in dead:
             self._note_node_lost(peer)
-            self._spawn_bounded(self._safe_stop_peer(peer))
+            self._spawn_bounded(self._safe_stop_peer(peer, reasons[id(peer)]))
         if dead:
             self._note_change("links")
             self._note_change("nodes")
@@ -2112,6 +2163,12 @@ class MeshNode:
             return          # the accord just moved; a crossing is not a lie
         if not mlo.inside(next_ms, window):
             peer.ka_outside += 1
+            self._log_throttled(("ka-outside", self._serial(peer)),
+                                "a peer announced a cadence outside the accord",
+                                level=logbook.WARN, topic="keepalive",
+                                node=self._short_id(peer.authenticated_id),
+                                link=self._label(peer), next_ms=int(next_ms),
+                                window=f"{window[0]}..{window[1]}")
             return
         if peer.ka_asked_ms is None:
             return
@@ -2181,6 +2238,11 @@ class MeshNode:
             # have just called impossible would be the accusation and the
             # compliance in one breath.
             peer.ka_impossible += 1
+            self._log_throttled(("ka-impossible", self._serial(peer)),
+                                "keepalive window refused: it cannot be true",
+                                level=logbook.WARN, topic="keepalive",
+                                node=self._short_id(peer.authenticated_id),
+                                link=self._label(peer), declared=str(declared)[:64])
             return
         window = mlo.clamp_bounds(*declared)
         accord = mlo.accord(self.keepalive_bounds(), window)
@@ -2189,6 +2251,10 @@ class MeshNode:
         peer.ka_window = window
         peer.ka_accord = accord
         peer.ka_accord_at = time.monotonic()
+        self.log("keepalive accord", source="peers", topic="keepalive",
+                 node=self._short_id(peer.authenticated_id), link=self._label(peer),
+                 fast_ms=accord.fast_ms, slow_ms=accord.slow_ms,
+                 fast_ok=accord.fast_ok)
         # What we were doing may now sit outside what the two of us agreed, and
         # the peer will judge our next announcement against exactly this. Bring
         # the next probe in, but never nearer than one full interval: a peer
@@ -2354,12 +2420,15 @@ class MeshNode:
                     bundle = self._bundles[target] = mlo.Bundle(self._mlo_settings)
                     while len(self._bundles) > _MAX_PEERS:
                         self._bundles.popitem(last=False)
+                before = (bundle.keys, bundle.benched())
                 bundle.update(
                     mlo.Candidate(key=member,
                                   mean_ms=member.quality.recent_ms(),
                                   drop=member.quality.recent_loss(),
                                   probes=member.quality.recent_probes())
                     for member in members)
+                if (bundle.keys, bundle.benched()) != before:
+                    self._log_bundle(target, bundle)
                 for peer in links:
                     # Candidacy, not membership, is what buys the fast probe: a
                     # link only earns its place by being *measured* at that
@@ -2373,6 +2442,24 @@ class MeshNode:
                         peer.ka_due = due
         except Exception:
             pass
+
+    def _log_bundle(self, target: NodeID, bundle) -> None:
+        """A bundle changed: who carries, who is benched. Only on a change —
+        the sweep re-forms every bundle every twenty seconds."""
+        if not self.logs.enabled:
+            return
+
+        def name(member) -> str:
+            label = getattr(member, "label", None)
+            if label:
+                return label
+            return "via " + self._short_id(getattr(member, "via", None))
+
+        self.log("bundle changed", source="mlo", topic="mlo",
+                 node=self._short_id(target),
+                 members=" ".join(name(m) for m in bundle.keys) or "none",
+                 benched=" ".join(name(m) for m in bundle.benched()) or "none",
+                 skew_ms=round(bundle.skew_ms, 1))
 
     # -- opening the second link a bundle is made of ------------------------
     #
@@ -2870,10 +2957,17 @@ class MeshNode:
         ~33 kB in per attempt, five attempts in twenty seconds, for a link
         closed moments later. See `gotchas.md`."""
         superseded = False
-        for loser in self._redundant_links(peer):
+        losers = self._redundant_links(peer)
+        keeper = next((p for p in self._direct_links_to(peer.authenticated_id)
+                       if p not in losers
+                       and self._peer_scheme(p) == self._peer_scheme(peer)),
+                      None) if losers else None
+        for loser in losers:
             if loser is peer:
                 superseded = True
-            self._spawn_bounded(self._safe_stop_peer(loser))
+            self._spawn_bounded(self._safe_stop_peer(
+                loser, "redundant: another link to this node over the same "
+                       f"medium is kept ({self._label(keeper) or '?'})"))
         return not superseded
 
     def _live_neighbors(self) -> list[NodeID]:
@@ -3144,6 +3238,9 @@ class MeshNode:
         while len(self._reconnect) > _RECONNECT_NODES_TRACKED:
             self._reconnect.popitem(last=False)
         self._reconnect_wakeup.set()
+        self.log("node lost: it will be dialled again", source="peers",
+                 topic="reconnect", node=self._short_id(node_id),
+                 link=self._label(peer))
 
     def _note_loss_burst(self, node_id: NodeID) -> None:
         """Count one node lost, and re-verify our own addressing if several
@@ -3308,6 +3405,8 @@ class MeshNode:
         for node_id, result in zip(due, results):
             if isinstance(result, _Peer) and result.session is not None:
                 self._reconnect.pop(node_id, None)
+                self.log("reconnected", source="peers", topic="reconnect",
+                         node=self._short_id(node_id), link=self._label(result))
                 continue
             held = self._reconnect.get(node_id)
             if held is None:
@@ -3315,6 +3414,12 @@ class MeshNode:
             attempts = held[0] + 1
             delay = self._reconnect_delay(attempts, now < held[2])
             self._reconnect[node_id] = (attempts, now + delay, held[2])
+            self.log("reconnect attempt failed", source="peers",
+                     level=logbook.WARN, topic="reconnect",
+                     node=self._short_id(node_id), attempts=attempts,
+                     next_in_s=round(delay),
+                     error=type(result).__name__
+                     if isinstance(result, BaseException) else "")
 
     async def find_node(self, target: NodeID) -> None:
         qid = os.urandom(_QID_LEN)
@@ -3914,7 +4019,7 @@ class MeshNode:
         # best link, which is exactly the list a bundle exists to widen again.
         return self._stripe(target, peers[:_ROUTE_SEND_FANOUT], exclude)
 
-    def _drop_failed_peer(self, peer: _Peer) -> None:
+    def _drop_failed_peer(self, peer: _Peer, exc: BaseException | None = None) -> None:
         """A send to this peer failed: take it out of routing *now*, tear the
         link down in the background.
 
@@ -3925,6 +4030,10 @@ class MeshNode:
         for ten seconds (gotchas §10). Removing it from `self._peers`
         synchronously is what matters for correctness: the next
         `_route_candidates` must not pick it again."""
+        reason = "a send failed"
+        if exc is not None:
+            reason += f": {type(exc).__name__} {' '.join(str(exc).split())[:80]}"
+        self._log_link_end(peer, reason.strip())
         if peer in self._peers:
             self._peers.remove(peer)
         self._forget_hints_via(peer.authenticated_id)
@@ -3941,8 +4050,19 @@ class MeshNode:
             try:
                 await peer.send(outgoing)
                 return peer
-            except Exception:
-                self._drop_failed_peer(peer)
+            except LinkBusy:
+                # Full, not gone: the next candidate gets the packet and this
+                # link keeps everything it already carries. Tearing it down
+                # here is what turned load into instability — a congested
+                # queue became a dropped link, a reconnect, a catch-up burst
+                # of every announce we hold, and a queue congested again.
+                self._log_throttled(
+                    ("busy", self._serial(peer)), "a link was too busy to take a packet",
+                    level=logbook.WARN, topic="link",
+                    node=self._short_id(peer.authenticated_id), link=self._label(peer),
+                    type=MESSAGE_NAMES.get(packet.type, f"0x{packet.type:02x}"))
+            except Exception as exc:
+                self._drop_failed_peer(peer, exc)
         return None
 
     def _track_route_task(self, coro) -> bool:
@@ -4228,7 +4348,8 @@ class MeshNode:
                 continue
             if peer in self._peers:
                 self._peers.remove(peer)
-            self._spawn_bounded(self._safe_stop_peer(peer))
+            self._spawn_bounded(self._safe_stop_peer(
+                peer, f"never authenticated within {_HANDSHAKE_DEADLINE:.0f} s"))
 
     async def _dial_uri(self, node_id: NodeID, uri: str, timeout: float,
                         *, probe: bool = False) -> _Peer | None:
@@ -4414,6 +4535,165 @@ class MeshNode:
         self.logs.record(source, message, level=level, topic=topic,
                          fields=fields or None)
 
+    def _log_throttled(self, key, message: str, *, source: str = "peers",
+                       level: str = logbook.INFO, topic: str = "",
+                       **fields) -> None:
+        """`log`, at most once per `_LOG_THROTTLE` per ``key``.
+
+        For what can happen once per packet — a rate limit, a refused send —
+        where one line per occurrence would be a flood that pushes everything
+        else out of the ring. The next line for the key says how many were
+        folded into the silence before it (``folded``). Free while nothing is
+        kept, and bounded in keys like every other table here."""
+        if not self.logs.enabled:
+            return
+        now = time.monotonic()
+        book = self._log_folds
+        entry = book.get(key)
+        if entry is not None and now - entry[0] < _LOG_THROTTLE:
+            entry[1] += 1
+            return
+        if entry is not None and entry[1]:
+            fields["folded"] = entry[1]
+        book[key] = [now, 0]
+        book.move_to_end(key)
+        while len(book) > _LOG_THROTTLE_TRACKED:
+            book.popitem(last=False)
+        self.log(message, source=source, level=level, topic=topic, **fields)
+
+    @staticmethod
+    def _label(link) -> str:
+        """A link's name in the log (`_Peer.label`), or ``""`` for anything
+        that is not one of ours. Read with `getattr`: a diagnostic runs on the
+        paths it describes, and must not be the thing that fails on them."""
+        return str(getattr(link, "label", "") or "")
+
+    @staticmethod
+    def _serial(link) -> int:
+        return getattr(link, "serial", None) or id(link)
+
+    @staticmethod
+    def _short_id(node_id) -> str:
+        raw = getattr(node_id, "raw", None)
+        return raw.hex()[:16] if isinstance(raw, (bytes, bytearray)) else ""
+
+    def _link_address(self, peer: '_Peer') -> str:
+        """Where a link goes: the address we dialled, or the far end as the
+        medium sees it for one we accepted."""
+        dialled = getattr(peer, "remote_addr", None)
+        if dialled:
+            return str(dialled)[:96]
+        return str(medium.endpoints(peer.transport).get("remote") or "")[:96]
+
+    def _link_figures(self, peer: '_Peer') -> dict:
+        """What a link looked like, in the numbers that say whether it worked:
+        how old, how long since it last answered, what the recent window lost,
+        and what its medium says about itself."""
+        try:
+            now = time.monotonic()
+            quality = peer.quality
+            loss = quality.recent_loss()
+            figures = {
+                "age_s": round(now - peer.connected_at, 1),
+                "quiet_s": round(now - quality.answered_at, 1),
+                "loss_pct": None if loss is None else round(loss * 100),
+            }
+            # One field, because a line carries eight: the medium's own
+            # counters, zeros left out — "no retransmits" is the absence of
+            # the word, and the line has room for what is not zero.
+            stats = medium.stats(peer.transport)
+            said = [f"{key}={value}" for key, value in stats.items()
+                    if value not in (None, 0, False, "")]
+            if said:
+                figures["medium"] = " ".join(said)[:128]
+            return figures
+        except Exception:                       # noqa: BLE001 — never the reason
+            return {}
+
+    def _log_link_end(self, peer: '_Peer', why: str) -> None:
+        """The one line that says a link ended, and why. Once per link.
+
+        It used to be "link dropped", a node id and an address — and the link
+        being reported had died of one of a dozen causes, from "the peer closed
+        it" to "we cut it for answering nothing" to "a newer link to the same
+        node replaced it", which are a dozen different investigations. The
+        reason travels from whichever path ended the link (`why`), or from the
+        receive loop and its medium when nobody chose to (`end_reason`)."""
+        if not self.logs.enabled or getattr(peer, "end_logged", False):
+            return
+        try:
+            peer.end_logged = True
+            reason = why or peer.end_reason or "the link stopped"
+            who = peer.authenticated_id
+            if who is None:
+                # Never authenticated: a dial or a handshake that did not
+                # finish, which the dial's own line and the refusal book
+                # already describe. Kept, but below the lines about links.
+                self.log("unauthenticated link ended", source="peers",
+                         level=logbook.DEBUG, topic="link", link=self._label(peer),
+                         address=self._link_address(peer), reason=reason)
+                return
+            ours = bool(why) or reason == "closed by this node"
+            self.log("link dropped", source="peers",
+                     level=logbook.INFO if ours else logbook.WARN,
+                     topic="link", node=self._short_id(who), link=self._label(peer),
+                     address=self._link_address(peer), reason=reason,
+                     **self._link_figures(peer))
+        except Exception:                       # noqa: BLE001 — never the reason
+            pass
+
+    def _log_link_up(self, peer: '_Peer', how: str) -> None:
+        """A link authenticated: who, over what, which way round."""
+        if not self.logs.enabled:
+            return
+        self.log("link up", source="peers", topic="link",
+                 node=self._short_id(peer.authenticated_id), link=self._label(peer),
+                 address=self._link_address(peer),
+                 direction="dialled" if peer.is_client_side else "accepted",
+                 how=how)
+
+    def _on_link_event(self, peer: '_Peer', message, level, fields) -> None:
+        """What a link's medium says about it (`BaseTransport.note`).
+
+        A medium is somebody else's code, so it is bounded here and not
+        trusted to bound itself: `_LINK_NOTES_PER_MINUTE` lines per link, and
+        the fields go through the log's own cleaning like any app's."""
+        if not self.logs.enabled:
+            return
+        now = time.monotonic()
+        budget = getattr(peer, "notes_budget", None)
+        if budget is None:
+            return
+        if now - budget[0] >= 60.0:
+            budget[0], budget[1] = now, 0
+        if budget[1] >= _LINK_NOTES_PER_MINUTE:
+            return
+        budget[1] += 1
+        # Six of the medium's own, beside the two that say which link: a line
+        # carries eight (`logbook.MAX_FIELDS`). A name the line already uses is
+        # not the medium's to set — it would collide, or pass for ours.
+        extra = {}
+        for key, value in (fields.items() if isinstance(fields, dict) else ()):
+            key = str(key)[:32]
+            if key not in _NOTE_RESERVED and len(extra) < 6:
+                extra[key] = value
+        self.log(str(message)[:160], source="transport", level=str(level),
+                 topic="link", node=self._short_id(peer.authenticated_id),
+                 link=self._label(peer), **extra)
+
+    def _on_slow_handler(self, peer: '_Peer', kind: int, held: float) -> None:
+        """A handler held a receive loop for `_SLOW_HANDLER` or more.
+
+        Everything else on that link waited meanwhile, its probes included, so
+        to the far end this is loss — and the one place that can tell it was
+        not the network is here."""
+        self._log_throttled(
+            ("slow", self._serial(peer), kind),
+            "a handler held the receive loop", level=logbook.WARN,
+            topic="link", node=self._short_id(peer.authenticated_id),
+            link=self._label(peer), type=MESSAGE_NAMES.get(kind, f"0x{kind:02x}"),
+            held_s=round(held, 2))
+
     def alert(self, key: str, summary: str, *, level: str = alerts.WARN,
               source: str = "node", node: str = "", detail: str = "") -> None:
         """Put one problem on the board. Never raises, always on.
@@ -4443,11 +4723,17 @@ class MeshNode:
         peer = _Peer(transport, is_client_side=is_client_side)
         peer.on_dead = on_dead if on_dead is not None else self._reap_peer
         peer.on_abuse = self._charge_identity_abuse
+        peer.on_slow = self._on_slow_handler
         peer.total = self._metrics.total
         peer.trace = self.trace
+        try:
+            transport.on_event = (lambda message, level, fields, link=peer:
+                                  self._on_link_event(link, message, level, fields))
+        except Exception:                       # noqa: BLE001 — a medium may refuse
+            pass
         return peer
 
-    async def _reap_peer(self, peer: _Peer) -> None:
+    async def _reap_peer(self, peer: _Peer, why: str = "") -> None:
         """Prune a peer whose link died or which was cut for abuse.
 
         Called from the peer's own receive task, so it must not cancel that
@@ -4459,10 +4745,7 @@ class MeshNode:
         # the path a link takes when it dies, including a link that died half
         # built. A diagnostic that raises on the failure it is describing turns
         # a dropped link into a dropped task.
-        who = getattr(peer, "authenticated_id", None)
-        self.log("link dropped", source="peers", topic="link",
-                 node=who.raw.hex()[:16] if who is not None else "",
-                 address=str(getattr(peer, "remote_addr", "") or "")[:64])
+        self._log_link_end(peer, why)
         try:
             self._peers.remove(peer)
         except ValueError:
@@ -5173,6 +5456,15 @@ class MeshNode:
         book[uri] = {"outcome": outcome, "detail": detail[:80],
                      "at": time.monotonic(),
                      "ms": None if elapsed is None else round(elapsed * 1000, 1)}
+        # Every dial, whoever asked for it: the routing walk, the reconnect
+        # book, the rescue, MLO's second link, a button. Which addresses were
+        # tried, in what order and with what result is most of what explains a
+        # link that keeps coming back.
+        self.log(f"dial {outcome}", source="peers",
+                 level=logbook.INFO if outcome == "connected" else logbook.DEBUG,
+                 topic="dial", node=node_hex[:16], address=uri[:96],
+                 detail=detail[:80],
+                 ms=None if elapsed is None else round(elapsed * 1000))
 
     # -- retrying addresses ------------------------------------------------
 
@@ -5630,6 +5922,11 @@ class MeshNode:
         finally:
             loser = peer if better else candidate
             candidate.probation = False   # whichever survives is a link like any other
+            self._log_link_end(
+                loser,
+                f"address steering: {self._label(candidate)} scored better"
+                if better else
+                f"address steering: the candidate scored no better than {self._label(peer)}")
             try:
                 await loser.stop()
             except Exception:
@@ -5688,12 +5985,25 @@ class MeshNode:
             if peer.relay_only or peer.probation or peer.tarpit_until:
                 continue
             live.setdefault(target, []).append(peer)
+            failing = self._link_is_failing(peer)
+            if failing != getattr(peer, "failing", False):
+                peer.failing = failing
+                if self.logs.enabled:
+                    self.log("link failing: it loses too many probes"
+                             if failing else "link recovered", source="peers",
+                             level=logbook.WARN if failing else logbook.INFO,
+                             topic="link", node=self._short_id(target),
+                             link=self._label(peer), **self._link_figures(peer))
         for target, links in live.items():
-            if not all(self._link_is_failing(peer) for peer in links):
+            if not all(getattr(peer, "failing", False) for peer in links):
                 self._rescue.pop(target, None)
                 continue
             if target in self._rescue:
                 continue
+            self.log("every link to a node is failing: a new one will be dialled",
+                     source="peers", level=logbook.WARN, topic="rescue",
+                     node=self._short_id(target),
+                     links=" ".join(self._label(peer) for peer in links))
             self._rescue[target] = None
             while len(self._rescue) > _RESCUE_TRACKED:
                 self._rescue.popitem(last=False)
@@ -5808,6 +6118,9 @@ class MeshNode:
                 break
         if candidate is None:
             self._note_rescue(target, False)
+            self.log("rescue: no address answered", source="peers",
+                     level=logbook.WARN, topic="rescue",
+                     node=self._short_id(target), link=self._label(peer))
             return False
         if peer.session is None or peer not in self._peers:
             # It died under us while we were dialling. Nothing left to compare
@@ -5825,6 +6138,11 @@ class MeshNode:
             >= _ADDR_STEER_MIN_GAIN)
         loser = peer if better else candidate
         candidate.probation = False   # whichever survives is a link like any other
+        self._log_link_end(
+            loser,
+            f"rescue: replaced by {self._label(candidate)}, which measured better"
+            if better else
+            f"rescue: the new link measured no better than {self._label(peer)}")
         try:
             await loser.stop()
         except Exception:
@@ -6405,7 +6723,8 @@ class MeshNode:
                 if rlink is not None:
                     await self._safe_stop_peer(rlink)
 
-    async def _safe_stop_peer(self, peer: '_Peer') -> None:
+    async def _safe_stop_peer(self, peer: '_Peer', why: str = "") -> None:
+        self._log_link_end(peer, why or "closed by this node")
         try:
             await peer.stop()
         except Exception:
@@ -7515,6 +7834,8 @@ class MeshNode:
             cnt, ws = 0, now
         if cnt >= _QUERY_RATE_MAX:
             self._query_rate[key] = (cnt, ws)
+            self._note_rate_limited(peer, "query", _QUERY_RATE_MAX,
+                                    _QUERY_RATE_WINDOW)
             return False
         self._query_rate[key] = (cnt + 1, ws)
         return True
@@ -7637,7 +7958,8 @@ class MeshNode:
 
     def _store_allowed(self, peer: '_Peer') -> bool:
         return self._gossip_allowed(self._store_rate, peer,
-                                    _STORE_RATE_WINDOW, _STORE_RATE_MAX)
+                                    _STORE_RATE_WINDOW, _STORE_RATE_MAX,
+                                    plane="store")
 
     async def _handle_observed_addr(self, peer: _Peer, packet: Packet) -> None:
         # A peer that accepted our connection tells us the source IP it saw —
@@ -7775,7 +8097,7 @@ class MeshNode:
     # -- app store: shared catalog (gossiped) + installed set -------------
 
     def _gossip_allowed(self, table: 'OrderedDict[bytes, tuple]', peer: '_Peer',
-                        window: float, maximum: int) -> bool:
+                        window: float, maximum: int, *, plane: str = "") -> bool:
         """Per-ingress-link rate limit for a gossip plane (bounded, pruned) — a
         peer cannot make us verify signatures without end. One implementation:
         a second one would be a second place to get a bound wrong."""
@@ -7790,13 +8112,30 @@ class MeshNode:
             cnt, ws = 0, now
         if cnt >= maximum:
             table[key] = (cnt, ws)
+            self._note_rate_limited(peer, plane, maximum, window)
             return False
         table[key] = (cnt + 1, ws)
         return True
 
+    def _note_rate_limited(self, peer: '_Peer', plane: str, maximum: int,
+                           window: float) -> None:
+        """A peer went over a plane's allowance, and what it sent past it was
+        dropped. Dropped silently on the wire — that is the design — and so,
+        until now, silently everywhere: a peer's announces vanishing at the
+        gate looked, from both ends, exactly like a lossy link."""
+        if not self.logs.enabled:
+            return
+        self._log_throttled(("rate", plane, self._serial(peer)),
+                            "a peer went over a rate limit: dropped",
+                            level=logbook.INFO, topic="rate",
+                            node=self._short_id(peer.authenticated_id),
+                            link=self._label(peer), plane=plane or "?",
+                            allowance=f"{maximum} per {window:g} s")
+
     def _catalog_allowed(self, peer: '_Peer') -> bool:
         return self._gossip_allowed(self._catalog_rate, peer,
-                                    _CATALOG_RATE_WINDOW, _CATALOG_RATE_MAX)
+                                    _CATALOG_RATE_WINDOW, _CATALOG_RATE_MAX,
+                                    plane="catalog")
 
     async def _handle_catalog_announce(self, peer: '_Peer', packet: Packet) -> None:
         from .dht import MAX_VALUE
@@ -7972,7 +8311,8 @@ class MeshNode:
         ML-DSA signature is work; a peer does not get to ask for it without
         end."""
         return self._gossip_allowed(self._release_rate, peer,
-                                    _RELEASE_RATE_WINDOW, _RELEASE_RATE_MAX)
+                                    _RELEASE_RATE_WINDOW, _RELEASE_RATE_MAX,
+                                    plane="release")
 
     def _trusts_publisher(self, public_key: bytes) -> bool:
         """May this key replace the program this node runs?
@@ -8179,7 +8519,8 @@ class MeshNode:
 
     def _release_serve_allowed(self, peer: '_Peer') -> bool:
         return self._gossip_allowed(self._release_serve_rate, peer,
-                                    _RELEASE_SERVE_WINDOW, _RELEASE_SERVE_MAX)
+                                    _RELEASE_SERVE_WINDOW, _RELEASE_SERVE_MAX,
+                                    plane="release_serve")
 
     def _note_release_source(self, release_id_hex: str, node_id: NodeID) -> None:
         """Remember that this node said it holds that release.
@@ -9147,11 +9488,13 @@ Hints come first (the ``have`` byte on an announce, from an
 
     def _pseudo_allowed(self, peer: '_Peer') -> bool:
         return self._gossip_allowed(self._pseudo_rate, peer,
-                                    _PSEUDO_RATE_WINDOW, _PSEUDO_RATE_MAX)
+                                    _PSEUDO_RATE_WINDOW, _PSEUDO_RATE_MAX,
+                                    plane="pseudo")
 
     def _revoke_allowed(self, peer: '_Peer') -> bool:
         return self._gossip_allowed(self._revoke_rate, peer,
-                                    _REVOKE_RATE_WINDOW, _REVOKE_RATE_MAX)
+                                    _REVOKE_RATE_WINDOW, _REVOKE_RATE_MAX,
+                                    plane="revoke")
 
     def _absorb_claim(self, peer: '_Peer', raw: bytes):
         """Verify a claim that arrived from ``peer`` and file it.
@@ -9227,7 +9570,8 @@ Hints come first (the ``have`` byte on an announce, from an
         be cancelled from here (see :meth:`_reap_peer`)."""
         self._charge_identity_abuse(peer)
         if peer.note_abuse():
-            self._spawn_bounded(self._reap_peer(peer))
+            self._spawn_bounded(self._reap_peer(
+                peer, "cut: too many protocol violations on this link"))
 
     async def _handle_pseudo_announce(self, peer: '_Peer', packet: Packet) -> None:
         if not self._pseudo_allowed(peer):
@@ -9601,7 +9945,8 @@ Hints come first (the ``have`` byte on an announce, from an
 
     def _key_share_allowed(self, peer: '_Peer') -> bool:
         return self._gossip_allowed(self._key_share_rate, peer,
-                                    _KEY_SHARE_WINDOW, _KEY_SHARE_MAX)
+                                    _KEY_SHARE_WINDOW, _KEY_SHARE_MAX,
+                                    plane="key_share")
 
     def _sweep_key_shares(self) -> None:
         """Forget what has run out of time, in all three directions.
@@ -9892,7 +10237,8 @@ Hints come first (the ``have`` byte on an announce, from an
 
     def _pkg_allowed(self, peer: '_Peer') -> bool:
         return self._gossip_allowed(self._pkg_rate, peer,
-                                    _PKG_RATE_WINDOW, _PKG_RATE_MAX)
+                                    _PKG_RATE_WINDOW, _PKG_RATE_MAX,
+                                    plane="pkg")
 
     def _absorb_package(self, peer: '_Peer', raw: bytes):
         """Verify a record that arrived from ``peer`` and file it.
@@ -10295,7 +10641,7 @@ Hints come first (the ``have`` byte on an announce, from an
             if _HEX_PKG.fullmatch(record_id_hex or "") else None
         if entry is None or entry["release"] == b"\x00" * 20:
             return None, None
-        raw = await self.dht_get(entry["release"])
+        raw = await self._descriptor_for(entry)
         if raw is None:
             return None, None
         if entry["kind"] == _PKG_CORE:
@@ -10326,6 +10672,40 @@ Hints come first (the ``have`` byte on an announce, from an
                 "name": doc["name"], "app_id": doc["app_id"].hex(),
                 "publisher_id": _pkg_identity_id(doc["author"]).hex(),
                 "publisher": doc["author"].hex()}, None
+
+    async def _descriptor_for(self, entry: dict) -> bytes | None:
+        """The signed descriptor a record points at, asked of **whoever said
+        they hold it** before anybody else.
+
+        A record is a node signing "I hold this release and I serve it", and
+        every node that files one keeps the descriptor in its own store first
+        (publishing keeps it *only* there until the directory sweep replicates
+        it, which is up to `_DIR_REPUBLISH` later). `dht_get` asks the nodes
+        closest to the key and nobody else — so a package listed on a node's
+        page pointed at a descriptor that node had and nobody was asking it
+        for, and the package could be seen and not fetched for a quarter of an
+        hour after every publication. The holders are asked first, a bounded
+        few; the DHT is what is left.
+
+        Nothing here is believed on who said it: a value is kept only if it
+        hashes to the key the record signed."""
+        key = entry["release"]
+        local = self._dht_store.get(key)
+        if local is not None:
+            return local
+        holders = [NodeID(entry["node_id"])]
+        for other in self._package_book.holders(key):
+            node_id = NodeID(other["node_id"])
+            if node_id not in holders:
+                holders.append(node_id)
+        for node_id in holders[:_DESCRIPTOR_HOLDERS_ASKED]:
+            if node_id == self._id:
+                continue
+            value = await self._dht_find_value_at(node_id, key)
+            if value is not None and _content_key(value) == key:
+                self._dht_store.put(key, value)
+                return value
+        return await self.dht_get(key)
 
     async def package_descriptor(self, record_id_hex: str):
         """What a page may read about the release a record points at.
@@ -11183,6 +11563,12 @@ Hints come first (the ``have`` byte on an announce, from an
                 self._handshake_refusals.popitem(last=False)
             record = self._handshake_refusals[reason] = {"count": 0}
         record["count"] += 1
+        # Throttled per reason, for the reason the book is counted per reason:
+        # the words are ours, the rate is whoever is dialling.
+        self._log_throttled(("refused", reason), "handshake refused",
+                            level=logbook.WARN, topic="handshake",
+                            reason=reason[:120],
+                            src=bytes(packet.src_id).hex()[:16])
         record["at"] = time.time()
         self._activity.note("refused", "handshake refused: " + reason)
         try:
@@ -11283,6 +11669,7 @@ Hints come first (the ``have`` byte on an announce, from an
 
         self._note_punch_link_up(peer)
         self._activity.note("link", "link up with " + claimed_id.raw.hex()[:16])
+        self._log_link_up(peer, "answered its handshake")
         self._routing.add(claimed_id, [], bob_dsa_pub)
         kept = self._collapse_redundant_links(peer)
         self._stop_chasing(peer.authenticated_id)
@@ -11401,6 +11788,7 @@ Hints come first (the ``have`` byte on an announce, from an
         peer.authenticated_id = server_id
         peer.dsa_pub = alice_dsa_pub
         self._activity.note("link", "link up with " + server_id.raw.hex()[:16])
+        self._log_link_up(peer, "our handshake was answered")
         self._note_punch_link_up(peer)
         # Record the address we dialled so this peer is reconnectable after a
         # restart (validated before advertising it to anyone else).
@@ -11737,7 +12125,8 @@ Hints come first (the ``have`` byte on an announce, from an
         # a node whose membership was taken back is the last one to chase.
         self._stop_chasing(subject)
         for peer in [p for p in self._peers if p.authenticated_id == subject]:
-            self._spawn_bounded(self._reap_peer(peer))
+            self._spawn_bounded(self._reap_peer(
+                peer, "its membership was revoked"))
         self._note_change("links")
         self._note_change("nodes")
 
@@ -11837,6 +12226,10 @@ Hints come first (the ``have`` byte on an announce, from an
         # having had the foresight to start a log first. Keyed per identity, so
         # a peer that goes on trying is one line with a count.
         short = node_id.raw.hex()[:16]
+        self.log(f"a peer's standing crossed to {standing}", source="peers",
+                 level=logbook.WARN, topic="abuse", node=short,
+                 reason=str(reason or "")[:120],
+                 score=round(self._reputation.score(node_id), 2))
         self.alert(f"standing:{short}", f"a peer is {standing}",
                    level=alerts.ERROR if standing != "suspect" else alerts.WARN,
                    source="peers", node=node_id.raw.hex(),
@@ -11877,8 +12270,16 @@ Hints come first (the ``have`` byte on an announce, from an
         slower."""
         if peer.tarpit_until:
             return
-        peer.tarpit_until = time.monotonic() + random.uniform(_TARPIT_MIN,
-                                                              _TARPIT_MAX)
+        hold = random.uniform(_TARPIT_MIN, _TARPIT_MAX)
+        peer.tarpit_until = time.monotonic() + hold
+        # Said here, because nothing else will: from now on everything this
+        # link sends is dropped without a word, and to a person reading the
+        # trace that looks exactly like a link losing every packet.
+        self.log("link tarpitted: its traffic is now dropped silently",
+                 source="peers", level=logbook.WARN, topic="abuse",
+                 node=self._short_id(peer.authenticated_id), link=self._label(peer),
+                 hold_s=round(hold), standing=self._reputation.standing(
+                     peer.authenticated_id) if peer.authenticated_id else "")
 
     def _reap_expired_tarpits(self) -> None:
         """Let go of the links whose hold has run out. Never raises, never
@@ -11892,7 +12293,8 @@ Hints come first (the ``have`` byte on an announce, from an
         now = time.monotonic()
         for peer in [p for p in self._peers
                      if p.tarpit_until and now >= p.tarpit_until]:
-            self._spawn_bounded(self._reap_peer(peer))
+            self._spawn_bounded(self._reap_peer(
+                peer, "let go: its tarpit hold ran out"))
 
     def _claim_accusation(self, node_id: NodeID) -> bool:
         """One accusation per node per `_ACCUSE_MIN_GAP`.
@@ -11938,7 +12340,8 @@ Hints come first (the ``have`` byte on an announce, from an
 
     def _abuse_allowed(self, peer: '_Peer') -> bool:
         return self._gossip_allowed(self._abuse_rate, peer,
-                                    _ABUSE_RATE_WINDOW, _ABUSE_RATE_MAX)
+                                    _ABUSE_RATE_WINDOW, _ABUSE_RATE_MAX,
+                                    plane="abuse")
 
     def _behaviour_sweep(self) -> None:
         """Judge every authenticated link, and every issuer we watch, once on
@@ -11995,6 +12398,11 @@ Hints come first (the ``have`` byte on an announce, from an
         add up to. A profile break only ever *notifies*: its honest lookalike
         is "the operator upgraded that machine", and scoring it would punish
         them for administering their own fleet."""
+        self.log(f"behaviour rule {rule_id} fired", source="peers",
+                 level=logbook.WARN if response != behaviour.NOTICE
+                 else logbook.INFO, topic="abuse",
+                 node=self._short_id(node_id), rule=rule_id,
+                 summary=summary[:120], weight=weight)
         if response == behaviour.NOTICE:
             self._note_behaviour(node_id, rule_id, summary)
             return
@@ -12312,7 +12720,8 @@ Hints come first (the ``have`` byte on an announce, from an
 
     def _punch_request_allowed(self, peer: '_Peer') -> bool:
         return self._gossip_allowed(self._punch_req_rate, peer,
-                                    _PUNCH_REQ_WINDOW, _PUNCH_REQ_MAX)
+                                    _PUNCH_REQ_WINDOW, _PUNCH_REQ_MAX,
+                                    plane="punch_req")
 
     async def _handle_punch_relay(self, peer: '_Peer', packet: Packet) -> None:
         """We received relay info about a peer we want to punch to.

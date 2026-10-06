@@ -142,7 +142,7 @@ class TraceModule:
 | `govern` | may be driven from one that also holds the fleet's `govern` capability. Not `remote` plus something — `remote` already includes every console that holds `govern`, so declaring both is a contradiction and is refused. |
 | `background` | run as a **job**: `jobs.start` hands back a ticket rather than the answer. Required of anything that travels and declares more than `REMOTE_BUDGET`, refused on anything that fits it. |
 | `timeout` | how long this may take. Also the ceiling the module waits with. |
-| `wants_origin` | the answer depends on who is asking (`control.catalogue`, and every `jobs` operation). Injected; a caller cannot forge it, and declaring a parameter of that name is refused. |
+| `wants_origin` | the answer depends on who is asking (`control.catalogue`, every `jobs` operation, and `trace.export` — everything to a page here, the newest that fit one capped reply to a console elsewhere). Injected; a caller cannot forge it, and declaring a parameter of that name is refused. |
 
 Reject by default, three times over:
 
@@ -295,6 +295,14 @@ The book is bounded in every direction that an attacker could push
 distance may hold, how many records are kept and for how long. A job that
 outlives its own declared ceiling is abandoned and reported failed — the thread
 is let go, never joined, for the reason `gotchas.md` gives about `to_thread`.
+
+Two jobs at once is what a console at a distance gets (`MAX_RUNNING_REMOTE`), and
+a slot stays taken until the job ends — whether or not the page that started it
+is still open. So a page must not spend one on what it does not need (the
+package card used to, see `gotchas.md`), and a refusal **names what holds the
+slots and how long each has left**: "as many jobs as a console at a distance may
+run" with nothing else read as a message left over from something unrelated,
+standing between an operator and the update check.
 
 **A ticket is only readable by the kind of console that could have made it.** A
 job started here is invisible from the mesh, and one started by a console

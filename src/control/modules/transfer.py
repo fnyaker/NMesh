@@ -31,6 +31,7 @@ should: nothing here had to learn what a job is, and neither did any page.
 """
 from __future__ import annotations
 
+from ..context import on_loop
 from ..errors import ControlError
 from ..params import param
 from ..plane import operation
@@ -40,7 +41,13 @@ from ..transfer import DOWN, UP, UP_CHUNK_B64, TransferBook
 # holds, so the moving operations are the cheapest thing in the plane. The two
 # that reach the node take what the node takes.
 _QUICK = 5.0
-_WORK = 60.0             # a directory fetch, or signing and announcing a tree
+_WORK = 60.0             # signing and announcing a tree
+# A package pulled off the mesh: its descriptor, then a slice per round trip,
+# with every source that does not answer costing a slice timeout before the
+# next is asked. Sixty seconds was the descriptor alone on a bad day, and the
+# download arrived as "the node did not answer" about a node that was busy
+# fetching.
+_FETCH = 180.0
 
 # What one kind may carry, end to end. The app figure is the console's own
 # `_MAX_APP_BODY` said once more where the bytes actually arrive — the console's
@@ -82,7 +89,7 @@ class TransferModule:
                   [param("kind", "choice",
                          choices=tuple(entry["name"] for entry in KINDS)),
                    param("id", "line")],
-                  remote=True, background=True, timeout=_WORK,
+                  remote=True, background=True, timeout=_FETCH,
                   wants_origin=True),
         operation("take", "One chunk out",
                   [param("transfer", "line"), param("path", "line"),
@@ -155,9 +162,14 @@ class TransferModule:
         hash its author signed — which is what makes handing them to somebody
         to open by hand a reasonable thing to offer."""
         node = self._context.node
-        fetched = self._context.ask(node.fetch_package(record), _WORK)
+        if self._context.ask(on_loop(node.package_entry, record), _QUICK) is None:
+            raise ControlError("not_found", "this node holds no such record")
+        fetched = self._context.ask(node.fetch_package(record), _FETCH)
         if fetched is None:
-            raise ControlError("not_found", "no such package")
+            # The record is here; the bytes are not. Two different things to
+            # be told — "no such package" sent people looking for a typo.
+            raise ControlError("unavailable",
+                               "none of the nodes holding this package sent it")
         _entry, blob, name = fetched
         safe = str(name or "package").rsplit("/", 1)[-1] or "package"
         return {"name": safe, "record": record}, {safe: blob}
