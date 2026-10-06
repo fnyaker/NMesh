@@ -3102,3 +3102,17 @@ console as constant churn on healthy links.
 with no `link dropped` line. It was the link a wrong-node dial had opened (64);
 its `finally` stopped it and said nothing.
 
+---
+
+## 66 — low — An accepted UDP link that never spoke was held for ever
+
+> **Status — fixed.** `_reap_mute_accepted` ends, on every keepalive sweep, a
+> link this node accepted that has delivered no packet by `_HANDSHAKE_DEADLINE`.
+> Tests: `tests/test_node.py::TestAnAcceptedLinkThatNeverSpeaks`.
+
+**What happens** — seen live: an inbound UDP link from DTrump, unauthenticated,
+0 packets in, alive after 991 s. DTrump never sent a challenge, so 55's guard
+(which reacts to one) never fired, and `_reap_stale_unauthenticated` only runs
+when `_MAX_UNAUTH_PEERS` is reached. DTrump also publishes no version, so it may
+run a release older than either guard; the far end's cause is not known.
+

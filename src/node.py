@@ -1816,6 +1816,7 @@ class MeshNode:
             if now >= next_sweep:
                 next_sweep = now + _LINK_KEEPALIVE_INTERVAL
                 self._reap_silent_links()
+                self._reap_mute_accepted()
                 self._reap_expired_tarpits()
                 self._update_bundles()
                 self._note_failing_links()
@@ -4425,6 +4426,34 @@ class MeshNode:
                 self._peers.remove(peer)
             self._spawn_bounded(self._safe_stop_peer(
                 peer, f"never authenticated within {_HANDSHAKE_DEADLINE:.0f} s"))
+
+    def _reap_mute_accepted(self) -> None:
+        """End links we accepted that have not sent a single packet.
+
+        Seen live: a UDP far end kept a link to us up for 991 s on transport
+        keepalives alone and never sent a challenge, so the double-accept guard
+        (which waits for one) never fired, and `_reap_stale_unauthenticated`
+        runs only when the unauthenticated ceiling is reached. The link held a
+        slot and a line in the console for nothing.
+
+        Narrow on purpose, because some links are unauthenticated by design: a
+        relay's joiner link stays so for as long as a relayed join lives — and
+        talks from its first second; our own `relay_only` links are ones we
+        dialled; a `RelayedTransport` is not a socket. What is left is a link
+        accepted `_HANDSHAKE_DEADLINE` ago that has delivered nothing at all."""
+        now = time.monotonic()
+        for peer in list(self._peers):
+            if (peer.authenticated_id is not None or peer.is_client_side
+                    or isinstance(peer.transport, RelayedTransport)
+                    or peer.counters.pkts_in
+                    or now - peer.connected_at < _HANDSHAKE_DEADLINE):
+                continue
+            if peer in self._peers:
+                self._peers.remove(peer)
+                self._note_change("links")
+            self._spawn_bounded(self._safe_stop_peer(
+                peer, f"accepted, and not one packet from it in"
+                      f" {_HANDSHAKE_DEADLINE:.0f} s"))
 
     async def _dial_uri(self, node_id: NodeID, uri: str, timeout: float,
                         *, probe: bool = False) -> _Peer | None:
