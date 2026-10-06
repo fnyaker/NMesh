@@ -10,7 +10,7 @@ wherever a table is asked for:
 * **how a page of *nodes* is cut** when the rows are *links* — a node may hold
   several, and taking rows in flat slices lets one node's links straddle a page
   boundary and show it twice, once with each half, under a heading that says
-  nodes (`CLAUDE.md`: name the thing, then count the thing);
+  nodes (`AGENTS.md`: name the thing, then count the thing);
 * **the bounds** — how long a query may be, how many rows a page may carry.
 
 The bounds live here because two callers already share them: the operation that

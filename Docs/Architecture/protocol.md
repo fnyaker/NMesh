@@ -170,7 +170,15 @@ Groupings (constants):
   counts per identity (so reconnecting sheds none of it), and a feature name of
   its own — `speed` — so a node on a metered connection declines this and
   nothing else. The side asking bounds itself twice over, in bytes and in
-  seconds, whichever ends first.
+  seconds, whichever ends first. It measures in two phases: a few probes one at
+  a time for the latency **at rest**, then a sliding window of
+  `_SPEED_INFLIGHT` probes — a new one leaves as each echo lands — for the rate
+  and the latency **under load**. A probe not echoed within
+  `_SPEED_PROBE_TIMEOUT` is counted lost and its slot reused, so one dropped
+  datagram costs that slot two seconds rather than the whole test; past the
+  deadline nothing new leaves and what is in flight gets a second to land. The
+  rate is read between the first echo of the load and the last, so a long link
+  is not under-read by the round trip it took the window to fill.
 - `INVITE_OFFER` (0x30) is the opposite: it is only ever accepted from an
   **authenticated** peer, and only about that peer itself — the key in it has to
   hash to the sender's own id and to have signed the token, which is the same
@@ -372,7 +380,7 @@ Two properties are deliberate:
   per-process random seed instead. The stored value is still the whole id, so
   exactness is untouched; only *where* it lands is unpredictable.
 
-## Invariants (reminder, see CLAUDE.md)
+## Invariants (reminder, see AGENTS.md)
 
 - The header is in the clear but **authenticated** (AAD). The application
   payload is E2E encrypted.

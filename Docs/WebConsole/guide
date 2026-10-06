@@ -44,9 +44,18 @@ manual exchange, relays and certificates all live in *Network → Add a node*.
 once — a LAN address and a punched UDP path, say — so "connected to 2 nodes" and
 "3 links up" are both true at the same time. Every number on screen names which
 one it is: the Overview headline and the **Network** tab badge count *nodes*;
-the rail line, the *Active links* card and each transport's badge count *links*.
+the rail line, the *Active links* card (expert mode) and each transport's badge count *links*.
 They come from two separate fields (`node_count`, `link_count`), because one
 field under two labels is a field that is wrong under one of them.
+
+**Simple and expert.** The console opens simple: the decisions a person makes
+(who to connect, how much the node may spend) and the four figures worth a
+glance. The **Expert mode** switch — in the rail, in the ⋯ menu on a phone, and
+under *Settings → This browser* — adds every number and setting those are made
+of: links against nodes, known nodes, sessions, relayed bytes, memory, the
+multi-link and transport cards, refused handshakes, the full configuration
+form. Remembered per browser; it changes what is shown, never what the node
+does.
 
 **⌘K / Ctrl-K** opens a command palette: any section, plus the common actions
 (ping, create a ticket, check for updates, switch theme). **The theme** follows
@@ -709,7 +718,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/control`   | the control channel: `{v:1, id, op, params}` → `{v:1, id, ok, result}` or `{ok:false, code, error, detail?}`. With `X-NMesh-Node` the **same frame** is relayed to that node and its answer handed back — the status then describes this console (200: it answered) and the frame describes that node |
 | POST    | `/api/login`     | `{password}` → `{token}` + sets the `nmesh_session` cookie |
 | POST    | `/api/logout`    | revokes the token (Bearer or cookie) and clears the cookie |
-| POST    | `/api/control`   | …and `node.speedtest`, the one reading that **loads** a link rather than watching it: a bounded burst of padding echoed back by the peer, answered only over a direct authenticated link. It runs as a job (ten seconds at most), so the node card's **Speed test** button works the same whether the console is on this machine or driving another |
+| POST    | `/api/control`   | …and `node.speedtest`, the one reading that **loads** a link rather than watching it: a bounded burst of padding echoed back by the peer, answered only over a direct authenticated link. It runs as a job (ten seconds at most), so the node card's **Speed test** button works the same whether the console is on this machine or driving another. The card draws the result as its own block — the rate each way (with its Mbit/s), the latency at rest and under load, the share lost, and one sentence saying what they add up to; expert mode adds both-ways, best round trip, probes and bytes sent |
 | GET     | `/api/state`     | snapshot (id, peers, routing, throughput, load, **addressing**, `handshake_refusals`, `trust`) — `node.state`. Also `broken`: the sections that could not be built, empty on a healthy node. One diagnostic raising used to take the whole document with it, and with it every page of the console; now it degrades alone, says so, and writes its traceback to the node's log |
 | POST    | `/api/control`   | …and **files**, on that same channel: `transfer.offer`/`put`/`commit` sends a named set of byte streams a chunk per frame, `transfer.fetch`/`take` reads one back. What the bytes are *for* is a **kind**, with its own reach and its own ceiling — `package` to any console holding `manage`, `app` and `release` behind `govern` |
 | GET     | `/api/events`    | `text/event-stream`: one `change` frame naming what moved (`links`, `nodes`, `names`, `reach`). Local only — **409** under a remote context |
@@ -792,7 +801,7 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/update/apply` | `{version, confirm}` — installs that **exact** version; a mismatch with what GitHub offers is refused, and a branch that moved past it is refused again when its tree arrives — `releases.apply`, local only |
 | POST    | `/api/restart`   | `{confirm:true}` — restarts the node: it exits when a supervisor will start it again, and otherwise re-execs itself. **409** with the reason when neither is possible — `node.restart`, and under a remote context it is the *managed* node that restarts |
 | GET     | `/api/config`    | the node's settings: current values, editable or not, problems in the file — `config.get` |
-| POST    | `/api/config`    | `{settings:{…}}` — writes the file; one refused value writes **nothing**, and the refusal names which — `config.save`. A value may not span two lines: the file is one `name = value` per line, so a newline in one would write a *second setting* rather than a longer value |
+| POST    | `/api/config`    | `{settings:{…}}` — applies the changed live settings to the running node, then writes the file; answers `applied` (in force now), `pending` (wait for a restart) and `problems` (what the node would not take). One refused value applies and writes **nothing**, and the refusal names which — `config.save`. `config.profile {step}` (1–10) applies one step of the energy bar the same way. A value may not span two lines: the file is one `name = value` per line, so a newline in one would write a *second setting* rather than a longer value |
 | GET     | `/api/trace`     | `?events=1` → state + totals per message type (and the events) — `trace.status` |
 | POST    | `/api/trace`     | `{action:start\|stop\|clear, seconds?, events?}` — requested bounds are **capped**, never obeyed (the trace owns the ceiling; the plane clamps to that same constant) — `trace.set` |
 | GET     | `/api/trace/export` | the whole trace as JSON (download) — `trace.export`, which is what the page now calls, so the download follows the node being driven |
@@ -966,9 +975,18 @@ where the node already knows something happened, never per packet, and the text
 is always the node's own words: nothing a peer wrote reaches it, which is what
 keeps a log an adversary can write into from existing. Repeats coalesce onto one
 row with a count, so a peer flapping twice a second cannot push everything else
-out of view, and the card is hidden entirely while nothing has happened.
+out of view, and the card is hidden entirely while nothing has happened. It sits
+**under** the graph and the map, so its coming and going never moves them.
 
-Overview's tiles say **Relayed** — of what left this node, how much was carried
+The **Throughput** graph carries its own scale: gridlines at round values (1,
+2, 2.5 or 5 of a unit, every label in the one unit the top is named in), and
+the time span along the bottom read from the samples' own clock. The scale
+moves only when the traffic changes by a real amount, not with every sample.
+The current rates and the peak sit in the legend, each in a box as wide as its
+widest reading, so a figure growing a digit moves nothing beside it.
+
+Overview's tiles (expert mode; the simple view keeps nodes, the two rates and
+CPU) say **Relayed** — of what left this node, how much was carried
 for somebody else. Relaying is the one thing a node spends bandwidth on with
 nothing of its own to show for it, and it used to be indistinguishable from its
 own traffic in every number on the page. **CPU** and **Memory** are this
@@ -1097,10 +1115,43 @@ Every launch option is editable from the console and stored in
 `<prefix>/nmesh.conf`. The form is built from what the node declares
 (`GET /api/config`), never from a list hard-coded in the page.
 
-Nothing is applied live: changes take effect **when the node restarts**, and the
-page says so. A refused value writes nothing at all — one bad field does not
-carry the others with it, and the console cannot produce a file the node would
-refuse to start on.
+Each setting says whether the running node takes it (`live` in `config.get`,
+from `config.LIVE`), and the form is split on that: **Applies now** and **After
+a restart**. Saving applies the live settings that *changed* to the running
+node first and writes the file second (`config.save` answers `applied`,
+`pending` and `problems`), so the page can say exactly what is in force and
+what waits. Applying is grouped where the values only make sense together — the
+four keepalive bounds move in one call, because `mlo.clamp_bounds` sorts them
+and moving them one at a time would clamp each against its old neighbours — and
+what the node actually took (bounds sorted into shape) is what the file
+records. Settings read only at startup — a socket already bound, an app already
+started — stay in the second group. A refused value applies nothing and writes
+nothing at all — one bad field does not carry the others with it, and the
+console cannot produce a file the node would refuse to start on.
+
+### Energy and performance
+
+Above the form, one bar with ten steps from *Minimal* to *Maximum*: how much
+this node may spend to stay quick. A step is a named set of **live** settings
+(`src/power.py`: the four keepalive bounds, `mlo_always`, `dynamic_address`,
+`update_check_minutes`, `update_when_active`) applied together through
+`config.profile`, and remembered like any other edit. Dragging previews the
+step's name and a one-sentence description; letting go applies it. Step 6,
+*Balanced*, is exactly the defaults.
+
+Which step a node is on is **read off its values**, never stored beside them:
+a node whose settings match a step is on it, and one tuned by hand is *custom* —
+the bar says so, and moving it replaces the hand-tuned values. Without a
+configuration file a step still applies, and is forgotten at restart; the card
+says so. **Adaptive** (five tendencies, the node moving along the bar by itself)
+is shown and marked *Soon*: its control is disabled until it exists.
+
+### Simple and expert
+
+The simple view shows this card and nothing else on the page. **Expert mode**
+(the switch in the rail, in the ⋯ menu on a phone, and under *This browser*)
+adds the values each step stands for and the whole configuration form. It is a
+preference of this browser and changes what is shown, never what the node does.
 
 `launch` (what the node runs) and `data` (where the state lives) are **shown but
 not editable here**: the first belongs to whoever holds the file, the second to

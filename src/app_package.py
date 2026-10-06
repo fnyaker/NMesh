@@ -8,7 +8,7 @@ and fetched by other nodes. Everything is content-addressed:
   - the manifest lists, per file, its size, full SHA-256, and ordered chunk keys.
   - the package id is ``sha256(manifest)[:20]``.
 
-This is what makes sharing safe over an untrusted network (see CLAUDE.md): you
+This is what makes sharing safe over an untrusted network (see AGENTS.md): you
 ask for a key and verify that what comes back hashes to it, so a relay or a
 malicious peer cannot substitute tampered content. No trust in the sender is
 required — only the hash.

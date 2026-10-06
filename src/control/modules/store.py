@@ -13,7 +13,7 @@ the signed catalogue and the keys this node has pinned; this is the door an
 operator knocks on, not a second opinion about what is behind it. And the
 *answers* are the node's: ``store_overview`` already annotates each row with the
 state it is in and the verb to press, so a page renders rather than re-derives
-(``CLAUDE.md``: derive, do not re-derive).
+(``AGENTS.md``: derive, do not re-derive).
 
 Publishing an app is not here, and will not be: it carries the files
 themselves, which is bytes rather than a sentence, and a control frame is

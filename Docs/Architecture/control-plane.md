@@ -32,7 +32,7 @@ wrote; each was a consequence of the *shape*.
    (`_CONSOLE_DENIED`: not `/api/fleet/`, not `/api/remote/`, not `/api/chat/`).
    So every route added anywhere in the console became reachable by a peer
    holding `manage` **by default** — the exact inverse of the first principle in
-   `CLAUDE.md`.
+   `AGENTS.md`.
 2. **The front end was pinned to HTTP.** A page knew paths, query strings and
    status codes, so nothing else could ever drive a node: not a command line,
    not a second front end, not a test without a socket.
@@ -408,7 +408,7 @@ keeps working, with one implementation behind it.
 | `node` | `state` `list` `ping` `ping_node` `speedtest`~ `forget` `rootcert` `restart` `retry`~ | `/api/state`, `/api/nodes`, `/api/ping`, `/api/ping/node`, `/api/nodes/forget`, `/api/rootcert`, `/api/restart`, `/api/peers/retry` |
 | `trust` | `add` `untrust` `revoke` `forgive` `accept_change` `witness` | `/api/trust`, `/api/trust/*` |
 | `network` | `probe` `recheck` `dynamic` `balance` `mlo` `punch` `punch_keepalive` `punch_open` `discovery` `udp` `listen` `unlisten` | `/api/reachability/probe`, `/api/net/recheck`, `/api/addressing/*`, `/api/mlo`, `/api/punch*`, `/api/lan/discovery`, `/api/udp`, `/api/listen`, `/api/unlisten` |
-| `config` | `get` `save` | `/api/config` |
+| `config` | `get` `save` `profile` | `/api/config` |
 | `transports` | `options` `save` | `/api/transports` |
 | `trace` | `status` `set` `export` | `/api/trace`, `/api/trace/export` |
 | `logs` | `status` `set` `query` `since` `sources` | — (new) |

@@ -10,7 +10,7 @@ reaches C through B. Everything is encrypted end to end with **post-quantum**
 cryptography; relays never see the content.
 
 > The guiding principles (security > solidity > flexibility > speed, minimal
-> dependencies) are in [`CLAUDE.md`](CLAUDE.md). Progress is tracked in
+> dependencies) are in [`AGENTS.md`](AGENTS.md). Progress is tracked in
 > [`ROADMAP.md`](ROADMAP.md).
 
 ## Highlights
@@ -318,7 +318,7 @@ The threat model: *the moment data leaves the node, it is in hostile
 territory*. Nothing arriving from the network or from disk is presumed sound;
 everything is validated, bounded, and rejected by default. Fuzzing proves that
 no hostile byte crashes a parser. Details and priorities:
-[`CLAUDE.md`](CLAUDE.md).
+[`AGENTS.md`](AGENTS.md).
 
 ## Project layout
 

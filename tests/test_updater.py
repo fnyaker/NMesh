@@ -64,7 +64,7 @@ class TestVersionComparison:
         assert is_newer("v0.1.0", "0.2.0") is False
 
     def test_the_patch_number_is_not_capped_at_nine(self):
-        """The project counts the patch number up freely (CLAUDE.md), so it is
+        """The project counts the patch number up freely (AGENTS.md), so it is
         compared as a number, never as a character: 0.1.100 is newer than
         0.1.99, and a minor bump still beats any patch count."""
         assert is_newer("v0.1.10", "0.1.9") is True

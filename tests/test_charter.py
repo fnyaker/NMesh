@@ -1,7 +1,7 @@
 """
 The charter's own claims, held to.
 
-`CLAUDE.md` is this project's specification, and several of the things it states
+`AGENTS.md` is this project's specification, and several of the things it states
 absolutely had nothing checking them at all — true today by somebody's
 discipline, and free to stop being true tomorrow without a single test turning
 red. A rule nothing reads is a wish.
@@ -59,14 +59,14 @@ def test_the_runtime_imports_nothing_the_charter_did_not_admit():
                 extra.setdefault(name, []).append(
                     str(path.relative_to(ROOT)))
     assert extra == {}, (
-        f"the runtime imports {sorted(extra)}, which CLAUDE.md does not admit. "
+        f"the runtime imports {sorted(extra)}, which AGENTS.md does not admit. "
         "Adding one is an explicit justification in the PR plus a line in that "
         "list — in that order.")
 
 
 def test_the_charter_and_the_requirements_file_agree():
     """Two places name the dependencies. Two places are two chances to drift."""
-    charter = (ROOT / "CLAUDE.md").read_text()
+    charter = (ROOT / "AGENTS.md").read_text()
     required = {line.split("==")[0].split(">")[0].strip().lower()
                 for line in (ROOT / "requirements.txt").read_text().splitlines()
                 if line.strip() and not line.startswith("#")}

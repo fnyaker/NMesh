@@ -8,7 +8,7 @@ the local data connector (host, port, and its bearer token). The child then uses
 ``ConnectorClient.from_env()`` to join the mesh — so the node becomes the network
 bridge for the app, and the app never has to know how the mesh works.
 
-Security (see CLAUDE.md): commands are operator-declared configuration, not
+Security (see AGENTS.md): commands are operator-declared configuration, not
 network input; they are executed with ``exec`` (never a shell), so there is no
 command-injection surface. The token is passed only through the child's
 environment. The number of children is bounded, and all of them are terminated
