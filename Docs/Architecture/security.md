@@ -342,7 +342,7 @@ of thing that stays wrong until something else leans on it.
 
 ## Noise is charged to whoever sent it, not to the socket it arrived on
 
-`CLAUDE.md` is explicit: *counted per identity, not per link — a peer that
+`AGENTS.md` is explicit: *counted per identity, not per link — a peer that
 reconnects to shed an exhausted count is the whole point of counting.* Every
 violation in this product went through `MeshNode._charge_abuse`, which charges
 the link **and** the node's reputation book — every one except the first gate of

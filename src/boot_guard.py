@@ -47,7 +47,7 @@ import time
 # project and the updater can import this one.
 REPLACE_ENTRIES = ("src", "scripts", "start.sh", "install.sh",
                    "requirements.txt", "pyproject.toml", "Docs", "docker",
-                   "README.md", "CLAUDE.md")
+                   "README.md", "AGENTS.md", "CLAUDE.md")
 BACKUP_DIR = ".nmesh-previous"
 FAILED_DIR = ".nmesh-failed"
 TRIAL_FILE = ".nmesh-trial.json"

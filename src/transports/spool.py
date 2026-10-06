@@ -12,7 +12,7 @@ removable medium. When both endpoints are online on the same directory it
 behaves like a (slow) live link; carrying a spool file offline to another
 machine is the delay-tolerant case (see also ``spool.Bundle``).
 
-Robustness (see CLAUDE.md): each record is length-prefixed and CRC-checked, and
+Robustness (see AGENTS.md): each record is length-prefixed and CRC-checked, and
 the reader resynchronises on corruption instead of derailing — the medium is
 untrusted. Writes are fsync'd so packets survive power loss or a yanked key.
 """

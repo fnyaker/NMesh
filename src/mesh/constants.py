@@ -2,7 +2,7 @@
 Every bound the core holds itself to.
 
 Queue depths, rate-limit windows, timeouts, retry ceilings, keepalive
-cadences, the direct/routable split of the type table. ``CLAUDE.md``
+cadences, the direct/routable split of the type table. ``AGENTS.md``
 is blunt that "every queue, cache, buffer and counter has a hard
 limit" — this is where each one is written down, beside what it
 protects.
@@ -273,7 +273,19 @@ _SPEED_MAX_BYTES       = 8 * 1024 * 1024   # one test, in one direction
 _SPEED_MAX_SECONDS     = 10.0
 _SPEED_WINDOW          = 60.0              # what the *answering* side allows…
 _SPEED_MAX_PER_WINDOW  = 1200              # …in echoes, per identity, per window
-_SPEED_INFLIGHT        = 8                 # probes outstanding at once
+# Probes outstanding at once — a *sliding* window: a new probe leaves as each
+# echo lands, so the link is never idle waiting for the slowest of a batch.
+# Eight is enough to fill the link: past it the transport's own window decides
+# the rate, and more in flight only queues — on loopback UDP, 32 measured the
+# same rate as 8 with five times the latency under load. (Sixteen used to
+# collapse the UDP transport outright; see `gotchas.md`.)
+_SPEED_INFLIGHT        = 8
+# A probe not echoed within this is counted lost and its slot reused. Without
+# it one dropped datagram held the whole test until the deadline.
+_SPEED_PROBE_TIMEOUT   = 2.0
+# Probes sent one at a time before the load, for the latency of the link at
+# rest — the figure "latency under load" is only meaningful beside.
+_SPEED_IDLE_PROBES     = 3
 # A transport reaps an idle link once no data arrives for its read timeout
 # (TCP: 60s). A healthy but quiet link would die on its own, so ping every
 # established peer well inside that window — both sides do it, so each link
@@ -361,7 +373,7 @@ _MLO_DIAL_IDLE_MAX = 300.0  # ceiling on a wait nothing is expected to end
 # Re-drive a stalled E2E handshake: if data is queued for a peer we still have no
 # session with, re-initiate on this cadence. Without it, a single lost handshake
 # (peer offline at send time, an ACK dropped in transit) stranded the queued data
-# until a reboot or until the peer happened to initiate to us (CLAUDE.md: retry /
+# until a reboot or until the peer happened to initiate to us (AGENTS.md: retry /
 # self-repair / delay tolerance).
 _E2E_RETRY_INTERVAL = 5.0
 # How often the persisted snapshot is written at most. A handshake marks the
@@ -748,7 +760,7 @@ _PUNCH_MAX_RELAYS      = 3     # relays asked per punch attempt
 # (a loaded receiver's buffer overflows), and a single loss strands the whole
 # punch — the responder never challenges and the initiator's link self-closes
 # on its keepalive timeout. Kick in a bounded, spaced burst instead so a few
-# consecutive drops can't sink the handshake (CLAUDE.md: retry, self-repair).
+# consecutive drops can't sink the handshake (AGENTS.md: retry, self-repair).
 _PUNCH_KICK_COUNT      = 8     # keepalive kicks to open the punched link
 _PUNCH_KICK_INTERVAL   = 0.3   # seconds between kicks (burst spans ~2.4s)
 _PUNCH_KEEPALIVE_INTERVAL = 20.0  # NAT mapping refresh for the UDP listener
@@ -1026,10 +1038,12 @@ __all__ = [
     "_SHORT_SEEK_GAP",
     "_SHORT_SEEK_LEN",
     "_SPEED_CHUNK",
+    "_SPEED_IDLE_PROBES",
     "_SPEED_INFLIGHT",
     "_SPEED_MAX_BYTES",
     "_SPEED_MAX_PER_WINDOW",
     "_SPEED_MAX_SECONDS",
+    "_SPEED_PROBE_TIMEOUT",
     "_SPEED_WINDOW",
     "_STATE_WRITE_INTERVAL",
     "_STORE_RATE_MAX",

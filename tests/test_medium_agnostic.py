@@ -1,7 +1,7 @@
 """
 The core is medium-agnostic — stated as an invariant rather than as a hope.
 
-`CLAUDE.md` §3 is the specification: anyone implements `BaseTransport` +
+`AGENTS.md` §3 is the specification: anyone implements `BaseTransport` +
 `BaseServer` and registers it by URL scheme, and the core is supposed not to
 know what any of them are. It used to say the core knows **no** concrete
 transport, full stop, and that sentence was false: `src/node.py` names
@@ -88,7 +88,7 @@ CONCRETE = re.compile(
     r"\b(UDPTransport|TCPTransport|SpoolTransport|RelayedTransport|UDPServer"
     r"|TCPServer|SpoolServer)\b|\b(udp|tcp|spool)_transport\b")
 
-# What `CLAUDE.md` §3 declares the core may know, and why.
+# What `AGENTS.md` §3 declares the core may know, and why.
 #
 #   udp      — NAT traversal. A hole is punched through a *stateful datagram*
 #              NAT by sending from the same socket the listener owns; there is
@@ -156,7 +156,7 @@ def test_the_core_knows_exactly_the_two_media_the_charter_declares():
 
     This is not a style rule. A core that knows a medium cannot be ported to
     one it has never seen, which is the whole third principle — so the list is
-    short, written down in `CLAUDE.md`, and checked."""
+    short, written down in `AGENTS.md`, and checked."""
     named = set()
     for path, text in _modules():
         if _rel(path) in CORE:
@@ -164,7 +164,7 @@ def test_the_core_knows_exactly_the_two_media_the_charter_declares():
     unexpected = named - CORE_MAY_KNOW
     assert unexpected == set(), (
         f"the core names {sorted(unexpected)}. It may know "
-        f"{sorted(CORE_MAY_KNOW)} and nothing else — see CLAUDE.md §3. If this "
+        f"{sorted(CORE_MAY_KNOW)} and nothing else — see AGENTS.md §3. If this "
         "is genuinely unavoidable, say so there first; if it is not, it belongs "
         "behind BaseTransport.")
 
@@ -184,22 +184,22 @@ def test_each_medium_the_core_knows_is_confined_to_the_module_that_owns_it():
     assert found == CORE_MEDIUM_SITES, (
         "the core's medium-naming sites moved. Expected "
         f"{CORE_MEDIUM_SITES}, found {found}. If a medium genuinely belongs in "
-        "another module, add it here and record why in CLAUDE.md §3.")
+        "another module, add it here and record why in AGENTS.md §3.")
 
 
 def test_the_charter_and_the_transports_document_say_the_same_thing():
     """They did not. The charter said the core knows *no* concrete transport;
     `transports.md` had a section headed "NAT hole punching (in `node.py`)".
     Documentation that contradicts documentation is worse than either."""
-    charter = (ROOT / "CLAUDE.md").read_text()
+    charter = (ROOT / "AGENTS.md").read_text()
     transports = (ROOT / "Docs" / "Architecture" / "transports.md").read_text()
     # The charter must name the exception rather than deny it.
     assert "NAT traversal" in charter, \
-        "CLAUDE.md §3 must name the one exception it allows"
+        "AGENTS.md §3 must name the one exception it allows"
     assert "knows **no** concrete transport" not in charter, \
         "that absolute is false — the core names UDPTransport"
     # And the document that describes the exception must point back at it.
-    assert "CLAUDE.md" in transports, \
+    assert "AGENTS.md" in transports, \
         "transports.md must cite the charter clause that permits this"
 
 
@@ -238,7 +238,7 @@ def test_every_declared_medium_is_reached_only_through_the_interface():
     assert not reaching, (
         f"src/node.py reaches into {sorted(reaching)}. A transport's privates "
         "are its own: ask the medium through `BaseServer`/`BaseTransport` "
-        "instead (see CLAUDE.md §3), and add the capability there rather than "
+        "instead (see AGENTS.md §3), and add the capability there rather than "
         "the reach here."
     )
 
@@ -260,7 +260,7 @@ def test_a_peer_is_made_by_the_node_and_never_half_wired():
                                              re.MULTILINE)])
     assert built == 1, (
         f"{built} places build a `_Peer`. The node builds its own peers "
-        "(`_new_peer`) so a half-wired one cannot exist — see CLAUDE.md, "
+        "(`_new_peer`) so a half-wired one cannot exist — see AGENTS.md, "
         '"Name the thing, then count the thing".')
 
 

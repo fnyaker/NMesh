@@ -420,6 +420,23 @@ SETTINGS = {
                         "Commands launched and wired to the mesh (file only)"),
 }
 
+# Settings a running node takes without a restart. Saved from the console, these
+# are applied to the node first and written second; every other setting is read
+# once, at startup — a socket already bound, an app already started — and the
+# console says so beside it rather than letting a saved value imply it is in
+# force. Names only, so this module keeps importing nothing of its own: the
+# appliers live with the node they act on (`control/modules/settings.py`), and
+# `tests/test_config_live.py` holds the two lists in step.
+LIVE = frozenset({
+    "punch_keepalive", "lan_discovery", "transport_balance", "dynamic_address",
+    "mlo_always", "mlo_skew_ms", "mlo_drop_percent",
+    "keepalive_fast_min_ms", "keepalive_fast_max_ms",
+    "keepalive_slow_min_ms", "keepalive_slow_max_ms",
+    "pseudo", "no_abuse_gossip", "release_quorum", "release_auto_publish",
+    "update_check_minutes", "update_when_active", "recommend_version",
+    "update_branch",
+})
+
 # Keys the launcher takes on the command line, spelled as CLI flags.
 CLI_NAMES = {name: "--" + name.replace("_", "-") for name in SETTINGS}
 
@@ -528,8 +545,9 @@ _HEADER = """\
 # NMesh — node configuration.
 #
 # Written by install.sh and by the web console (Settings → Configuration).
-# Command-line flags still win over anything set here, and changes take effect
-# when the node restarts.
+# Command-line flags still win over anything set here. Saved from the console,
+# most settings apply to the running node at once; the console marks the ones
+# that wait for a restart.
 #
 # The console password is NOT here on purpose: it would be a credential sitting
 # in cleartext in an editable file. Use $NMESH_CONSOLE_PASSWORD, or let the node
@@ -670,6 +688,7 @@ def public(values: dict) -> list:
             "value": value,
             "kind": _kind_of(name),
             "editable": writable,
+            "live": name in LIVE,
             "help": help_text,
             "flag": CLI_NAMES[name],
         })

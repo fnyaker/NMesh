@@ -5,7 +5,7 @@ Apps (the built-in chat, and external ones plugged in over the data connector)
 need a place to keep local state — contacts, keys, cursors, cached blobs. This
 gives each app an isolated, bounded, encrypted key→value drawer on the node.
 
-Isolation (see CLAUDE.md — reject by default, minimal blast radius):
+Isolation (see AGENTS.md — reject by default, minimal blast radius):
 
   - A drawer is named by the app's ``app_id`` (the same 8-byte section id the
     connector already binds each client to at AUTH). An app never names another

@@ -113,7 +113,9 @@ Classes are for variants, not for the baseline.
 disclosure chevron becomes `.ic.turn` without a second drawing.
 
 `button` (+ `.primary` `.danger` `.ghost` `.sm` `.icon` `.wide`, `aria-busy` for
-waiting) · `input`/`select`/`textarea` · `input[type=range]` + `.scale` · `.field`
+waiting) · `input`/`select`/`textarea` · `input[type=range]` + `.scale` (dimmed
+when `disabled`: shown, not offered yet) · `input[type=checkbox][role=switch]`
+(a switch, for a setting that takes effect the moment it is flipped) · `.field`
 (label + control + `.hint`) · `.check` (box and label in **one** target) ·
 `.card` (`.card-head` / `.card-body` / `.card-foot`) · `details.card` · `.stat` /
 `.stats` · `.badge` (tones `ok warn danger info accent`) · `.dot` · `table`
@@ -121,6 +123,12 @@ waiting) · `input`/`select`/`textarea` · `input[type=range]` + `.scale` · `.f
 `skeletonHTML` · `progress.meter` · `.notice` · `.toast` · `dialog` +
 `.sheet-head/-body/-foot` · `.segmented` / `.subnav` / `.nav` · `.menu` ·
 `.chips` · `.pager` · `.search` · `.kbd`.
+
+A `.stat`'s value is one line, always (`nowrap`, ellipsis, tabular figures): a
+value that wrapped when it grew a digit made its tile, then its row, a line
+taller on one tick and not the next. Live figures never go in a card header for
+the same reason — they go where a fixed-width box can hold them (the
+throughput legend).
 
 Three states are **always** drawn, never left blank: *empty* (what to do so that
 there is something), *loading* (a skeleton shaped like what is coming, so
@@ -171,6 +179,26 @@ number must not be able to widen the bar.
 Above 640 px, a centred card. Below, a sheet rising from the bottom
 (`inset:auto 0 0 0`), and a `dialog.full` takes the whole screen in `dvh` — not
 `vh`, or the mobile browser's own bar crops the last row.
+
+## Simple and expert (`EXPERT`)
+
+> One attribute on `<html>` decides what is shown. It never decides what the
+> node does.
+
+`data-expert="1"` is set by `/theme.js` before the first paint (so the page
+does not flash the simple view and then grow), remembered per browser as
+`nmesh_expert`, and flipped by any `[data-expert-toggle]` checkbox — `mountShell`
+listens for all of them and `EXPERT.paint()` keeps them agreeing. Markup opts in
+with a class:
+
+- `.only-expert` — the numbers and settings a decision is made of (link counts,
+  the multi-link and transport cards, the configuration form);
+- `.only-simple` — what the simple view says instead, usually where to find the
+  thing it hides.
+
+Both are `display:none!important` in the other mode, and neither is the `hidden`
+attribute: a view that hides an element for its own reasons (an empty card)
+must not have it shown again by a mode switch, and the reverse.
 
 ## Icons
 
@@ -342,7 +370,11 @@ refusal, not as a sign-out.
   log, a list — the children must be `flex:none`, or once they are taller than
   the pane the browser shrinks *them* instead of scrolling: content crushed and
   overlapping, no scrollbar. Test:
-  `test_the_chat_log_cannot_squash_its_messages`.
+  `test_the_chat_log_cannot_squash_its_messages`. A dialog's `.sheet-body` is
+  the same case and the rule is in the design system (`.sheet-body>*{flex:none}`):
+  the permission list, with `overflow:hidden` of its own, was squeezed to the
+  sheet's height and clipped, and the body never had anything to scroll. Test:
+  `test_a_sheet_body_scrolls_rather_than_squeezing_its_children`.
 
 ## Adding something
 

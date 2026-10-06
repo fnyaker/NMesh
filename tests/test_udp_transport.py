@@ -545,3 +545,169 @@ class TestAKeepaliveKeepsTheLinkAlive:
             await client.close()
             await accepted_transport.close()
             await server.close()
+
+
+# ---------------------------------------------------------------------------
+# A burst must not collapse the link
+# ---------------------------------------------------------------------------
+# Sixteen 16 kB packets in flight took a loopback link from ~100 MB/s to 4 MB/s
+# and 80 % of a speed test lost; thirty-two took 83 seconds to move 20 MB. Three
+# causes, each held below: the retransmit timer doubled once per *frame* lost,
+# nothing limited what was put on the wire, and a frame past the unacked window
+# was sent without being tracked — so a lost one was never resent.
+
+def _seq_of(frame: bytes) -> int:
+    return struct.unpack("!I", frame[len(_MAGIC):len(_MAGIC) + 4])[0]
+
+
+def _expire_all(link: _ReliableLink) -> None:
+    for entry in link._unacked.values():
+        entry.deadline = 0.0
+
+
+class TestABurstDoesNotCollapseTheLink:
+    def test_the_timer_backs_off_once_per_timeout_not_once_per_frame(self):
+        """Doubling for every frame of a lost burst pinned the timeout at its
+        two-second ceiling in one pass; every frame after it waited that long."""
+        link = _ReliableLink()
+        for _ in range(16):
+            link.build_frame(make_packet(b"x" * 1000))
+        before = link._rto
+        _expire_all(link)
+        resent = link.get_retransmit_frames()
+        assert resent
+        assert link._rto <= before * 2 + 1e-9
+
+    def test_a_frame_is_never_sent_untracked(self):
+        """Past `_MAX_UNACKED` the old link sent the frame and forgot it: lost
+        once, it was never resent, and the receiver waited for it for ever."""
+        link = _ReliableLink()
+        link._cwnd = float(10 ** 9)          # only the frame bound is in play
+        for _ in range(_MAX_UNACKED):
+            assert link.can_send(100)
+            link.build_frame(make_packet(b"y"))
+        assert not link.can_send(100)
+        assert link.unacked_count() == _MAX_UNACKED
+
+    def test_the_window_bounds_what_is_in_flight(self):
+        link = _ReliableLink()
+        sent = 0
+        while link.can_send(16_000):
+            link.build_frame(make_packet(b"z" * 16_000))
+            sent += 1
+        assert 1 <= sent <= _MAX_UNACKED
+        assert link._inflight <= max(link._cwnd, 16_100)
+
+    def test_a_large_frame_still_goes_when_nothing_is_in_flight(self):
+        link = _ReliableLink()
+        link._cwnd = 1.0
+        assert link.can_send(60_000)
+
+    def test_a_burst_lost_together_halves_the_window_once(self):
+        """Twenty frames lost to one queue overflowing are one event."""
+        link = _ReliableLink()
+        link._cwnd = 1024 * 1024.0
+        frames = [link.build_frame(make_packet(b"w" * 1000)) for _ in range(20)]
+        for frame in frames:
+            link._loss(_seq_of(frame), timeout=False)
+        assert link._cwnd == 512 * 1024.0
+        # A loss among frames sent *after* the reduction is a new event.
+        later = link.build_frame(make_packet(b"v"))
+        link._loss(_seq_of(later), timeout=False)
+        assert link._cwnd == 256 * 1024.0
+
+    def test_acknowledged_data_grows_the_window_and_measures_the_link(self):
+        link = _ReliableLink()
+        start = link._cwnd
+        frame = link.build_frame(make_packet(b"u" * 4000))
+        link.process_ack(_seq_of(frame), 0)
+        assert link._cwnd > start
+        assert link._srtt is not None
+        assert link._inflight == 0
+
+    def test_a_resent_frame_is_never_timed(self):
+        """Karn: an ACK for a retransmitted frame cannot say which copy it
+        answers, so its round trip would be a guess."""
+        link = _ReliableLink()
+        frame = link.build_frame(make_packet(b"t"))
+        _expire_all(link)
+        link.get_retransmit_frames()
+        link.process_ack(_seq_of(frame), 0)
+        assert link._srtt is None
+
+    def test_three_frames_past_a_hole_resend_it_at_once(self):
+        link = _ReliableLink()
+        frames = [link.build_frame(make_packet(b"s" * 100)) for _ in range(5)]
+        hole = _seq_of(frames[0])
+        ack = (hole - 1) & 0xFFFFFFFF
+        # Frames hole+1..hole+3 arrived: bits 1, 2, 3 above the cumulative ack.
+        resend = link.process_ack(ack, 0b1110)
+        assert resend == [frames[0]]
+        # Once: the same SACK again does not resend it a second time.
+        assert link.process_ack(ack, 0b1110) == []
+
+    def test_a_single_out_of_order_frame_is_not_a_loss(self):
+        link = _ReliableLink()
+        frames = [link.build_frame(make_packet(b"r")) for _ in range(3)]
+        ack = (_seq_of(frames[0]) - 1) & 0xFFFFFFFF
+        assert link.process_ack(ack, 0b10) == []
+
+    async def test_a_reader_that_is_behind_refuses_rather_than_drops(self):
+        """Taking a frame, acknowledging it, then dropping it because the queue
+        was full lost a packet on a link that promises not to. Refused before
+        the ACK, it stays with the sender and comes back."""
+        transport = UDPTransport()
+        transport._remote = ("127.0.0.1", 9)
+        big = make_packet(b"q" * 59_000).pack()
+        seq = 0
+        while transport._decoded_bytes + len(big) <= _MAX_DECODED_BYTES:
+            transport._process_frame(
+                _MAGIC + _FRAME.pack(seq, 0, 0, FLAG_DATA, len(big)) + big)
+            seq += 1
+        cursor = transport._link._recv_next
+        transport._process_frame(
+            _MAGIC + _FRAME.pack(seq, 0, 0, FLAG_DATA, len(big)) + big)
+        assert transport._link._recv_next == cursor     # not acknowledged
+        await transport.receive()                       # the reader catches up
+        transport._process_frame(
+            _MAGIC + _FRAME.pack(seq, 0, 0, FLAG_DATA, len(big)) + big)
+        assert transport._link._recv_next == (cursor + 1) & 0xFFFFFFFF
+
+    async def test_a_burst_crosses_loopback_intact_and_quickly(self, udp_pair):
+        """The measurement that found it: sixty-four 16 kB packets at once,
+        echoed back. Before, thirty-two of them took 83 seconds."""
+        _server, srv, client = udp_pair
+        assert srv is not None
+
+        async def echo():
+            while True:
+                await srv.send(await srv.receive())
+
+        task = asyncio.create_task(echo())
+        try:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            for _ in range(3):
+                sent = [make_packet(bytes([i]) * 16_000) for i in range(64)]
+                for packet in sent:
+                    await client.send(packet)
+                for packet in sent:
+                    got = await asyncio.wait_for(client.receive(), 10)
+                    assert got.payload == packet.payload
+            assert loop.time() - started < 10
+        finally:
+            task.cancel()
+
+    async def test_a_full_queue_waits_for_room_instead_of_failing(self):
+        """A full queue is a busy link, not a broken one: refusing the packet
+        turned every burst into an error at the caller."""
+        transport = UDPTransport()
+        transport._remote = ("127.0.0.1", 9)
+        transport._sock = object()          # "connected", with no send loop
+        for _ in range(_MAX_SEND_QUEUE):
+            await transport.send(make_packet(b"p"))
+        pending = asyncio.create_task(transport.send(make_packet(b"p")))
+        await asyncio.sleep(0.05)
+        assert not pending.done()
+        transport._link._send_queue.get_nowait()        # room appears
+        await asyncio.wait_for(pending, 1)

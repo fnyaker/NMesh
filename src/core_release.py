@@ -107,7 +107,8 @@ MAX_AUTO_JOURNAL = 8         # releases the journal remembers attempting
 # state, its virtualenv and anything an operator left in the install directory
 # are not part of a release and are never carried by one.
 INCLUDE = ("src", "scripts", "start.sh", "install.sh", "requirements.txt",
-           "pyproject.toml", "Docs", "docker", "README.md", "CLAUDE.md")
+           "pyproject.toml", "Docs", "docker", "README.md", "AGENTS.md",
+           "CLAUDE.md")
 REQUIRED = ("src/version.py", "start.sh")
 _EXCLUDE_DIRS = {"__pycache__", ".git", ".venv", "data", "_oqs", "node_modules",
                  ".nmesh-previous", ".nmesh-update"}

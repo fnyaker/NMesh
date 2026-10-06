@@ -5,7 +5,7 @@ Delay-tolerant delivery and node restarts need session state to survive on disk:
 the established E2E keys, any handshake still in flight (so a reply that comes
 back days later still completes), and data queued for a peer not yet reachable.
 
-Security (see CLAUDE.md): keys in RAM is the default; this is only active when a
+Security (see AGENTS.md): keys in RAM is the default; this is only active when a
 ``session_store_path`` is given. The blob is encrypted with AES-256-GCM under a
 key derived from the node's long-term identity, so its confidentiality sits at
 the *same* trust boundary as the identity file already on disk — no new secret

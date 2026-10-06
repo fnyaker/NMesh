@@ -162,7 +162,7 @@ class _Peer:
         # so the node can prune this peer. Cleared on intentional stop().
         self.on_dead = None
         # Invoked when a *frame* would not decode. The link's own counter below
-        # is all this object can keep, and `CLAUDE.md` is explicit that a count
+        # is all this object can keep, and `AGENTS.md` is explicit that a count
         # kept per link is a count a peer sheds by reconnecting — so the node
         # hangs its identity-wide book here. Set by `MeshNode._new_peer`; a peer
         # nobody owns simply counts locally, which is the honest fallback.
@@ -235,7 +235,7 @@ class _Peer:
         were counted here, on the link, and nowhere else — so an authenticated
         peer could send noise up to the cut, reconnect, and start again, for
         ever, without its standing ever moving. That is exactly the shape
-        `CLAUDE.md` names when it says a count is kept per identity and not per
+        `AGENTS.md` names when it says a count is kept per identity and not per
         link.
 
         Never raises: this is the receive loop, and a bookkeeping failure must

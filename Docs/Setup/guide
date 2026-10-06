@@ -216,8 +216,12 @@ problems appear at startup *and* in the console.
 Editing from the console: **Settings → Configuration**. The form is built from
 what the node declares, never from a list hard-coded in the page — a setting
 added on the node side appears by itself, and a setting the node refuses to
-expose cannot be invented from the browser. Nothing is applied live: changes
-take effect when the node restarts, and the interface says so.
+expose cannot be invented from the browser. Most settings apply to the running
+node as soon as they are saved (`config.LIVE`: addressing, multi-link and
+keepalive bounds, the update sweep, the name, abuse gossip…); the ones read only
+at startup — listeners, ports, the console, the apps — wait for a restart, and
+the page lists them apart. Above the form, a ten-step *Energy and performance*
+bar sets the live ones a battery cares about in one move.
 
 #### Transport settings (`scheme.option`)
 
