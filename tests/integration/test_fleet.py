@@ -254,7 +254,8 @@ class StubConsole:
         self.governed = []
         self.available = True
 
-    def call(self, method, path, body, token, govern=False, timeout=None):
+    def call(self, method, path, body, token, govern=False, apps=False,
+             full=False, node=None, timeout=None):
         self.calls.append((method, path, body, token))
         self.governed.append(bool(govern))
         return 200, "application/json", b'{"id":"the-target"}' + b"." * 90_000
@@ -329,7 +330,8 @@ class TestControlFrameOverRealMesh:
             self._plane = plane
             self.paths = []
 
-        def call(self, method, path, body, token, govern=False, timeout=None):
+        def call(self, method, path, body, token, govern=False, apps=False,
+                 full=False, node=None, timeout=None):
             self.paths.append((method, path))
             if path != CONTROL_PATH:
                 return 404, "application/json", b'{"error": "not found"}'
@@ -337,8 +339,14 @@ class TestControlFrameOverRealMesh:
             # the origin comes from what the *agent* read in its own ledger and
             # wrote beside the replay marker, never from the frame
             # (`webconsole._origin`).
-            origin = (control.Origin.GOVERN if govern
-                      else control.Origin.REMOTE)
+            if full:
+                origin = control.Origin.FULL
+            elif apps:
+                origin = (control.Origin.GOVERN_APPS if govern
+                          else control.Origin.REMOTE_APPS)
+            else:
+                origin = (control.Origin.GOVERN if govern
+                          else control.Origin.REMOTE)
             channel = control.LocalChannel(self._plane, origin)
             return 200, "application/json", channel.send(body)
 

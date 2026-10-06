@@ -29,6 +29,10 @@ _spec = importlib.util.spec_from_file_location(
     "nmesh_console_auth", os.path.join(ROOT, "src", "console_auth.py"))
 console_auth = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(console_auth)
+_spec = importlib.util.spec_from_file_location(
+    "nmesh_console_sessions", os.path.join(ROOT, "src", "console_sessions.py"))
+console_sessions = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(console_sessions)
 
 
 def main(argv) -> int:
@@ -60,6 +64,19 @@ def main(argv) -> int:
         console_auth.write(path, password)
     except OSError as exc:
         print(f"could not write {path}: {exc.strerror or 'error'}",
+              file=sys.stderr)
+        return 1
+    # A reset is what somebody does who thinks a way in was stolen, so the
+    # sessions that outlive restarts (`nmeshctl login --for`) end with the old
+    # password — exactly as a change made through the console ends them.
+    lasting = console_sessions.path_for(state_dir)
+    try:
+        os.unlink(lasting)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"could not remove {lasting}: {exc.strerror or 'error'} — "
+              f"remove it by hand, or the sessions in it stay valid",
               file=sys.stderr)
         return 1
     print(password)

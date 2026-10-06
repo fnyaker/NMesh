@@ -25,7 +25,8 @@ FLEET_HTML = """<!doctype html>
 <link rel="stylesheet" href="/fleet.css">
 </head>
 <body data-app-name="NMesh Fleet"
-      data-ctx-local="Fleet runs on this node — that one has a fleet of its own.">
+      data-ctx-needs="full"
+      data-ctx-local="Fleet runs on this node — reaching that one's fleet needs its full grant.">
 
 <div id="login" class="gate hidden">
   <form id="login-form">
@@ -1970,8 +1971,15 @@ $("shell-open").addEventListener("click", openShell);
 $("shell-full").addEventListener("click", () => {
   // A tab, never a window: this button exists because a terminal in a panel is
   // a terminal in a box, and a 700px pop-up is the same box with a title bar.
+  // `node` is the shell's target. The node this page is *driving*, when it
+  // follows one, travels beside it as `ctx` — a different question, and a
+  // claim the terminal checks against this console before believing.
   const node = $("shell-node").value;
-  window.open("/term" + (node ? "?node=" + encodeURIComponent(node) : ""),
+  const query = [];
+  if(node) query.push("node=" + encodeURIComponent(node));
+  if(CONTEXT.node && CONTEXT.caps.includes("full"))
+    query.push("ctx=" + encodeURIComponent(CONTEXT.node));
+  window.open("/term" + (query.length ? "?" + query.join("&") : ""),
               "_blank", "noopener");
 });
 $("shell-kill").addEventListener("click", async () => {

@@ -2359,6 +2359,15 @@ async function enter(token){
   THEME.paint();
   paintKeys();
   fitViewport();
+  // Opened from a fleet page following another node: the shells are that
+  // node's. A claim until this console confirms it holds a session there.
+  try{
+    const ctx = new URLSearchParams(location.search).get("ctx") || "";
+    if(/^[0-9a-f]{40}$/.test(ctx)){
+      CONTEXT.node = ctx;
+      await CONTEXT.confirm();
+    }
+  }catch(_){}
   await loadNodes();
   TERM_SESSION = new ShellSession($("term"), {
     opened: () => setState("live", "ok"),

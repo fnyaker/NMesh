@@ -22,7 +22,7 @@ Two operations, and both exist so that a page does not have to guess.
 """
 from __future__ import annotations
 
-from ..plane import Origin, operation
+from ..plane import at_a_distance, operation
 from ..params import param
 
 # Both are answers about state this process already holds — no loop, no file, no
@@ -49,7 +49,7 @@ class ControlModule:
 
     def op_catalogue(self, origin: str) -> dict:
         return {"modules": self._plane.catalogue(origin),
-                "remote_ok": origin == Origin.REMOTE}
+                "remote_ok": at_a_distance(origin)}
 
     def op_changes(self, since: int) -> dict:
         book = self._context.changes

@@ -626,10 +626,19 @@ def test_an_app_that_cannot_be_driven_remotely_says_so():
 
 def test_the_calls_a_managed_node_refuses_are_never_addressed_to_it():
     """The refusal list is written on both sides. Sending the header anyway
-    would turn a designed refusal into a 403 every page has to explain."""
-    from src.apps.fleet import _CONSOLE_DENIED
-    for prefix in _CONSOLE_DENIED:
-        assert f'"{prefix}"' in webassets.ui.JS, prefix
+    would turn a designed refusal into a 403 every page has to explain — so
+    each family the far node opens only under a grant is named here beside
+    that same grant."""
+    from src.apps.fleet import _NEEDS_APPS, _NEEDS_FULL
+    js = webassets.ui.JS
+    always_here = js.split("const ALWAYS_HERE = ", 1)[1].split(";", 1)[0]
+    for prefix in _NEEDS_APPS:
+        assert f'["{prefix}", "apps"]' in js, prefix
+    for prefix in _NEEDS_FULL:
+        # The relay's own sessions never travel from a page, even under `full`;
+        # every other family travels exactly as far as the grant says.
+        assert (f'["{prefix}", "full"]' in js
+                or f'"{prefix}"' in always_here), prefix
     # Signing in and out are this console's own, whatever it is driving.
     assert '"/api/login"' in webassets.ui.JS and '"/api/logout"' in webassets.ui.JS
 
@@ -671,7 +680,7 @@ def test_a_switch_restarts_the_stream_and_repaints_once_for_every_page():
     repaints on its own next tick is a view showing the previous machine until
     then. Both happen in `CONTEXT.set`, after everybody has dropped what they
     held — not in the one page that remembered to do it."""
-    body = webassets.ui.JS.split("  set(node, label){")[1].split("\n  },")[0]
+    body = webassets.ui.JS.split("  set(node, label, caps){")[1].split("\n  },")[0]
     assert "EVENTS.start();" in body and "REFRESH.run();" in body
     assert "this.listeners.forEach" in body
     assert body.index("this.listeners.forEach") < body.index("REFRESH.run();")
@@ -1602,3 +1611,22 @@ def test_installed_restart_to_run_it_is_said_only_while_true():
     body = webassets.APP_JS.split("async function refreshReleases(){", 1)[1]
     body = body.split("\n}", 1)[0]
     assert "last.version !== data.current" in body
+
+
+def test_chat_media_follow_the_node_being_driven():
+    """An <img src> carries no header, so it always asked the console serving
+    the page — the wrong machine once chat follows another node. Every media
+    URL goes through `MEDIA.attr`, which fetches through `api()` there."""
+    import re
+    source = webassets.CHAT_PAGE_JS
+    assert not re.search(r'(src|href)="/api/chat/', source)
+    assert source.count("MEDIA.attr(") >= 4
+    assert "const MEDIA = {" in webassets.ui.JS
+    assert "CONTEXT.subscribe(() => MEDIA.forget());" in webassets.ui.JS
+
+
+def test_a_page_follows_the_node_exactly_as_far_as_it_granted():
+    js = webassets.ui.JS
+    rule = js.split("const local = (path) =>", 1)[1].split(";", 1)[0]
+    assert "CONTEXT.caps.includes(grant)" in rule
+    assert "caps: []," in js.split("const CONTEXT = {", 1)[1][:600]

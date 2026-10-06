@@ -2927,3 +2927,58 @@ class TestSayingSomebodyIsHere:
         finally:
             console.stop(); await node.stop()
         assert "console stream" not in node._awake_holds
+
+
+class TestTheReplayedGrants:
+    """The relay writes the grants it read from its ledger as headers beside
+    the replay marker; the console turns them into an origin, and a replayed
+    call names a further node only under `full`."""
+
+    async def _catalogue(self, console, token, **headers):
+        frame = {"v": 1, "id": "c", "op": "control.catalogue", "params": {}}
+        status, _, _, reply = await asyncio.to_thread(
+            _request, console, "POST", "/api/control", token, frame,
+            headers=headers)
+        return status, reply
+
+    @staticmethod
+    def _names(reply):
+        return {f"{module['module']}.{op['name']}"
+                for module in reply["result"]["modules"]
+                for op in module["operations"]}
+
+    async def test_full_reaches_what_this_machine_does(self):
+        from src.apps.fleet_console import FULL_HEADER
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            _, here = await self._catalogue(console, token)
+            _, full = await self._catalogue(console, token, **{
+                REPLAY_HEADER: "1", FULL_HEADER: "1"})
+            _, remote = await self._catalogue(console, token, **{REPLAY_HEADER: "1"})
+            assert self._names(full) == self._names(here)
+            assert self._names(remote) < self._names(here)
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_grant_header_alone_grants_nothing(self):
+        from src.apps.fleet_console import FULL_HEADER
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            _, here = await self._catalogue(console, token, **{FULL_HEADER: "1"})
+            # Without the replay marker it is this machine's own page, which
+            # already reaches everything — the header could only ask for less.
+            assert here["ok"] is True
+        finally:
+            console.stop(); await node.stop()
+
+    async def test_a_replayed_call_names_another_node_only_under_full(self):
+        node, console = await _make_console()
+        try:
+            _, token = await _login(console)
+            status, reply = await self._catalogue(console, token, **{
+                REPLAY_HEADER: "1", "X-NMesh-Node": "ab" * 20})
+            assert reply["ok"] is False and reply["code"] == "bad_request"
+        finally:
+            console.stop(); await node.stop()

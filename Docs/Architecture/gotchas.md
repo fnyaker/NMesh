@@ -1787,6 +1787,36 @@ fault, and every one of its tests fails on the old transport.
 > A test that is lowered until it passes has measured the test. When a
 > measurement shows a medium falling over, fix the medium — and say so.
 
+## A page following another node, and the things that cannot carry a header
+
+When `/chat` follows a node that granted `apps`, every call goes through `api()`,
+which adds `X-NMesh-Node` — except the ones the browser makes on its own. An
+`<img src="/api/chat/avatar…">`, an image in a message, a download link: none
+can carry a header, so each asked the console serving the page, and a chat
+showing another node's conversation showed **this** node's pictures beside it.
+`MEDIA.attr(path, "src")` is the one way a page writes such an attribute: here
+it *is* the attribute, there it is `data-media`, fetched through `api()` and
+shown from memory (bounded, dropped on a context switch). One observer for the
+document, so a view added later cannot be the one that forgot.
+
+The same family, already met: a window opened with `noopener` starts with an
+empty `sessionStorage`, which is why the context travels in the address — and
+`/term` already used `?node=` for the shell's target, so the driven node rides
+beside it as `ctx`, a claim `CONTEXT.confirm()` checks before believing.
+
+## A grant read in more places than it is checked
+
+`full` means every capability. The ledger had two gates (`allows`, `may_use`)
+— and six other places that read `"x" in entry["caps"]` straight from the list,
+deciding which nodes appear in the context selector, which may be asked for
+links, which can mint an invitation. Teaching only the gates would have made a
+node holding `full` drivable and invisible. `fleet_state.effective_caps` is the
+one expansion, and every reader goes through it; the list itself keeps what a
+human ticked.
+
+> Before giving a name a new meaning, grep every place that reads the name,
+> not only the function that is supposed to.
+
 ## A SACK one bit off: the lost frame retired as delivered
 
 Seen on a live node: a UDP link with its reorder buffer full (256 of 256), its
