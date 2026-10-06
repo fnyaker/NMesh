@@ -55,6 +55,8 @@ INDEX_HTML = """<!doctype html>
     </nav>
     <div class="rail-foot">
       <div class="rail-state"><span id="rail-dot" class="dot"></span><span id="rail-text">Connecting…</span></div>
+      <label class="check rail-switch"><input type="checkbox" role="switch" data-expert-toggle>
+        <span>Expert mode</span></label>
       <button id="logout" class="ghost wide">Sign out</button>
     </div>
   </aside>
@@ -94,6 +96,8 @@ INDEX_HTML = """<!doctype html>
             <span class="row"><i id="more-dot" class="dot"></i>
               <span id="more-state" class="muted">Connecting…</span></span></div>
           <button class="item" id="more-search" data-menu-close>Search &amp; commands</button>
+          <label class="item check"><input type="checkbox" role="switch" data-expert-toggle>
+            <span>Expert mode</span></label>
           <div id="more-apps"></div>
           <div class="sep"></div>
           <button class="item danger" id="more-restart" data-menu-close>Restart this node</button>
@@ -139,22 +143,16 @@ INDEX_HTML = """<!doctype html>
         </div>
       </article>
       <div id="metrics" class="stats"></div>
-      <article id="feed-card" class="card" hidden>
-        <div class="card-head"><div class="grow"><h2>Happening now</h2>
-          <div class="sub">The last things this node did, or was told</div></div></div>
-        <div class="card-body"><ul id="feed-list" class="feed"></ul></div>
-      </article>
       <div class="split wide-first">
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Throughput</h2>
-            <div class="sub">NMesh packet bytes, excluding transport overhead</div></div>
-            <span id="rate-now" class="badge num"></span></div>
+            <div class="sub">NMesh packet bytes, excluding transport overhead</div></div></div>
           <div class="card-body">
-            <canvas id="chart" height="240" aria-label="Inbound and outbound bytes per second"></canvas>
-            <div class="row small muted gap-4">
-              <span class="row"><i class="dot in"></i>Inbound</span>
-              <span class="row"><i class="dot out"></i>Outbound</span>
-              <span class="grow"></span><span id="chart-peak" class="num"></span>
+            <canvas id="chart" height="240" role="img" aria-label="Inbound and outbound bytes per second"></canvas>
+            <div class="chart-legend small">
+              <span class="row"><i class="dot in"></i>Inbound <b id="rate-in" class="num"></b></span>
+              <span class="row"><i class="dot out"></i>Outbound <b id="rate-out" class="num"></b></span>
+              <span class="row muted">Peak <b id="chart-peak" class="num"></b></span>
             </div>
           </div>
         </article>
@@ -171,6 +169,13 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
       </div>
+      <article id="feed-card" class="card" hidden>
+        <!-- Under the drawings, not above them: a card that comes and goes with
+             what just happened must not push the graph up and down. -->
+        <div class="card-head"><div class="grow"><h2>Happening now</h2>
+          <div class="sub">The last things this node did, or was told</div></div></div>
+        <div class="card-body"><ul id="feed-list" class="feed"></ul></div>
+      </article>
     </section>
 
     <!-- ── Network ──────────────────────────────────────────────────────── -->
@@ -227,27 +232,32 @@ INDEX_HTML = """<!doctype html>
             <div class="btn-row">
               <button id="reach-probe">Confirm reachability</button>
               <button id="net-recheck">Re-check network</button>
-              <button id="dyn-toggle"></button>
+              <button id="dyn-toggle" class="only-expert"></button>
             </div>
-            <p class="muted small">Dynamic addressing moves a live link onto another address
-              of the <em>same</em> node when that one scores better — a LAN address instead
-              of the public one, IPv6 instead of IPv4. It costs a dial and a handshake to find
-              out, so it is off unless you ask for it.</p>
-            <hr>
-            <label class="field" for="balance"><span>Choosing between a node&rsquo;s addresses</span>
-              <span class="hint">Nodes are often reachable more than one way. This decides
-                which one is tried first: what the link <em>measures</em>, or what you said
-                the <em>medium</em> is worth. Each transport carries its own priority, in its
-                block below.</span>
-              <input id="balance" type="range" min="0" max="100" step="5" value="50"
-                     aria-describedby="balance-order"></label>
-            <div class="scale"><span>Fastest measured</span><b id="balance-value"></b>
-              <span>Preferred medium</span></div>
-            <p id="balance-order" class="hint"></p>
+            <div class="only-expert stack">
+              <p class="muted small">Dynamic addressing moves a live link onto another address
+                of the <em>same</em> node when that one scores better — a LAN address instead
+                of the public one, IPv6 instead of IPv4. It costs a dial and a handshake to find
+                out, so it is off unless you ask for it.</p>
+              <hr>
+              <label class="field" for="balance"><span>Choosing between a node&rsquo;s addresses</span>
+                <span class="hint">Nodes are often reachable more than one way. This decides
+                  which one is tried first: what the link <em>measures</em>, or what you said
+                  the <em>medium</em> is worth. Each transport carries its own priority, in its
+                  block below.</span>
+                <input id="balance" type="range" min="0" max="100" step="5" value="50"
+                       aria-describedby="balance-order"></label>
+              <div class="scale"><span>Fastest measured</span><b id="balance-value"></b>
+                <span>Preferred medium</span></div>
+              <p id="balance-order" class="hint"></p>
+            </div>
+            <p class="muted small only-simple">How this node trades energy for speed is one
+              setting, under Settings &rarr; Configuration. Expert mode shows the numbers it
+              is made of here.</p>
             <p id="transport-status" class="msg"></p>
           </div>
         </article>
-        <article class="card">
+        <article class="card only-expert">
           <div class="card-head"><div class="grow"><h2>Multi-link operation</h2>
             <div class="sub">Two links to one node, carrying its traffic together</div></div></div>
           <div class="card-body">
@@ -301,7 +311,7 @@ INDEX_HTML = """<!doctype html>
             <p id="mlo-status" class="msg"></p>
           </div>
         </article>
-        <article class="card">
+        <article class="card only-expert">
           <div class="card-head"><div class="grow"><h2>Transports</h2>
             <div class="sub">One block per medium: what is bound, what it carries, what it takes</div></div></div>
           <div class="card-body">
@@ -355,7 +365,7 @@ INDEX_HTML = """<!doctype html>
             <dl id="behaviour" class="kv"></dl>
           </div>
         </article>
-        <article class="card" id="refusals-card" hidden>
+        <article class="card only-expert" id="refusals-card" hidden>
           <div class="card-head"><div class="grow"><h2>Refused handshakes</h2>
             <div class="sub">Links that reached this node and were turned away, and why</div></div></div>
           <div class="card-body">
@@ -940,6 +950,10 @@ INDEX_HTML = """<!doctype html>
                   <option value="light">Light</option>
                   <option value="dark">Dark</option>
                 </select></label>
+              <label class="check card-like"><input type="checkbox" role="switch" data-expert-toggle>
+                <span><b>Expert mode</b><br><span class="muted small">Every number and
+                  every setting, rather than the decisions they add up to. Only changes what
+                  this browser shows — the node behaves the same either way.</span></span></label>
               <label class="field" for="pref-open"><span>Opening another app</span>
                 <select id="pref-open">
                   <option value="auto">Decide by screen size</option>
@@ -955,17 +969,56 @@ INDEX_HTML = """<!doctype html>
       </div>
 
       <div data-sub="config" class="stack" hidden>
-        <article class="card">
-          <div class="card-head"><div class="grow"><h2>Startup configuration</h2>
-            <div class="sub">The launch options this node reads from its file</div></div>
+        <article class="card" id="power-card">
+          <div class="card-head"><div class="grow"><h2>Energy and performance</h2>
+            <div class="sub">How much this node may spend to stay quick</div></div>
+            <span id="power-pill" class="badge"></span></div>
+          <div class="card-body">
+            <nav class="segmented" role="tablist" aria-label="How the balance is chosen">
+              <button role="tab" id="power-tab-manual" data-power-mode="manual"
+                      aria-selected="true">Manual</button>
+              <button role="tab" id="power-tab-adaptive" data-power-mode="adaptive"
+                      aria-selected="false">Adaptive <span class="badge info">Soon</span></button>
+            </nav>
+            <div data-power-panel="manual" class="stack">
+              <label class="field" for="power-step"><span>Balance</span>
+                <input id="power-step" type="range" min="1" max="10" step="1" value="6"
+                       aria-describedby="power-text"></label>
+              <div class="scale"><span>Saves energy</span><b id="power-name"></b>
+                <span>Performance</span></div>
+              <p id="power-text" class="power-text"></p>
+              <p id="power-custom" class="notice" hidden>These settings were tuned by hand and
+                match no step. Moving the bar replaces them with the step you choose.</p>
+              <dl id="power-values" class="kv only-expert"></dl>
+            </div>
+            <div data-power-panel="adaptive" class="stack" hidden>
+              <p class="muted small">Coming soon: the node moves along the bar by itself, with
+                what it is doing — on battery or on mains, busy or idle. You give it a tendency,
+                and it keeps within it.</p>
+              <label class="field" for="power-trend"><span>Tendency</span>
+                <input id="power-trend" type="range" min="1" max="5" step="1" value="3" disabled></label>
+              <div class="scale"><span>Save energy</span><b>Neutral</b><span>Performance</span></div>
+            </div>
+            <p id="power-status" class="msg" role="status"></p>
+          </div>
+        </article>
+        <p class="muted small only-simple">Expert mode shows every setting in the node&rsquo;s
+          configuration file, including the ones this bar is made of.</p>
+        <article class="card only-expert">
+          <div class="card-head"><div class="grow"><h2>Configuration file</h2>
+            <div class="sub">Every option this node reads from its file</div></div>
             <span id="config-pill" class="badge"></span></div>
           <div class="card-body">
-            <p class="muted small">Changes are written to that file and take effect when the node
-              restarts — nothing here changes a running node. Options passed on the command line
-              still win over the file.</p>
+            <p class="muted small">Saved settings marked <b>applies now</b> take effect on the
+              running node at once; the others are read when the node starts, and wait for a
+              restart. Options passed on the command line still win over the file at the next
+              start.</p>
             <p id="config-path" class="msg mono"></p>
             <div id="config-problems" class="notice warn" hidden></div>
+            <h3>Applies now</h3>
             <div id="config-fields" class="form-grid"></div>
+            <h3>After a restart</h3>
+            <div id="config-fields-restart" class="form-grid"></div>
             <div class="btn-row">
               <button id="config-save" class="primary">Save configuration</button>
               <button id="config-reload">Reload from file</button>
@@ -1210,6 +1263,15 @@ INDEX_HTML = """<!doctype html>
 # starts to look reusable, it belongs in `ui.py`, not in a second copy.
 CONSOLE_PAGE_CSS = """
 #chart{width:100%;height:236px;display:block}
+/* The live figures sit in the legend, each in a box as wide as its widest
+   reading: a rate that grows a digit must not shove its neighbour along, and a
+   header badge that did exactly that wrapped the card a line taller. */
+.chart-legend{display:flex;flex-wrap:wrap;gap:var(--s-2) var(--s-5);color:var(--text-muted)}
+.chart-legend .row{gap:var(--s-2)}
+.chart-legend b{display:inline-block;min-width:10ch;font-weight:600;color:var(--text)}
+.rail-switch{padding-inline:var(--s-2);font-size:var(--fs-xs);color:var(--text-muted)}
+.menu .item.check{display:flex;align-items:center;gap:var(--s-2);margin:0}
+.power-text{font-size:var(--fs-sm);color:var(--text);min-height:3em}
 /* The node's own log, live. A grid per line so the columns hold while the
    message wraps; capped in height, and scrolled by the page only while the
    reader is already at the end. */
@@ -1532,7 +1594,8 @@ function trackRates(state){
   }else RATES.length = 0;
   PREVIOUS = {id:state.id, uptime:state.uptime, time:state.server_time,
               bytes_in:state.total.bytes_in, bytes_out:state.total.bytes_out};
-  RATES.push({inbound:Math.max(0,inbound), outbound:Math.max(0,outbound)});
+  RATES.push({t:state.server_time, inbound:Math.max(0,inbound),
+              outbound:Math.max(0,outbound)});
   while(RATES.length > 90) RATES.shift();
   state._rates = RATE_NOW = {inbound, outbound};
 }
@@ -1713,20 +1776,22 @@ function paintFeed(state){
 }
 function paintMetrics(state){
   const load = state.load || {};
+  // The simple view keeps the four a person glances at; expert mode adds the
+  // ones that only mean something to somebody who knows what a link is.
   const cards = [
     ["Connected nodes", state.node_count || 0, "accent"],
-    ["Active links", state.link_count || 0, ""],
-    ["Known nodes", state.routing_size || 0, ""],
-    ["E2E sessions", (state.e2e_sessions || []).length, ""],
+    ["Active links", state.link_count || 0, "only-expert"],
+    ["Known nodes", state.routing_size || 0, "only-expert"],
+    ["E2E sessions", (state.e2e_sessions || []).length, "only-expert"],
     ["Inbound", fmtRate(state._rates.inbound), ""],
     ["Outbound", fmtRate(state._rates.outbound), ""],
     // Of what left this node, how much was somebody else's. Relaying is the
     // one thing a node spends bandwidth on with nothing of its own to show for
     // it, and it was indistinguishable from its own traffic in every number
     // here. CPU and memory are this **process**, not the machine.
-    ["Relayed", fmtBytes((state.total || {}).bytes_relayed || 0), ""],
+    ["Relayed", fmtBytes((state.total || {}).bytes_relayed || 0), "only-expert"],
     ["CPU (this node)", load.cpu_percent == null ? "—" : Math.round(load.cpu_percent) + "%", ""],
-    ["Memory (this node)", fmtBytes(load.rss_bytes), ""],
+    ["Memory (this node)", fmtBytes(load.rss_bytes), "only-expert"],
   ];
   // The cards are the shape; the numbers are written into them. Rewriting the
   // markup every two seconds replaced eight elements that had not changed —
@@ -1739,8 +1804,8 @@ function paintMetrics(state){
       '<div class="stat ' + tone + '"><span class="v" data-v="metric:' + esc(label) +
       '"></span><span class="k">' + esc(label) + "</span></div>").join(""),
     values);
-  $("rate-now").textContent = fmtRate(state._rates.inbound) + " in · " +
-    fmtRate(state._rates.outbound) + " out";
+  $("rate-in").textContent = fmtRate(state._rates.inbound);
+  $("rate-out").textContent = fmtRate(state._rates.outbound);
 }
 
 // ---- throughput ------------------------------------------------------------
@@ -1761,6 +1826,32 @@ function withAlpha(colour, alpha){
   return parts && parts.length >= 3
     ? "rgba(" + parts[0] + "," + parts[1] + "," + parts[2] + "," + alpha + ")" : colour;
 }
+// The vertical scale, in round numbers. A chart whose top is "the peak" has an
+// axis that means nothing — 1.37 MB/s is not a value anybody reads a line
+// against — and it jumps with every new sample. The top is the next step of
+// 1, 2, 2.5 or 5 above the peak, every label in one unit (the one `fmtBytes`
+// would name the top in), so the gridlines carry figures a person can read and
+// the scale only moves when the traffic changes by a real amount. Never under
+// 1 kB/s, so an idle node draws a quiet floor rather than an axis of bytes.
+const RATE_UNITS = ["B/s","kB/s","MB/s","GB/s","TB/s"];
+function niceScale(peak, lines){
+  lines = lines || 4;
+  const value = Math.max(1024, Number(peak) || 0);
+  let base = 1, unit = 0;
+  while(value / base >= 1024 && unit < RATE_UNITS.length - 1){ base *= 1024; unit++; }
+  const raw = value / base / lines;
+  const power = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * power).find((m) => m >= raw);
+  const count = Math.max(1, Math.ceil(value / base / step - 1e-9));
+  const ticks = [];
+  for(let index = 0; index <= count; index++) ticks.push(index * step * base);
+  return {top: count * step * base, ticks, base, unit: RATE_UNITS[unit]};
+}
+// Short, so a narrow card keeps its drawing: "0.25 MB/s", never "0.250".
+function tickLabel(value, scale){
+  if(!value) return "0";
+  return String(Number((value / scale.base).toFixed(2))) + " " + scale.unit;
+}
 function drawChart(){
   const canvas = $("chart");
   if(!canvas.clientWidth) return;
@@ -1774,28 +1865,58 @@ function drawChart(){
   context.clearRect(0, 0, width, height);
 
   const grid = cssColour("--border"), accent = cssColour("--accent"), warn = cssColour("--warn");
-  const peak = Math.max(1, ...RATES.flatMap((point) => [point.inbound, point.outbound]));
-  $("chart-peak").textContent = RATES.length ? "peak " + fmtRate(peak) : "";
+  const muted = cssColour("--text-muted");
+  const peak = Math.max(0, ...RATES.flatMap((point) => [point.inbound, point.outbound]));
+  $("chart-peak").textContent = RATES.length ? fmtRate(peak) : "—";
+  const scale = niceScale(peak);
 
-  context.strokeStyle = grid; context.lineWidth = 1;
-  for(let row = 0; row <= 4; row++){
-    const y = Math.round(row * (height - 16) / 4) + 8.5;
-    context.beginPath(); context.moveTo(0, y); context.lineTo(width, y); context.stroke();
+  // Small type, the page's own face: the labels are there to be read against
+  // a line, not to be the chart.
+  const font = getComputedStyle(canvas).fontFamily || "sans-serif";
+  context.font = "10px " + font;
+  context.textBaseline = "middle";
+  const labels = scale.ticks.map((value) => tickLabel(value, scale));
+  const gutter = Math.ceil(Math.max(...labels.map((text) => context.measureText(text).width))) + 8;
+  const top = 8, bottom = height - 18;
+  const plotW = Math.max(10, width - gutter);
+  const level = (value) => bottom - value * (bottom - top) / scale.top;
+
+  context.lineWidth = 1;
+  scale.ticks.forEach((value, index) => {
+    const y = Math.round(level(value)) + .5;
+    context.strokeStyle = grid;
+    context.beginPath(); context.moveTo(gutter, y); context.lineTo(width, y); context.stroke();
+    context.fillStyle = muted; context.textAlign = "right";
+    context.fillText(labels[index], gutter - 6, y);
+  });
+
+  // Time runs along the bottom from the samples' own clock, so a paused
+  // refresh or a slow node shows as the gap it is rather than being squeezed.
+  const first = RATES.length ? RATES[0].t : 0, last = RATES.length ? RATES[RATES.length - 1].t : 0;
+  const span = Math.max(1, last - first);
+  const at = (point, index) => RATES.length < 2 ? gutter
+    : gutter + (point.t != null ? (point.t - first) / span
+                                : index / (RATES.length - 1)) * plotW;
+  context.fillStyle = muted; context.textBaseline = "alphabetic";
+  if(RATES.length >= 2){
+    context.textAlign = "left";
+    context.fillText("−" + fmtDuration(span), gutter, height - 3);
+    context.textAlign = "right";
+    context.fillText("now", width, height - 3);
   }
-  const at = (index) => index * width / Math.max(1, RATES.length - 1);
-  const level = (value) => height - 8 - value * (height - 24) / peak;
   const draw = (key, colour) => {
     if(RATES.length < 2) return;
     context.beginPath();
     RATES.forEach((point, index) => {
-      const x = at(index), y = level(point[key]);
+      const x = at(point, index), y = level(point[key]);
       index ? context.lineTo(x, y) : context.moveTo(x, y);
     });
-    const fill = context.createLinearGradient(0, 0, 0, height);
+    const fill = context.createLinearGradient(0, top, 0, bottom);
     fill.addColorStop(0, withAlpha(colour, .28)); fill.addColorStop(1, withAlpha(colour, 0));
     context.strokeStyle = colour; context.lineWidth = 2; context.lineJoin = "round";
     context.stroke();
-    context.lineTo(at(RATES.length - 1), height); context.lineTo(0, height); context.closePath();
+    context.lineTo(at(RATES[RATES.length - 1], RATES.length - 1), bottom);
+    context.lineTo(gutter, bottom); context.closePath();
     context.fillStyle = fill; context.fill();
   };
   draw("inbound", accent); draw("outbound", warn);
@@ -3346,10 +3467,13 @@ function paintTransportLive(state){
     // deciding for itself something the node had already answered — and it was
     // the one hardcoded transport left in this interface. The medium describes
     // itself; the page interprets nothing (`CLAUDE.md` §3).
+    // …and only in a block that carries the controls. Every block runs this,
+    // and the tcp one has no port field: reading through it threw, and the
+    // throw ended the loop before the blocks after it were painted.
     const punchable = details.filter((item) => item.hole_punch);
-    if(!punchable.length) return;
-    const on = punchable.length > 0;
     const port = block.querySelector("[data-udp-port]");
+    if(!punchable.length || !port) return;
+    const on = punchable.length > 0;
     block.querySelector("[data-udp-toggle]").textContent = on ? "Stop UDP" : "Start UDP";
     port.disabled = on;
     const labels = {punch:["Hole punching", state.punch_enabled],
@@ -4343,40 +4467,60 @@ $("publish-go").addEventListener("click", (event) => withBusy(event.target, asyn
 // ---- configuration file ----------------------------------------------------
 // The form is built from what the node reports, never from a list hard-coded
 // here: a setting added on the node side shows up on its own, and one the node
-// refuses to expose cannot be typed into existence from this page.
+// refuses to expose cannot be typed into existence from this page. Each setting
+// also says whether the running node takes it (`live`), and the form is split
+// on that rather than marked field by field: "after a restart" is a property of
+// a group a person can see at a glance, not a footnote under each label.
 let CONFIG_FIELDS = [];
 const configFieldId = (name) => "cfg-" + name.replace(/_/g, "-");
 
 function paintConfig(data){
-  const fields = $("config-fields"), pill = $("config-pill"), problems = $("config-problems");
-  fields.innerHTML = ""; CONFIG_FIELDS = [];
+  const pill = $("config-pill"), problems = $("config-problems");
+  $("config-fields").innerHTML = ""; $("config-fields-restart").innerHTML = "";
+  CONFIG_FIELDS = [];
+  paintPower(data);
   if(!data || !data.available){
     pill.textContent = "unavailable"; pill.className = "badge";
     $("config-path").textContent = (data && data.reason) || "No configuration file for this node.";
     $("config-save").disabled = true; $("config-reload").disabled = true;
     return;
   }
-  pill.textContent = "restart to apply"; pill.className = "badge warn";
+  const settings = data.settings || [];
+  const live = settings.filter((setting) => setting.live).length;
+  pill.textContent = live + " apply now · " + (settings.length - live) + " at restart";
+  pill.className = "badge";
   $("config-path").textContent = data.path;
   $("config-save").disabled = false; $("config-reload").disabled = false;
   if(data.problems && data.problems.length){
     problems.textContent = "Problems in the file: " + data.problems.join(" · ");
     problems.hidden = false;
   }else problems.hidden = true;
-  for(const setting of data.settings || []){
+  const profiled = new Set(Object.keys(((data.profiles || [])[0] || {}).values || {}));
+  for(const setting of settings){
     CONFIG_FIELDS.push(setting);
     const id = configFieldId(setting.name);
     const label = document.createElement("label");
     label.className = "field";
     const title = document.createElement("span");
     title.textContent = setting.name.replace(/_/g, " ") + (setting.editable ? "" : " (file only)");
+    // The bar above moves these; a hand edit here makes the node "custom".
+    if(profiled.has(setting.name)){
+      const mark = document.createElement("span");
+      mark.className = "badge"; mark.textContent = "energy bar";
+      title.append(" ", mark);
+    }
     label.appendChild(title);
     let input;
     if(setting.kind === "bool"){
       input = document.createElement("input"); input.type = "checkbox";
       input.checked = !!setting.value;
       label.className = "check";
-      label.replaceChildren(input, title);
+      // The name over its explanation, beside the box: three columns of a
+      // word, a box and a paragraph read as three unrelated things.
+      const words = document.createElement("span");
+      words.className = "field";
+      words.appendChild(title);
+      label.replaceChildren(input, words);
     }else if(setting.kind === "list"){
       input = document.createElement("textarea");
       input.className = "mono"; input.rows = 3;
@@ -4399,8 +4543,8 @@ function paintConfig(data){
     const help = document.createElement("small");
     help.className = "hint";
     help.textContent = setting.help + (setting.flag ? "  ·  " + setting.flag : "");
-    label.appendChild(help);
-    fields.appendChild(label);
+    (setting.kind === "bool" ? label.lastChild : label).appendChild(help);
+    $(setting.live ? "config-fields" : "config-fields-restart").appendChild(label);
   }
 }
 async function loadConfig(){
@@ -4409,6 +4553,20 @@ async function loadConfig(){
     if(isStale(error)) return;
     setMessage("config-status", "Could not read the configuration.", true);
   }
+}
+const settingLabel = (name) => name.replace(/_/g, " ");
+// What a save did, said in the order it matters: what is in force now, what
+// still waits, and anything the node would not take.
+function savedSentence(data){
+  const parts = [];
+  if((data.applied || []).length)
+    parts.push("In force now: " + data.applied.map(settingLabel).join(", ") + ".");
+  if((data.pending || []).length)
+    parts.push("After a restart: " + data.pending.map(settingLabel).join(", ") + "." +
+      (data.can_restart ? " Restart from the ⋯ menu — the node comes back on its own." : ""));
+  if((data.problems || []).length)
+    parts.push("The node did not take: " + data.problems.join(" · ") + ".");
+  return parts.join(" ") || "Saved — nothing had changed.";
 }
 $("config-save").addEventListener("click", (event) => withBusy(event.target, async () => {
   const settings = {};
@@ -4428,14 +4586,94 @@ $("config-save").addEventListener("click", (event) => withBusy(event.target, asy
         (detail.rejected ? ": " + detail.rejected.join(" · ") : ""), true);
       return;
     }
-    setMessage("config-status", data.can_restart
-      ? "Saved. Restart the node for it to take effect — it comes back on its own."
-      : "Saved. Restart the node for it to take effect.");
+    setMessage("config-status", savedSentence(data), (data.problems || []).length > 0);
     toast("Configuration saved");
     await loadConfig();
   }catch(_){ setMessage("config-status", "Save failed", true); }
 }));
 $("config-reload").addEventListener("click", loadConfig);
+
+// ---- energy and performance --------------------------------------------------
+// One bar, ten steps, each a set of live settings the node defines
+// (`src/power.py`). Which step the node is on is read off its values, never
+// stored beside them: a node tuned by hand is "custom", and the bar says so
+// rather than sitting on a step that no longer describes it.
+const POWER = {profiles:[], step:null, available:false};
+const POWER_NAMES = {
+  keepalive_fast_min_ms:"Fastest probe while busy", keepalive_fast_max_ms:"Slowest still busy",
+  keepalive_slow_min_ms:"Fastest probe at rest", keepalive_slow_max_ms:"Slowest probe at rest",
+  mlo_always:"Combine links even when idle", dynamic_address:"Move to a faster address",
+  update_check_minutes:"Look for updates every", update_when_active:"Only while in use",
+};
+function powerValue(name, value){
+  if(typeof value === "boolean") return value ? "yes" : "no";
+  if(name.endsWith("_ms")) return value >= 1000 ? fmtNum(value / 1000) + " s" : value + " ms";
+  if(name === "update_check_minutes") return value >= 60 ? fmtNum(value / 60) + " h" : value + " min";
+  return String(value);
+}
+function powerProfile(step){
+  return POWER.profiles.find((row) => row.step === step) || null;
+}
+// What the bar shows for a step, before or after it is chosen. Dragging
+// previews; letting go applies.
+function paintPowerStep(step){
+  const row = powerProfile(step);
+  const input = $("power-step");
+  input.value = String(step);
+  input.setAttribute("aria-valuetext", row ? step + " of 10, " + row.name : String(step));
+  $("power-name").textContent = row ? step + " · " + row.name : "";
+  $("power-text").textContent = row ? row.text : "";
+  setHTML("power-values", row ? Object.entries(row.values).map(([name, value]) =>
+    "<dt>" + esc(POWER_NAMES[name] || settingLabel(name)) + "</dt><dd class=\"num\">" +
+    esc(powerValue(name, value)) + "</dd>").join("") : "");
+}
+function paintPower(data){
+  const card = $("power-card");
+  POWER.available = CHANNEL.has("config.profile") && !!(data && (data.profiles || []).length);
+  card.hidden = !POWER.available;
+  if(!POWER.available) return;
+  POWER.profiles = data.profiles || [];
+  POWER.step = data.available ? (data.profile == null ? null : data.profile) : null;
+  const custom = data.available && POWER.step == null;
+  $("power-custom").hidden = !custom;
+  const pill = $("power-pill");
+  pill.textContent = custom ? "custom" : (POWER.step ? powerProfile(POWER.step).name : "not stored");
+  pill.className = "badge" + (custom ? " warn" : (POWER.step ? " accent" : ""));
+  paintPowerStep(POWER.step || 6);
+  if(!data.available)
+    setMessage("power-status", "This node has no configuration file: a step applies " +
+      "now and is forgotten when it restarts.");
+}
+$("power-step").addEventListener("input", (event) =>
+  paintPowerStep(parseInt(event.target.value, 10)));
+$("power-step").addEventListener("change", async (event) => {
+  const step = parseInt(event.target.value, 10);
+  if(step === POWER.step) return;
+  const input = event.target;
+  input.disabled = true;
+  setMessage("power-status", "Applying…");
+  try{
+    const {ok, error, data} = await CHANNEL.ask("config.profile", {step});
+    if(!ok){ setMessage("power-status", error || "That step could not be applied", true); return; }
+    const row = powerProfile(step);
+    setMessage("power-status", (data.problems || []).length
+      ? "Applied, except: " + data.problems.join(" · ")
+      : (row ? row.name : "Step " + step) + " is in force" +
+        (data.saved === false ? " — not stored, this node has no configuration file." : "."),
+      (data.problems || []).length > 0);
+    await loadConfig();
+  }catch(error){
+    if(!isStale(error)) setMessage("power-status", "That step could not be applied", true);
+  }finally{ input.disabled = false; }
+});
+// Manual is the only mode that does anything yet; Adaptive is shown so the
+// shape of what is coming is visible, with its control disabled and said so.
+$$("[data-power-mode]").forEach((tab) => tab.addEventListener("click", () => {
+  const mode = tab.dataset.powerMode;
+  $$("[data-power-mode]").forEach((other) =>
+    other.setAttribute("aria-selected", String(other === tab)));
+  $$("[data-power-panel]").forEach((panel) => { panel.hidden = panel.dataset.powerPanel !== mode; });
+}));
 
 // ---- invitations -----------------------------------------------------------
 // One artifact, whichever way round the two machines are: a direct endpoint when

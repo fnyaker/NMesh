@@ -162,6 +162,13 @@ hr{border:0;border-top:1px solid var(--border);margin:var(--s-5) 0}
 
 .mono{font-family:var(--mono);font-variant-ligatures:none;font-size:.94em}
 .num{font-variant-numeric:tabular-nums}
+/* Expert mode (EXPERT): one attribute on <html>, set before the first paint by
+   /theme.js. What only an expert reads carries `.only-expert`; what the simple
+   view says instead carries `.only-simple`. Never `hidden` for this: a view
+   that hides an element for its own reasons must not have it shown again by a
+   mode switch, and the reverse. */
+:root:not([data-expert="1"]) .only-expert{display:none!important}
+:root[data-expert="1"] .only-simple{display:none!important}
 .muted{color:var(--text-muted)}
 .faint{color:var(--text-faint)}
 .small{font-size:var(--fs-sm)}
@@ -280,6 +287,8 @@ input[type="range"]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;
   background:var(--surface);border:2px solid var(--accent);box-shadow:var(--shadow-2)}
 input[type="range"]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px var(--accent-soft)}
 input[type="range"]:focus-visible::-moz-range-thumb{box-shadow:0 0 0 4px var(--accent-soft)}
+/* A control that is shown but not offered yet reads as such, not as broken. */
+input[type="range"]:disabled{opacity:.45;cursor:not-allowed}
 /* The two ends of the scale, named: a number alone says nothing about which
    way is which. */
 .scale{display:flex;align-items:baseline;gap:var(--s-3);font-size:var(--fs-xs);
@@ -303,6 +312,19 @@ input[type="range"]:focus-visible::-moz-range-thumb{box-shadow:0 0 0 4px var(--a
 .check{display:flex;align-items:flex-start;gap:var(--s-2);min-height:var(--tap);
   padding:var(--s-1) 0;cursor:pointer;font-size:var(--fs-sm)}
 .check input{margin-top:2px}
+/* A setting that takes effect the moment it is flipped is a switch, not a box
+   (GNOME, KDE and Material agree on that much): `role="switch"` on a checkbox
+   draws one, and keeps the checkbox's keyboard and form behaviour for free. */
+input[type="checkbox"][role="switch"]{appearance:none;-webkit-appearance:none;flex:none;
+  width:34px;height:20px;margin:0;border-radius:var(--r-full);position:relative;
+  background:var(--surface-3);border:1px solid var(--border-strong);cursor:pointer;
+  transition:background var(--speed) var(--ease)}
+input[type="checkbox"][role="switch"]::after{content:"";position:absolute;top:2px;left:2px;
+  width:14px;height:14px;border-radius:50%;background:var(--surface);
+  box-shadow:var(--shadow-1);transition:transform var(--speed) var(--ease)}
+input[type="checkbox"][role="switch"]:checked{background:var(--accent);border-color:var(--accent)}
+input[type="checkbox"][role="switch"]:checked::after{transform:translateX(14px)}
+.check:has(input[role="switch"]){align-items:center}
 .check.card-like{border:1px solid var(--border);border-radius:var(--r-md);
   padding:var(--s-3);background:var(--surface)}
 .check.card-like:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
@@ -344,7 +366,10 @@ details.card[open]>summary{border-bottom:1px solid var(--border)}
   padding:var(--s-3) var(--s-4);display:flex;flex-direction:column;gap:2px;min-width:0}
 .stat .k{font-size:var(--fs-xs);color:var(--text-muted);order:2}
 .stat .v{font-size:var(--fs-xl);font-weight:640;letter-spacing:-.02em;
-  font-variant-numeric:tabular-nums;line-height:1.15;order:1}
+  font-variant-numeric:tabular-nums;line-height:1.15;order:1;
+  /* One line, always: a value that wrapped when it grew a digit made its tile,
+     and then its whole row, a line taller on one tick and not the next. */
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stat .v small{font-size:var(--fs-sm);font-weight:560;color:var(--text-muted)}
 .stat.accent .v{color:var(--accent)}
 /* Anything else a stat carries (a meter, a trend) sits under the label. */
@@ -555,6 +580,11 @@ dialog>form,dialog>.sheet{background:var(--surface);border:1px solid var(--borde
   border-bottom:1px solid var(--border)}
 .sheet-head h2{flex:1 1 auto;min-width:0}
 .sheet-body{padding:var(--s-5);overflow-y:auto;display:flex;flex-direction:column;gap:var(--s-4)}
+/* The body scrolls; its children do not shrink. Left to `flex-shrink:1`, a
+   long list with `overflow:hidden` was squeezed to fit the sheet and clipped,
+   and the body never had anything to scroll — the permission list ended at the
+   bottom of the dialog with the rest unreachable. */
+.sheet-body>*{flex:none}
 .sheet-foot{padding:var(--s-3) var(--s-5);border-top:1px solid var(--border);
   background:var(--surface-2);display:flex;gap:var(--s-2);justify-content:flex-end;flex-wrap:wrap}
 dialog.wide{max-width:min(880px,calc(100vw - var(--s-6)))}
@@ -885,6 +915,7 @@ THEME_JS = r"""
 try{
   var choice=localStorage.getItem("nmesh_theme");
   if(choice==="light"||choice==="dark")document.documentElement.dataset.theme=choice;
+  if(localStorage.getItem("nmesh_expert")==="1")document.documentElement.dataset.expert="1";
 }catch(_){/* private mode, or storage disabled: the media query still decides */}
 """
 
@@ -1606,6 +1637,37 @@ const THEME = {
   },
 };
 
+// ---- expert mode -----------------------------------------------------------
+// Most people never want to type a keepalive floor. The simple view shows what
+// a person decides — how much this machine may spend, who it talks to — and
+// expert mode adds every number those decisions are made of. Per browser, like
+// the theme: it changes what is *shown*, never what the node does, so two
+// people looking at one node may each see it their way.
+//
+// The attribute on <html> is the truth (set before the first paint by
+// /theme.js); storage only remembers it. A private window that refuses storage
+// still switches, it just forgets on reload.
+const EXPERT = {
+  listeners: [],
+  on(){ return document.documentElement.dataset.expert === "1"; },
+  set(value){
+    try{
+      if(value) localStorage.setItem("nmesh_expert", "1");
+      else localStorage.removeItem("nmesh_expert");
+    }catch(_){}
+    if(value) document.documentElement.dataset.expert = "1";
+    else delete document.documentElement.dataset.expert;
+    this.paint();
+    this.listeners.forEach((listener) => { try{ listener(!!value); }catch(_){} });
+  },
+  subscribe(listener){ this.listeners.push(listener); },
+  // Every switch on the page shows the same answer, wherever it sits.
+  paint(){
+    const on = this.on();
+    $$("[data-expert-toggle]").forEach((box) => { box.checked = on; });
+  },
+};
+
 // ---- routing ---------------------------------------------------------------
 // The address bar is the state: a section (and its sub-section) can be linked,
 // bookmarked, and reached with Back. Panels are `data-panel`, sub-panels are
@@ -2074,6 +2136,11 @@ function mountShell(){
   SHELL_MOUNTED = true;
   const toggle = $("theme-toggle");
   if(toggle) toggle.addEventListener("click", () => THEME.toggle());
+  EXPERT.paint();
+  document.addEventListener("change", (event) => {
+    const box = event.target.closest && event.target.closest("[data-expert-toggle]");
+    if(box) EXPERT.set(box.checked);
+  });
 
   MENU.mount();
 
