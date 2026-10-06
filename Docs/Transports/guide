@@ -68,6 +68,41 @@ against a medium with no link-level liveness simply ends:
 | `is_closed() -> bool` | `False` | has this link been torn down? so a burst stops instead of sleeping out its count |
 | `keepalive() -> bool` | `False` (does nothing) | one link-level keepalive on the wire, before there is a session |
 
+### What `send()` promises
+
+**A send is bounded.** It may wait for room, never for ever: the node probes its
+links one after another, and a send that a peer can hold open by not reading
+holds every probe on every other link with it — and the receive loop of any link
+forwarding through yours. Wait a few seconds at most, then refuse.
+
+**Say which kind of failure it was**, because the node acts on the difference:
+
+| raise | when | what the node does |
+|---|---|---|
+| `LinkBusy` (`src/transports/contract.py`) | the packet could not be queued in time — the link is *full*, and **nothing of the packet went out** | tries the next route, keeps the link |
+| `ConnectionError` | the link itself is gone | tears the link down and dials again |
+
+`LinkBusy` is deliberately not a `ConnectionError`. Under load the two used to
+be one exception, and a congested link was torn down — which threw away
+everything it was carrying and paid a handshake to get back to a congested
+link. Refuse *before* writing anything, so a refusal can never leave half a
+frame in a stream.
+
+### Saying what happened to the link
+
+Two optional calls let a medium tell the operator what only it can see. Both
+cost nothing when nobody is listening; both are bounded by the node, which does
+not trust a medium to be brief:
+
+| call | what it is for |
+|---|---|
+| `self.note(message, level, **fields)` | something worth a line in the node's log as it happens — a retransmit timeout, a peer that went silent, a refused send. Throttle it yourself: once per few seconds per kind of trouble is plenty, and the node caps a link at 30 lines a minute anyway |
+| `end_reason() -> str` | once the link has ended, why — "the peer closed it", "nothing received for 60 s", "connection reset". Read when the receive loop stops, and written on the line that says the link dropped. Without it that line can only name an exception class |
+
+`stats()` (counters, polled by the console) is also written into the line that
+says a link dropped, zeros left out — so a counter worth reading after the fact
+belongs there.
+
 ---
 
 ## Integrating with MeshNode

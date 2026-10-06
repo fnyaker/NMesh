@@ -18,8 +18,9 @@ from __future__ import annotations
 from ...node import MESSAGE_NAMES
 from ...trace import MAX_EVENTS, MAX_SECONDS
 from ... import logbook
+from ..frame import MAX_REPLY
 from ..params import param
-from ..plane import operation
+from ..plane import Origin, operation
 
 _READ = 5.0             # the trace is in this process; nothing to wait for
 _EVENT_PAGE = 400       # events one status read may carry
@@ -45,7 +46,7 @@ class TraceModule:
                          limit=int(MAX_EVENTS))],
                   changes=True, remote=True, timeout=_READ),
         operation("export", "Everything held, as one document",
-                  remote=True, timeout=_READ),
+                  remote=True, timeout=_READ, wants_origin=True),
     )
 
     def __init__(self, context) -> None:
@@ -103,5 +104,11 @@ class TraceModule:
         trace.clear()
         return trace.status()
 
-    def op_export(self) -> dict:
-        return self._trace.export()
+    def op_export(self, origin: str = Origin.LOCAL) -> dict:
+        """Everything, to a page on this machine. To a console driving us from
+        elsewhere, the newest events one reply can carry — a reply over that
+        channel is capped (`frame.MAX_REPLY`), and an export that did not fit
+        would arrive as nothing at all. What was left out is counted."""
+        if origin == Origin.LOCAL:
+            return self._trace.export()
+        return self._trace.export(budget=MAX_REPLY * 7 // 8)

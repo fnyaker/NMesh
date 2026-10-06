@@ -643,6 +643,28 @@ _MAX_DEFERRED_ROUTES      = 64
 # Cap on waiting for one peer's cancelled receive task to actually exit. Never
 # unbounded: shutdown must always finish (see _Peer.stop).
 _PEER_STOP_TIMEOUT        = 2.0
+# -- saying what happened to a link (the log, see Docs/Architecture/logging.md)
+# A handler that holds a receive loop this long is written down. The loop reads
+# nothing while it waits, so every probe on that link goes unanswered for that
+# long — and on the far end that is indistinguishable from loss.
+_SLOW_HANDLER             = 1.0
+# How long the keepalive loop waits for one probe to be queued. Probes are sent
+# one link after another, so a send that waits is a wait every other link pays
+# too: one full queue used to stop every probe on every link for ten seconds.
+# A probe that cannot be queued in a second is a probe the link could not carry,
+# and it is charged as one (it expires as lost).
+_KA_SEND_WAIT             = 1.0
+# The event loop is the node: when it is late, everything is late. Measured as
+# how much later than asked the keepalive loop wakes — a timer that already
+# runs, so measuring costs no wake-up of its own.
+_LOOP_LAG_WARN            = 0.25
+# A line that could be written once per packet is written once per this, per
+# key, with the count of what was folded into it. Bounded in keys.
+_LOG_THROTTLE             = 10.0
+_LOG_THROTTLE_TRACKED     = 256
+# What one link's medium may write into the log per minute. Our own transports
+# throttle themselves; one written by somebody else is not trusted to.
+_LINK_NOTES_PER_MINUTE    = 30
 # A post-quantum certificate is ~7 KB (ML-DSA-65 subject + issuer key +
 # signature), so a chain to a root is ~15 KB. Packing Kademlia's k=20 entries
 # into one FOUND_NODE therefore blows the 60 000-byte packet cap: Packet.create
@@ -876,12 +898,17 @@ __all__ = [
     "_KA_PROBE_DEADLINE",
     "_KA_REQUEST_MAX",
     "_KA_REQUEST_WINDOW",
+    "_KA_SEND_WAIT",
     "_KA_TICK_FLOOR",
     "_KA_TOLD_TTL",
     "_KEY_SHARE_MAX",
     "_KEY_SHARE_WINDOW",
     "_LATENCY_HALF_MS",
     "_LINK_KEEPALIVE_INTERVAL",
+    "_LINK_NOTES_PER_MINUTE",
+    "_LOG_THROTTLE",
+    "_LOG_THROTTLE_TRACKED",
+    "_LOOP_LAG_WARN",
     "_LOSS_BURST_COOLDOWN",
     "_LOSS_BURST_NODES",
     "_LOSS_BURST_TRACKED",
@@ -1037,6 +1064,7 @@ __all__ = [
     "_SEEK_TTL_PREAUTH",
     "_SHORT_SEEK_GAP",
     "_SHORT_SEEK_LEN",
+    "_SLOW_HANDLER",
     "_SPEED_CHUNK",
     "_SPEED_IDLE_PROBES",
     "_SPEED_INFLIGHT",

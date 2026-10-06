@@ -8,6 +8,7 @@ node carrying frames), and ``_PunchState``, one hole-punch in flight.
 """
 
 import asyncio
+import itertools
 import os
 import time
 
@@ -26,10 +27,54 @@ from ..transport import BaseTransport
 # Peer state
 # ---------------------------------------------------------------------------
 
+# Numbers the links this process opens, so a line in the log and a line in a
+# trace can be said to be about the same link. Process-local and meaningless
+# anywhere else, which is the point: it names a link without naming anybody.
+_LINK_SERIAL = itertools.count(1)
+
+
+def _describe_end(exc: BaseException) -> str:
+    """A receive loop's last exception, in words, for a medium that gave none."""
+    if isinstance(exc, asyncio.IncompleteReadError):
+        return "the peer closed the connection"
+    if isinstance(exc, EOFError):
+        return "the peer closed the connection"
+    text = " ".join(str(exc).split())[:96]
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 class _Peer:
 
     def __init__(self, transport: BaseTransport, is_client_side: bool = False) -> None:
         self.transport = transport
+        # Which link this is, for a person reading a log beside a trace:
+        # ``L17/udp``. Fixed at birth — a label that changed would be two links.
+        self.serial: int = next(_LINK_SERIAL)
+        scheme = getattr(type(transport), "SCHEME", None)
+        if isinstance(transport, RelayedTransport):
+            scheme = "relay"
+        self.label: str = f"L{self.serial}/{scheme or 'link'}"
+        # Why the receive loop stopped, in words: the medium's own account
+        # where it gives one (`medium.end_reason`), the exception otherwise.
+        # Set by the loop, read once by whoever writes the line saying the
+        # link dropped. A link closed on purpose says why through its closer.
+        self.end_reason: str = ""
+        # Who to tell that a handler held this loop too long (`_SLOW_HANDLER`).
+        # Set by the node; the link only measures.
+        self.on_slow = None
+        # The line saying this link ended has been written. One link, one
+        # line, however many of the paths that end a link it went down.
+        self.end_logged: bool = False
+        # What its medium may still write into the log this minute
+        # (`_LINK_NOTES_PER_MINUTE`): ``[minute started, lines written]``.
+        self.notes_budget: list = [0.0, 0]
+        # When probes on this link last could not be queued, so a link that is
+        # busy for a minute is one line and not six hundred.
+        self.busy_noted_at: float = 0.0
+        # Whether the sweep last judged this link failing (`_link_is_failing`),
+        # so the log says when it crossed and when it came back, not every
+        # twenty seconds in between.
+        self.failing: bool = False
         self.session: SessionKey | None = None
         self.pending_kem_secret: bytes | None = None
         self.join_code: str | None = None
@@ -190,8 +235,14 @@ class _Peer:
                 packet = await self.transport.receive()
             except asyncio.CancelledError:
                 raise
-            except (asyncio.IncompleteReadError, ConnectionError, OSError, EOFError):
-                return  # link is dead — exit so the node reaps this peer
+            except (asyncio.IncompleteReadError, ConnectionError, OSError,
+                    EOFError) as exc:
+                # The link is dead — exit so the node reaps this peer, and say
+                # how it died: the line that reports a dropped link is the one
+                # an operator reads first, and it used to carry no reason.
+                self.end_reason = (medium.end_reason(self.transport)
+                                   or _describe_end(exc))
+                return
             except Exception:
                 # Malformed frame on a still-live link (e.g. bad length prefix,
                 # oversized payload). One bad packet must never kill the link:
@@ -199,6 +250,7 @@ class _Peer:
                 # is treated as hostile and the peer is cut.
                 self._charge_identity()
                 if self.note_abuse():
+                    self.end_reason = "cut: too many frames that would not decode"
                     return
                 continue
             # …and what came back has to *be* a packet. Everything below counts
@@ -211,6 +263,7 @@ class _Peer:
             if packet is None:
                 self._charge_identity()
                 if self.note_abuse():
+                    self.end_reason = "cut: the medium handed back no packet"
                     return
                 continue
             nbytes = _HEADER_BYTES + len(packet.payload)
@@ -218,13 +271,21 @@ class _Peer:
             if self.total is not None:
                 self.total.on_in(nbytes)
             if self.trace is not None:
-                self.trace.record("in", packet, nbytes, self.authenticated_id)
+                self.trace.record("in", packet, nbytes, self.authenticated_id,
+                                  self.label)
+            started = time.monotonic()
             try:
                 await on_packet(self, packet)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 pass  # malformed payload or handler bug — drop, loop continues
+            held = time.monotonic() - started
+            if held >= _SLOW_HANDLER and self.on_slow is not None:
+                try:
+                    self.on_slow(self, packet.type, held)
+                except Exception:            # noqa: BLE001 — never the reason
+                    pass
 
     def _charge_identity(self) -> None:
         """Tell the node a frame would not decode, so the *identity* is charged.
@@ -282,7 +343,8 @@ class _Peer:
         if self.total is not None:
             self.total.on_out(nbytes)
         if self.trace is not None:
-            self.trace.record("out", packet, nbytes, self.authenticated_id)
+            self.trace.record("out", packet, nbytes, self.authenticated_id,
+                              self.label)
 
     async def stop(self) -> None:
         self.on_dead = None  # intentional shutdown — do not trigger reaping

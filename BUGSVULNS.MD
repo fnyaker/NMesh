@@ -28,10 +28,17 @@
 
 ## Where this stands
 
-68 findings: 48 security, 20 performance. All 68 are addressed. Sixty-three are
-closed outright; five are recorded below as *partly* closed, and it is worth
-being precise about why, because "mitigated" here does not mean "we ran out of
-time" — in each case the remainder is a design decision, not a patch.
+73 findings: 53 security, 20 performance. The first 68 are addressed.
+Sixty-three are closed outright; five are recorded below as *partly* closed,
+and it is worth being precise about why, because "mitigated" here does not mean
+"we ran out of time" — in each case the remainder is a design decision, not a
+patch.
+
+Findings **49** to **53** came from a field report — links "hyper unstable,
+above all when loaded" between a home node and two servers over the internet —
+and a trace that showed a link answering nothing and ten seconds with no probe
+to anybody. **49**, **50** and **51** are fixed. **52** and **53** are **open**,
+and recorded with what it would take.
 
 Findings **46** to **48** were not found by reading the code. They came out of
 one CI failure, after the audit was written, when the base image's Python moved
@@ -129,6 +136,11 @@ like the regression.
 | 46 | **high** | `DataConnector.stop()` deadlocks on Python 3.12+ while an app is attached |
 | 47 | **medium** | liboqs contexts are never freed, and one of them is per handshake |
 | 48 | **low** | Two test classes shared a name, and five permission tests stopped running |
+| 51 | **high** | A peer that stops reading its TCP socket froze the keepalive loop — and every sweep in it |
+| 49 | **medium** | A UDP FIN refreshed the link it closed, and the closed link's own frames reopened it as a zombie |
+| 50 | **medium** | A full send queue was read as a dead link, and the link torn down |
+| 52 | **medium** | *Open* — receive loops still await their sends: a busy next hop holds an ingress link |
+| 53 | **low** | *Open* — every new link costs a ~360 kB catch-up burst each way |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -2546,6 +2558,154 @@ ran, and neither the count nor the colour tells you that.
 knowing that nothing in the tooling will catch the next one: pytest has no
 duplicate-name check, and the count only went *up* over the commit that broke
 it, because the new class carried more tests than the one it hid.
+
+---
+
+## 49 — medium — A UDP FIN refreshed the link it closed
+
+> **Status — fixed.** A FIN inside the peer's sequence window ends the link
+> (`_ReliableLink.accepts_fin`, `UDPTransport._peer_finished`); `close()` sends
+> it twice; `UDPServer` remembers what it closed for `_CLOSED_MEMORY` and
+> answers that link's frames with a FIN, rate-limited per address
+> (`_answer_closed`). A FIN never opens a connection. Tests:
+> `tests/test_link_stability.py::TestAFinEndsTheLink`,
+> `…::TestAClosedLinkIsNotReopenedByItsOwnFrames`.
+
+**Where** — `src/transports/udp.py`, `_process_frame` / `process_incoming`, and
+`UDPServer._dispatch_datagram`.
+
+**Reach** — any close of a UDP link: a rescue's loser, a redundant twin, a
+tarpit let go, an address-steering loser, a node stopping.
+
+**What happens** — `process_incoming` recorded an arrival for every frame that
+was not data, FIN included, so a FIN *renewed* the link's liveness. The far end,
+having closed, then received our next frames from an address with no transport
+and took them for a **new connection**: a fresh transport adopted our cursor,
+acknowledged our data and kept us alive with keepalives, while its node dropped
+every packet as unauthenticated.
+
+**Impact** — a link that carried nothing on both ends for up to
+`_DEAD_LINK_SILENCE` (80 s) after every UDP close, with routing still choosing
+it until its loss window filled. No adversary needed. A spoofer can now close a
+link with an in-window FIN — the same 32-bit guess any data frame already costs
+(finding **13**), and no cheaper.
+
+**Fixing it without breaking something** — the window check is what keeps a FIN
+from being a free kill switch; a FIN before the cursor is known must be ignored,
+not adopted. A genuinely new dial from a remembered address starts from a fresh
+random cursor and must still be accepted.
+
+---
+
+## 50 — medium — A full send queue was read as a dead link
+
+> **Status — fixed.** Media raise `LinkBusy` (`src/transports/contract.py`)
+> when a packet could not be queued in time, and it is not a
+> `ConnectionError`. `_send_to_candidates` moves to the next candidate and
+> keeps the link. Tests: `…::TestFullIsNotGone`.
+
+**Where** — `src/transports/udp.py`, `UDPTransport.send`;
+`src/node.py`, `_send_to_candidates` → `_drop_failed_peer`.
+
+**Reach** — any routed or app packet sent down a UDP link whose queue stays full
+for `_SEND_WAIT` (10 s): a congested path, a slow receiver, a speed test beside
+real traffic.
+
+**What happens** — `send` raised `ConnectionError("udp send queue full")`,
+which every caller reads as "the link died", and `_drop_failed_peer` tore the
+link down. Finding **16** had already made the teardown cheap; it had not asked
+whether it was right.
+
+**Impact** — instability that grows with load: a congested link was dropped,
+reconnected, sent the full catch-up burst (**53**) and congested again. A peer
+that simply stops acknowledging could get its own link cut by our traffic to it
+— harmless to us, but a link the network loses for nothing.
+
+---
+
+## 51 — high — A peer that stops reading its TCP socket froze the keepalive loop
+
+> **Status — fixed.** `TCPTransport.send` waits for room before it writes,
+> bounded by `_SEND_WAIT`, and raises `LinkBusy`; the keepalive loop bounds
+> each probe at `_KA_SEND_WAIT` (1 s). Tests: `…::TestATcpSendIsBounded`,
+> `…::TestAProbeIsBounded`.
+
+**Where** — `src/transports/tcp.py`, `send` (`await writer.drain()`, no bound);
+`src/node.py`, `_link_keepalive_loop` (`await self.ping(peer)`, in series).
+
+**Reach** — any authenticated TCP peer: authenticate, then stop reading. The
+kernel buffers fill, `drain()` never returns, and the next probe the keepalive
+loop sends to that peer never completes.
+
+**What happens** — the loop probes its links one after another and awaited each
+send. It also runs, on the same task, `_reap_silent_links`,
+`_reap_expired_tarpits`, `_update_bundles`, `_note_failing_links` and
+`_behaviour_sweep`. All of them stopped.
+
+**Impact** — one peer, at no cost, switches off this node's abuse detection,
+its tarpit expiry, its dead-link reaping and its probes to every other link,
+for as long as it keeps the socket open. The same shape with UDP cost ten
+seconds per full queue, and that is what the field trace showed: ten seconds in
+which no `PING` left for anybody.
+
+**Fixing it without breaking something** — wait for room *before* writing, so a
+refusal or a cancellation can never leave half a frame in the stream; await
+nothing below the high-water mark, which is the path of every packet.
+
+---
+
+## 52 — medium — Receive loops still await their sends (open)
+
+> **Status — open.** Recorded, not fixed. The link is no longer dropped for it
+> (**50**), and a stall of a second or more is now written to the log
+> (`a handler held the receive loop`, `_SLOW_HANDLER`), so it can be seen.
+
+**Where** — `src/node.py`: `_handle_ping` (the `PONG`), `_forward_packet` →
+`_send_to_candidates`, `_handle_find_node`, `_handle_speed_probe`, and every
+handler that answers inline.
+
+**Reach** — a packet arriving on link A whose handling sends on link B, while B
+is full.
+
+**What happens** — the handler awaits the send, up to `_SEND_WAIT`, and link A's
+receive loop reads nothing meanwhile — its own probes go unanswered, so to A's
+far end this is loss.
+
+**Reproduce** — two links, B's medium blocking on `send`; inject on A a packet
+routed through B followed by a `PING`; the `PONG` leaves `_SEND_WAIT` later.
+
+**Fixing it without breaking something** — a forward could be spawned
+(`_spawn_bounded`) or sent with a short bound, but spawning loses the ordering a
+link gives its packets and a short bound drops traffic a slower path would have
+carried. A per-link outbound queue with its own task is the shape that keeps
+both, and it is a design change to every send path.
+
+---
+
+## 53 — low — Every new link costs a ~360 kB catch-up burst each way (open)
+
+> **Status — open.** Recorded, not fixed.
+
+**Where** — `src/node.py`, what a link is owed when it authenticates (the
+capability record and the catch-up syncs: release, pseudo and package
+announces).
+
+**What happens** — the field trace shows each new link sending 26
+`RELEASE_ANNOUNCE` (~10.8 kB each), 8 `PSEUDO_ANNOUNCE` (~5.4 kB) and 5
+`PKG_ANNOUNCE` (5.4–10.7 kB) in the first 50 ms, both ways: roughly 360 kB per
+direction before the link has carried anything it was opened for.
+
+**Impact** — on a link that flaps, the reconnect cost dominates what the link
+carries, and the burst arrives exactly when the link is being judged: a fresh
+UDP link starts with a 64 kB window. Receivers rate-limit releases at 32 per
+10 s, so a node holding more than that drops the rest and the sender re-sends
+them next time.
+
+**Fixing it without breaking something** — announce a digest (ids and versions)
+and let the far end pull what it lacks, instead of pushing everything. That is a
+new message on a plane every build speaks, so it needs the capability
+negotiation (`features.py`); a node that has not announced it must keep getting
+the push.
 
 
 # Verified by running it

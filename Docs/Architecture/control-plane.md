@@ -142,7 +142,7 @@ class TraceModule:
 | `govern` | may be driven from one that also holds the fleet's `govern` capability. Not `remote` plus something — `remote` already includes every console that holds `govern`, so declaring both is a contradiction and is refused. |
 | `background` | run as a **job**: `jobs.start` hands back a ticket rather than the answer. Required of anything that travels and declares more than `REMOTE_BUDGET`, refused on anything that fits it. |
 | `timeout` | how long this may take. Also the ceiling the module waits with. |
-| `wants_origin` | the answer depends on who is asking (`control.catalogue`, and every `jobs` operation). Injected; a caller cannot forge it, and declaring a parameter of that name is refused. |
+| `wants_origin` | the answer depends on who is asking (`control.catalogue`, every `jobs` operation, and `trace.export` — everything to a page here, the newest that fit one capped reply to a console elsewhere). Injected; a caller cannot forge it, and declaring a parameter of that name is refused. |
 
 Reject by default, three times over:
 

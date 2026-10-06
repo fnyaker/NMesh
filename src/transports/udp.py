@@ -35,7 +35,7 @@ import struct
 import time
 from collections import deque
 
-from .contract import BaseTransport, BaseServer, option
+from .contract import BaseTransport, BaseServer, LinkBusy, option
 from ..packet import HEADER_SIZE, Packet
 from ..ip_utils import split_host_port
 
@@ -71,9 +71,11 @@ _MAX_REORDER = 256          # max out-of-order frames buffered
 _MAX_REORDER_BYTES = 2 * 1024 * 1024    # out-of-order frames held, in bytes
 _MAX_DECODED_BYTES = 2 * 1024 * 1024    # decoded packets waiting for receive()
 _MAX_SEND_QUEUE = 128       # max packets waiting to be framed and sent
-# How long send() waits for room in that queue before calling the link stuck.
+# How long send() waits for room in that queue before refusing the packet.
 # Waiting, not failing: a full queue is a link that is busy, and refusing the
-# packet outright turned every burst into an error at the caller.
+# packet outright turned every burst into an error at the caller. What it
+# raises then is `LinkBusy`, never `ConnectionError`: the link is full, not gone,
+# and the caller that read "gone" tore down a working link under load.
 _SEND_WAIT = 10.0
 _RTO_MIN = 0.050            # floor of the retransmit timeout, seconds
 _RTO_INITIAL = 0.200        # before the first round trip has been measured
@@ -105,6 +107,18 @@ _RECV_TIMEOUT = 120.0       # overall receive inactivity timeout
 # A waiting receive() is woken by the arrival event; this only bounds how long
 # it sits there before re-reading `_closed`, which nothing signals.
 _RECV_WAKE = 0.5
+# A link closed here is remembered for this long, so that frames still arriving
+# from a far end that missed our FIN are answered with one rather than taken
+# for a new connection (see `UDPServer._answer_closed`). Bounded in entries, and
+# the answer is rate-limited per address: it is a datagram sent in reply to a
+# datagram, and must never be a way to make this node send more than it gets.
+_CLOSED_MEMORY = 30.0
+_CLOSED_TRACKED = 256
+_FIN_REPLY_GAP = 1.0
+# How often one link may report a retransmit timeout or a refused send. Under
+# real loss these happen many times a second, and a log that says so many times
+# a second says nothing the count beside it does not.
+_NOTE_GAP = 5.0
 
 
 def _host_port(address: str) -> tuple[str, int]:
@@ -214,6 +228,9 @@ class _ReliableLink:
         # Observability: how much work the reliability layer had to redo.
         self.retransmits: int = 0
         self.reordered: int = 0
+        # Times the oldest frame ran out its timer — the event that drops the
+        # window to its floor, and the one that says a path stopped carrying.
+        self.timeouts: int = 0
 
     # -- send side --------------------------------------------------------
 
@@ -414,6 +431,7 @@ class _ReliableLink:
         if not expired:
             return []
         if expired[0][0] == oldest:
+            self.timeouts += 1
             self._loss(oldest, timeout=True)
             self._backoff = min(self._backoff * 2, 64)
             self._rto = min(_RTO_MAX, self._rto_base * self._backoff)
@@ -498,6 +516,23 @@ class _ReliableLink:
         # drop, and re-ACK the current window so a lossy sender can move on.
         self._schedule_ack()
         return []
+
+    def accepts_fin(self, seq: int) -> bool:
+        """Is a FIN carrying ``seq`` one the peer could have sent?
+
+        The frame header is not authenticated (`BUGSVULNS.MD` finding 13), so
+        a FIN is believed on the same evidence a data frame is: it must sit in
+        the window the peer's own random cursor defines. A sender's FIN carries
+        its next sequence, which is our delivery cursor plus whatever it still
+        has in flight — never more than `_MAX_UNACKED` ahead. Somebody spoofing
+        the peer's address without seeing its traffic is guessing a 32-bit
+        number, which is exactly the protection every data frame already has.
+
+        Never before the first frame: a link whose cursor we have not learned
+        has no window to be inside of."""
+        if not self._recv_started:
+            return False
+        return ((seq - self._recv_next) & 0xFFFFFFFF) < _MAX_UNACKED
 
     def note_arrival(self) -> None:
         """A frame arrived that will not be processed (the reader is behind).
@@ -610,6 +645,41 @@ class UDPTransport(BaseTransport):
         self._on_datagram = None
         # Delivered payloads that were not decodable packets. See _process_frame.
         self.undecodable: int = 0
+        # Why this link ended, said by whatever ended it. A receive loop that
+        # ends on a bare "closed" is a link dropped for a reason nobody can
+        # read afterwards — and "the peer said goodbye", "the peer went silent
+        # for 75 s" and "we closed it" are three different investigations.
+        self._end_reason: str = ""
+        # When each kind of trouble was last reported, and how many happened
+        # since. See `_NOTE_GAP`.
+        self._noted_at: dict = {}
+        self._noted_timeouts: int = 0
+        self._busy_since_note: int = 0
+
+    def _note_throttled(self, kind: str, message: str, level: str,
+                        **fields) -> bool:
+        """Report at most once per `_NOTE_GAP` per kind of trouble."""
+        now = time.monotonic()
+        if now - self._noted_at.get(kind, -_NOTE_GAP) < _NOTE_GAP:
+            return False
+        self._noted_at[kind] = now
+        self.note(message, level, **fields)
+        return True
+
+    def _link_figures(self) -> dict:
+        """The numbers that say what state the reliability layer was in."""
+        link = self._link
+        return {
+            "srtt_ms": None if link._srtt is None else round(link._srtt * 1000, 1),
+            "rto_ms": round(link._rto * 1000, 1),
+            "window_kb": round(link._cwnd / 1024),
+            "unacked": len(link._unacked),
+            "queued": link._send_queue.qsize(),
+            "retransmits": link.retransmits,
+        }
+
+    def end_reason(self) -> str:
+        return self._end_reason
 
     def endpoints(self) -> dict:
         local = None
@@ -638,6 +708,7 @@ class UDPTransport(BaseTransport):
             "window kB": round(link._cwnd / 1024),
             "in flight kB": round(link._inflight / 1024),
             "keepalive misses": link._keepalive_misses,
+            "timeouts": link.timeouts,
             "undecodable": self.undecodable,
         }
 
@@ -727,6 +798,17 @@ class UDPTransport(BaseTransport):
         for frame in self._link.process_ack(ack, sack):
             self._send_raw(frame)
 
+        # The far end has closed its side. Believed only inside the window
+        # (`accepts_fin`), and acted on at once: a FIN used to be counted as a
+        # mere arrival — it *refreshed* the liveness it announces the end of —
+        # so the link it closed lived on here as a zombie, its frames answered
+        # by a fresh transport on the far side that drops them unauthenticated,
+        # until our own probes gave up on it a minute and a half later.
+        if flags & FLAG_FIN:
+            if self._link.accepts_fin(seq):
+                self._peer_finished()
+            return
+
         # A reader that has fallen behind refuses the frame *before* it is
         # acknowledged, so the sender keeps it and resends it later — and sees a
         # loss, which is what slows it down. Taking it, acknowledging it and
@@ -775,6 +857,20 @@ class UDPTransport(BaseTransport):
             self._link.clear_ack_pending()
             self._send_raw(self._link.build_ack_only())
 
+    def _peer_finished(self) -> None:
+        """The far end closed this link: end it here too, without answering.
+
+        No FIN back — the far end has already forgotten us, and a reply would
+        only arrive at a socket that no longer has a link for it."""
+        if self._closed:
+            return
+        self._end_reason = "the peer closed the link (FIN)"
+        self._closed = True
+        self._arrived.set()            # a parked receive() must not wait it out
+        if self._server is not None and self._remote is not None:
+            self._server.remove_transport(self._remote)
+        self.note("the peer closed the link", "info", **self._link_figures())
+
     def _send_raw(self, frame: bytes) -> None:
         """Send a raw frame via the datagram socket."""
         if self._sock is None or self._remote is None:
@@ -787,7 +883,7 @@ class UDPTransport(BaseTransport):
     async def send(self, packet: Packet) -> None:
         """Send a packet over the reliable UDP link."""
         if self._closed:
-            raise ConnectionError("udp transport closed")
+            raise ConnectionError(self._end_reason or "udp transport closed")
         if self._sock is None or self._remote is None:
             raise ConnectionError("udp transport not connected")
         if self._link.enqueue(packet):
@@ -796,9 +892,15 @@ class UDPTransport(BaseTransport):
             async with asyncio.timeout(_SEND_WAIT):
                 await self._link._send_queue.put(packet)
         except TimeoutError:
-            raise ConnectionError("udp send queue full") from None
+            self._busy_since_note += 1
+            if self._note_throttled(
+                    "busy", "send refused: the queue stayed full", "warn",
+                    waited_s=_SEND_WAIT, refused=self._busy_since_note,
+                    **self._link_figures()):
+                self._busy_since_note = 0
+            raise LinkBusy("udp send queue full") from None
         if self._closed:
-            raise ConnectionError("udp transport closed")
+            raise ConnectionError(self._end_reason or "udp transport closed")
 
     async def _send_loop(self) -> None:
         """Background task: dequeue packets and send them as reliable frames."""
@@ -836,6 +938,11 @@ class UDPTransport(BaseTransport):
                 break
             for frame in self._link.get_retransmit_frames():
                 self._send_raw(frame)
+            if self._link.timeouts != self._noted_timeouts and self._note_throttled(
+                    "timeout", "retransmit timeout: window dropped to its floor",
+                    "warn", timeouts=self._link.timeouts - self._noted_timeouts,
+                    **self._link_figures()):
+                self._noted_timeouts = self._link.timeouts
 
     async def _keepalive_loop(self) -> None:
         """Background task: send keepalives and detect dead links."""
@@ -845,6 +952,11 @@ class UDPTransport(BaseTransport):
                 break
             self._send_raw(self._link.build_keepalive())
             if not self._link.is_alive():
+                silent = time.monotonic() - self._link._last_recv_time
+                self._end_reason = (f"no frame from the peer for {silent:.0f} s "
+                                    f"(udp keepalive timeout)")
+                self.note("the peer went silent", "warn",
+                          silent_s=round(silent, 1), **self._link_figures())
                 self._closed = True
                 self._arrived.set()    # a parked receive() must not wait it out
                 if self._server is not None and self._remote is not None:
@@ -861,7 +973,7 @@ class UDPTransport(BaseTransport):
                     self._arrived.clear()
                 return packet
             if self._closed:
-                raise ConnectionError("udp transport closed")
+                raise ConnectionError(self._end_reason or "udp transport closed")
             self._arrived.clear()
             if self._decoded or self._closed:
                 continue          # raced with a datagram landing — go round
@@ -911,13 +1023,20 @@ class UDPTransport(BaseTransport):
         if self._closed:
             return
         self._closed = True
+        self._end_reason = self._end_reason or "closed by this node"
         self._arrived.set()        # wake a parked receive() so it can raise
         if self._server is not None and self._remote is not None:
             self._server.remove_transport(self._remote)
-        # Send FIN to signal graceful close
+            self._server.remember_closed(self._remote, self._link)
+        # Send FIN to signal graceful close. Twice: it is one unacknowledged
+        # datagram, and losing it costs the far end a link that answers nothing
+        # for as long as it takes its probes to give up. A third copy is sent
+        # by the server if the far end keeps talking (`_answer_closed`).
         if self._sock is not None and self._remote is not None:
             try:
-                self._send_raw(self._link.build_fin())
+                fin = self._link.build_fin()
+                self._send_raw(fin)
+                self._send_raw(fin)
             except Exception:
                 pass
         # Cancel background tasks
@@ -974,6 +1093,10 @@ class UDPServer(BaseServer):
         super().__init__()
         self._sock: asyncio.DatagramTransport | None = None
         self._transports: dict[tuple[str, int], UDPTransport] = {}
+        # Links this server closed lately: address → (forget at, the next
+        # sequence we would have sent, the cursor we had reached, when we last
+        # answered it). See `_answer_closed`.
+        self._closed_links: dict = {}
         self._closed: bool = False
         # Callback for raw datagrams that are not reliable transport frames
         # (e.g. NAT hole-punch probes). Set by MeshNode.
@@ -1044,6 +1167,8 @@ class UDPServer(BaseServer):
 
         transport = self._transports.get(addr)
         if transport is None or transport._closed:
+            if self._answer_closed(data, addr):
+                return
             # New peer — create a transport and notify
             if self._closed or self.on_new_connection is None:
                 return
@@ -1059,6 +1184,65 @@ class UDPServer(BaseServer):
             transport._start_tasks()
             asyncio.create_task(self._safe_on_new_connection(transport))
         transport.feed_datagram(data, addr)
+
+    def remember_closed(self, addr: tuple[str, int], link: _ReliableLink) -> None:
+        """Keep what is needed to tell a far end, later, that this link is gone.
+
+        Bounded in time and in entries; the oldest goes first."""
+        now = time.monotonic()
+        for key in [key for key, entry in self._closed_links.items()
+                    if entry[0] <= now]:
+            del self._closed_links[key]
+        while len(self._closed_links) >= _CLOSED_TRACKED:
+            del self._closed_links[next(iter(self._closed_links))]
+        self._closed_links[addr] = (now + _CLOSED_MEMORY, link._send_seq,
+                                    (link._recv_next - 1) & 0xFFFFFFFF,
+                                    link._recv_next, -_FIN_REPLY_GAP)
+
+    def _answer_closed(self, data: bytes, addr: tuple[str, int]) -> bool:
+        """A frame for a link we closed: answer it with a FIN, and say whether
+        it was one.
+
+        Without this, the frames of a far end that missed our FIN were taken
+        for a **new connection**: a fresh transport, adopting their cursor,
+        acknowledging their data and keeping their link alive with its
+        keepalives — while the node dropped every packet on it as
+        unauthenticated. Both ends then held a link that carried nothing.
+
+        Which frames belong to the old link is read off their sequence: the far
+        end continues from where we stopped receiving, and a genuinely new dial
+        starts from a fresh random cursor, so it is taken as new as before. A
+        FIN is never a new connection, whoever sends it."""
+        if len(data) < len(_MAGIC) + _FRAME_SIZE:
+            return False
+        try:
+            seq, _ack, _sack, flags, _length = _FRAME.unpack_from(data, len(_MAGIC))
+        except struct.error:
+            return False
+        entry = self._closed_links.get(addr)
+        now = time.monotonic()
+        if entry is not None and entry[0] <= now:
+            del self._closed_links[addr]
+            entry = None
+        if entry is None:
+            return bool(flags & FLAG_FIN)
+        until, send_seq, ack, recv_next, answered_at = entry
+        # Either side of the cursor: a far end that never saw our last ACKs
+        # resends frames we had already delivered.
+        window = _MAX_UNACKED + _MAX_REORDER
+        if (((seq - recv_next) & 0xFFFFFFFF) >= window
+                and ((recv_next - seq) & 0xFFFFFFFF) > window):
+            del self._closed_links[addr]      # a new dial from the same port
+            return bool(flags & FLAG_FIN)
+        if not flags & FLAG_FIN and now - answered_at >= _FIN_REPLY_GAP:
+            self._closed_links[addr] = (until, send_seq, ack, recv_next, now)
+            fin = _MAGIC + _FRAME.pack(send_seq, ack, 0, FLAG_FIN, 0)
+            try:
+                if self._sock is not None:
+                    self._sock.sendto(fin, addr)
+            except (OSError, ConnectionError):
+                pass
+        return True
 
     async def _safe_on_new_connection(self, transport: UDPTransport) -> None:
         try:

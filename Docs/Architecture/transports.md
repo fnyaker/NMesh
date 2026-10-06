@@ -71,9 +71,9 @@ applies first and writes afterwards: a value the transport refuses never reaches
 the file, or the next startup would refuse it in turn with nobody at the
 keyboard to read why.
 
-Current settings: TCP (connect timeout, read timeout, `TCP_NODELAY`, address
-families, source address), UDP (keepalive interval and timeout, reorder buffer
-depth), spool (poll interval).
+Current settings: TCP (connect timeout, read timeout, `TCP_NODELAY`, unsent
+limit, address families, source address), UDP (keepalive interval and timeout,
+reorder buffer depth), spool (poll interval).
 
 ## Observing itself: `endpoints()` and `stats()`
 
@@ -97,6 +97,21 @@ def stats(self) -> dict:          # {"retransmits": 12, "rto ms": 50.0, …}
 Two rules, because this is *polled*: the values are JSON-safe scalars, and
 reading them never blocks. The core protects itself anyway, and where it does
 that is worth knowing.
+
+Two more hooks say what happened rather than what is, and both exist because
+the line in the node's log that said a link dropped could only ever name an
+exception class:
+
+- `note(message, level, **fields)` — called *by* the medium, as it happens: a
+  retransmit timeout, a peer gone silent, a send refused for lack of room. The
+  node wires it (`BaseTransport.on_event`, set in `_new_peer`) to its log under
+  the link's name, **capped at `_LINK_NOTES_PER_MINUTE` per link** — a medium is
+  not trusted to be brief. Our own throttle themselves further (`_NOTE_GAP`).
+- `end_reason()` — once the link has ended, why, in the medium's words. Read
+  through `medium.end_reason` when the receive loop stops.
+
+And `stats()` is written into that same line, zeros left out, so the counters
+an operator would have wanted to see at the moment of the drop are there.
 
 ## Everything the core asks a medium goes through `src/transports/medium.py`
 
@@ -562,7 +577,27 @@ over it.
   `asyncio.timeout`, never `wait_for` (cancellation, see `gotchas.md` §3b).
 - `_READ_TIMEOUT = 60 s`: a `receive()` with no data for 60 s raises → the link
   is treated as dead and reaped. **An idle link therefore dies without a
-  keepalive** (see §keepalive).
+  keepalive** (see §keepalive). The link says so (`end_reason`: "nothing
+  received for 60 s"), as it says "the peer closed the connection" on EOF and
+  names the error on a reset.
+- **A send is bounded** (`_SEND_WAIT`, 10 s). It waits for room *before* it
+  writes — only when the buffer is past asyncio's high-water mark, so the path
+  of every packet awaits nothing — and raises `LinkBusy` if none comes. There
+  was no bound at all: a peer that stopped reading held every coroutine writing
+  to it, the keepalive loop probing every other link included. Room first, then
+  the write, so a refused packet never touched the stream and a frame can never
+  be half-written.
+- **The kernel holds little unsent data** (`unsent_limit`, 128 kB,
+  `TCP_NOTSENT_LOWAT`). Left alone Linux holds up to `tcp_wmem`'s ceiling,
+  4 MB, and a probe queued behind that waits four seconds on a 1 MB/s uplink —
+  past the probe deadline, so a link that lost nothing reads as losing, gets
+  benched, and gets "rescued" by a new link that drops the transfer it was
+  carrying. Bounded, the backlog waits in the node's own buffer, where `send`
+  sees it and pushes back. Best effort; zero leaves the kernel's limit.
+- `stats()` adds the kernel's own view on Linux (`TCP_INFO`, `TIOCOUTQ`): its
+  round-trip estimate, retransmissions, lost segments, window and queue —
+  retransmissions climbing on a link whose probes look fine is a lossy path,
+  and nothing above the socket can see it otherwise.
 - **`wait_closed_bounded`** (`ip_utils.py`, shared with the data connector):
   Python 3.12 changed `Server.wait_closed()` — it now blocks until **every
   accepted client connection** is closed, not only the listening socket.
@@ -594,7 +629,11 @@ UDP is connectionless and unreliable → a **reliability layer**:
   - **never a frame untracked**: the send loop waits for room
     (`can_send`) below both the window and `_MAX_UNACKED`, woken by the ACK that
     frees it. `send()` waits up to `_SEND_WAIT` for room in the queue instead of
-    refusing the packet.
+    refusing the packet — and when it does refuse, it raises **`LinkBusy`, not
+    `ConnectionError`**. It used to raise the second, and `_send_to_candidates`
+    tore the link down for it: under load, which is when a queue is full, a
+    congested link became a dropped link, a reconnect, a catch-up burst of every
+    announce the node holds, and a congested link again.
 - **A reader that is behind refuses a frame before acknowledging it.** The
   decode queue used to accept, acknowledge, then drop past its bound — a packet
   lost on a link that promises not to, invisible to both ends. Now the sender
@@ -634,6 +673,32 @@ UDP is connectionless and unreliable → a **reliability layer**:
 - Link death: `_KEEPALIVE_TIMEOUT = 75 s` (3 × the 25 s interval, and above the
   20 s mesh PING cadence) — below that, a healthy but silent punched link was
   killed when the phases lined up (route flapping).
+- **A FIN ends the link** — on the side that receives it, at once
+  (`_peer_finished`). It used to be counted as an *arrival*, like a keepalive:
+  it refreshed the liveness it announced the end of. The side that missed a
+  close then held a zombie, and the far end made it worse — our frames, from an
+  address whose transport it had just closed, opened a **new** one there, which
+  acknowledged them and kept them alive with its keepalives while the node
+  dropped every packet on it as unauthenticated. Both ends held a link that
+  carried nothing, until our probes gave up a minute and a half later. Three
+  pieces close it:
+  - a FIN is believed only **inside the window** (`accepts_fin`): its sequence
+    is the sender's next, so it sits at most `_MAX_UNACKED` ahead of our
+    cursor. Somebody spoofing the peer's address blind is guessing the same
+    32-bit number a data frame needs (finding 13 in `BUGSVULNS.MD`) — and a
+    FIN before any frame, or outside the window, earns not even liveness;
+  - `close()` sends it **twice**: it is one unacknowledged datagram;
+  - the server **remembers what it closed** (`remember_closed`, `_CLOSED_MEMORY`
+    30 s, `_CLOSED_TRACKED` entries) and answers a frame from that link with a
+    FIN the far end will believe, at most once a second per address
+    (`_answer_closed`) — never a new connection. A frame is from the old link
+    when its sequence sits near the cursor we stopped at; a genuinely new dial
+    from the same port starts from a fresh random cursor and is accepted as
+    before. A FIN from anybody is never a new connection.
+- **It says what happens to it** (`note`): a retransmit timeout that dropped the
+  window to its floor (once per `_NOTE_GAP`, with how many since), a send
+  refused, the peer going silent, the peer closing — each with the round trip,
+  timeout, window and queue at that moment. `stats()` carries `timeouts`.
 - **Every frame is an arrival, not only the ones carrying data.** The death
   verdict above is measured from the last frame `process_incoming` saw, and
   `_process_frame` used to hand it the data frames alone — so a link was judged
@@ -901,6 +966,18 @@ per-link work.
 At rest nothing changed: every link is due in twenty seconds, so the loop
 sleeps twenty seconds. The gotchas' "timers that exist to find nothing" budget
 is unaffected.
+
+**One probe may wait `_KA_SEND_WAIT` (1 s), no longer.** The links are probed
+one after another, so a probe that waits is a wait every link after it pays: a
+UDP link whose queue stayed full stopped every probe on every link for ten
+seconds — seen in a trace as ten seconds with no `PING` to anybody. A probe that
+could not be queued is not withdrawn; it expires as lost, which is what it is.
+The link says so in the log, once a minute at most.
+
+The same sleep measures the **event loop's lag**: how much later than asked it
+woke. Past `_LOOP_LAG_WARN` (250 ms) that is logged — every link on the node
+waited that long too, and the far ends read it as loss. A timer that already
+runs, so measuring costs no wake-up.
 
 ### A probe count stopped being a duration
 
