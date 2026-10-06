@@ -29,7 +29,8 @@ import pytest
 
 from src import features
 from src.node import (MeshNode, _Peer, SPEED_PROBE, SPEED_ECHO, _SPEED_CHUNK,
-                      _SPEED_IDLE_PROBES, _SPEED_INFLIGHT, _SPEED_MAX_BYTES,
+                      _SPEED_IDLE_PROBES, _SPEED_INFLIGHT, _SPEED_INFLIGHT_MAX,
+                      _SPEED_MAX_BYTES,
                       _SPEED_MAX_SECONDS, _SPEED_MAX_PER_WINDOW,
                       _SPEED_PROBE_TIMEOUT, _QID_LEN)
 from src.node_id import NodeID
@@ -343,4 +344,95 @@ class TestTheMeasurementItself:
         run it again, or the second test of a minute reads as total loss."""
         per_test = _SPEED_IDLE_PROBES + _SPEED_MAX_BYTES // _SPEED_CHUNK
         assert per_test * 2 <= _SPEED_MAX_PER_WINDOW
-        assert _SPEED_INFLIGHT * _SPEED_CHUNK <= 1024 * 1024
+        assert _SPEED_INFLIGHT_MAX * _SPEED_CHUNK <= 1024 * 1024
+
+
+class _Queueing(_Echoing):
+    """A link whose round trip grows with what is in flight on it — a queue
+    in front of a bottleneck, the way a real full link behaves."""
+
+    def __init__(self, node, *, base=0.01, per=0.004):
+        super().__init__(node, delay=base)
+        self.base, self.per = base, per
+
+    async def send(self, packet):
+        self.delay = self.base + self.per * len(self.tasks)
+        await super().send(packet)
+
+
+class TestTheWindowOpensToWhatTheLinkTakes:
+    """Eight probes in flight read at most eight per round trip: about 1 MB/s
+    at 130 ms, which is how a speed test could never read the 4 MB/s the
+    charter names on any path longer than a room."""
+
+    async def _measure(self, link_type, **kwargs):
+        node = await _node()
+        link = link_type(node, **kwargs)
+        node._peers.append(link)
+        try:
+            return await node.console_speedtest(link.authenticated_id.raw.hex())
+        finally:
+            node._peers.remove(link)
+            await node.stop()
+
+    async def test_a_long_clean_path_is_not_capped_by_the_window(self):
+        answer = await self._measure(_Echoing, delay=0.06)
+        assert answer["ok"] is True, answer
+        [row] = answer["links"]
+        assert row["window"] > _SPEED_INFLIGHT
+        fixed_window_ceiling = _SPEED_INFLIGHT * _SPEED_CHUNK / 0.06
+        assert answer["one_way_bps"] > 1.5 * fixed_window_ceiling
+
+    async def test_it_stops_opening_once_a_queue_builds(self):
+        """Past the point the link is full, more in flight only queues — the
+        round trip under load is what says so."""
+        answer = await self._measure(_Queueing)
+        assert answer["ok"] is True, answer
+        [row] = answer["links"]
+        assert row["window"] < _SPEED_INFLIGHT_MAX
+
+    async def test_it_never_passes_its_ceiling(self):
+        answer = await self._measure(_Echoing, delay=0.03)
+        [row] = answer["links"]
+        assert row["window"] <= _SPEED_INFLIGHT_MAX
+
+
+class TestABundleIsMeasuredAsOne:
+    """A speed test loads one link, so it could not show what multi-link
+    operation adds. Asked to, it loads every direct member of the bundle at
+    once and reports the sum and each link."""
+
+    async def test_every_direct_member_carries_its_share(self):
+        node = await _node()
+        first = _Echoing(node, delay=0.01)
+        second = _Echoing(node, delay=0.02)
+        second.authenticated_id = first.authenticated_id
+        node._peers.extend([first, second])
+        node._speed_members = lambda target: [first, second]
+        try:
+            answer = await node.console_speedtest(
+                first.authenticated_id.raw.hex(), bundle=True)
+        finally:
+            node._peers.clear()
+            await node.stop()
+        assert answer["ok"] is True, answer
+        assert len(answer["links"]) == 2
+        assert all(row["echoed_bytes"] > 0 for row in answer["links"])
+        assert first.seen > 0 and second.seen > 0
+        assert answer["echoed_bytes"] == sum(row["echoed_bytes"]
+                                             for row in answer["links"])
+        assert answer["sent_bytes"] <= (_SPEED_MAX_BYTES
+                                        + 2 * _SPEED_CHUNK * _SPEED_IDLE_PROBES)
+
+    async def test_without_a_bundle_it_says_so(self):
+        node = await _node()
+        link = _Echoing(node)
+        node._peers.append(link)
+        try:
+            answer = await node.console_speedtest(
+                link.authenticated_id.raw.hex(), bundle=True)
+        finally:
+            node._peers.clear()
+            await node.stop()
+        assert answer == {"ok": False,
+                          "error": "no bundle of two direct links to that node"}

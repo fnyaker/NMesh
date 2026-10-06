@@ -87,6 +87,9 @@ class _Peer:
         # (the signature over our own challenge), and that is the one thing that
         # tells the dialler "wrong address" from "nobody answered".
         self.answered_as: NodeID | None = None
+        # The node this link was dialled to reach, when the dialler knew. An
+        # answer from anybody else ends at the handshake, before the link counts.
+        self.expected_id: NodeID | None = None
         # The challenge on this link named our own id. Not proof of anything —
         # nothing has authenticated yet — so it names the dial outcome for an
         # operator and never strikes an address off. See `_handle_challenge`.

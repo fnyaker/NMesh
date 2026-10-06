@@ -624,6 +624,16 @@ UDP is connectionless and unreliable → a **reliability layer**:
     event** — a loss among frames sent before the last reduction is the same
     event — and dropped to its floor on a timeout. What a timeout resends at
     once is bounded by the window too;
+  - **F-RTO** (RFC 5682) on a first timeout: the oldest frame is resent
+    **alone**, and the next two ACKs decide. Two in a row that move the cursor
+    are originals arriving late — the cut to the window is undone
+    (`spurious timeouts` in the link's stats) and those frames, sent once, are
+    timed, so the estimate learns how slow the path has become. A duplicate
+    ACK at either step is a real loss and the rest goes as before. Frames
+    held back by that recovery coming due later neither count as a new timeout
+    nor back the timer off again, and a backed-off timer comes down only on a
+    measurement — never because the window emptied (`gotchas.md`, "A timer
+    that could only learn that the path was fast");
   - **fast retransmit**: a hole with `_DUP_THRESHOLD` selectively acknowledged
     frames above it is resent at once, not after the timer;
   - **SACK bit `i` is sequence `ack + 1 + i`**, on both sides. Bit 0 is the
@@ -679,7 +689,12 @@ UDP is connectionless and unreliable → a **reliability layer**:
   so a parked `receive()` is never left waiting for a link that has gone.
 - Link death: `_KEEPALIVE_TIMEOUT = 75 s` (3 × the 25 s interval, and above the
   20 s mesh PING cadence) — below that, a healthy but silent punched link was
-  killed when the phases lined up (route flapping).
+  killed when the phases lined up (route flapping). Measured on the monotonic
+  clock, which stops while the machine sleeps: a node that slept past
+  `_SLEEP_ENDS_LINKS` ends its links itself on waking (`node._check_slept`).
+- **One mesh packet is one datagram**, up to `_MAX_PAYLOAD` (60 000 bytes), so
+  anything above the path MTU is fragmented by IP, and losing one fragment
+  loses the frame. Open: `BUGSVULNS.MD` 63.
 - **A FIN ends the link** — on the side that receives it, at once
   (`_peer_finished`). It used to be counted as an *arrival*, like a keepalive:
   it refreshed the liveness it announced the end of. The side that missed a
@@ -1018,6 +1033,12 @@ once the link authenticates, beside the capability record:
 | `keepalive_slow_min_ms` | the fastest I want to be probed when nothing is happening | 15 s |
 | `keepalive_slow_max_ms` | the slowest I can be probed before I stop believing the link | 20 s |
 
+A peer's four arriving out of order are sorted (and judged, `well_formed`).
+An operator's through `network.mlo` are **refused** instead, naming the order —
+they used to be swapped without a word. `config.save` still sorts and reports
+what it stored (`adjusted`), and the start-up path sorts and logs it, because a
+node that will not start over a hand-edited file is worse.
+
 Both ends then apply `mlo.accord` to the two declarations and get the same
 answer, so **nothing is exchanged to settle it** and there is no state where one
 end thinks something was agreed and the other does not (the same trick as the
@@ -1345,6 +1366,13 @@ Two rules pick the address (`_mlo_second_address`), and neither is a preference:
   transport.
 - **A medium that declares `mlo`.** Exactly what the link we hold had to prove:
   the second link is probed ten times a second too.
+
+Among the addresses that pass both, one that has **failed since the last
+success** goes behind every one that has not (the failures ride the backoff
+book, bounded at `_MAX_ADDRESSES` per identity); once all have failed it starts
+round again. Always taking the first sent a live node back to one private
+address of a peer's, unreachable from here, at every backoff, and never to the
+peer's other address of the same medium.
 
 And the bounds are the ones every other dial in the node obeys: it dials only
 addresses **already known for that identity** (like the retry loop and the

@@ -129,6 +129,18 @@ for _part in (_messages, _constants, _codecs, _peers):
 del _part, _name
 
 
+def _slept_total() -> float | None:
+    """Seconds this machine has spent asleep since it booted, or None where
+    there is no clock that keeps counting through a sleep.
+
+    Both clocks are read by name: a test that pins ``time.monotonic`` must not
+    look like a machine that slept."""
+    try:
+        return (time.clock_gettime(time.CLOCK_BOOTTIME)
+                - time.clock_gettime(time.CLOCK_MONOTONIC))
+    except (AttributeError, OSError):
+        return None
+
 
 # Field names a medium's note may not use: the line's own.
 _NOTE_RESERVED = frozenset({"message", "source", "level", "topic", "node", "link"})
@@ -544,6 +556,9 @@ class MeshNode:
         # uptime. A node started on a freshly booted machine therefore missed
         # the one thing this mechanism exists to catch.
         self._last_loss_burst: float | None = None
+        # The time this machine had spent asleep when last looked at
+        # (`_check_slept`).
+        self._slept_mark: float | None = _slept_total()
         # Source node id -> (authenticated local first hop it reached us over,
         # observation time). Learned from inbound traffic only, so it records a
         # path that provably carried a packet; no remote relay identities are
@@ -1453,6 +1468,7 @@ class MeshNode:
         for peer in list(self._peers):
             if peer.authenticated_id == nid:
                 existed = True
+                self._log_link_end(peer, "the operator forgot this node")
                 try:
                     await peer.stop()
                 except Exception:
@@ -1542,7 +1558,20 @@ class MeshNode:
             return
         fut.set_result(len(packet.payload))
 
-    async def console_speedtest(self, node_id_hex: str) -> dict:
+    def _speed_members(self, target: NodeID) -> list['_Peer']:
+        """The direct links in the active bundle to ``target``. Routed members
+        are left out: a probe through a neighbour measures the neighbour's
+        links, and the far end refuses one that does not arrive directly."""
+        bundle = self._bundles.get(target)
+        if bundle is None or not bundle.active:
+            return []
+        return [member for member in bundle.keys
+                if not isinstance(member, routed.Path)
+                and member.session is not None
+                and member.authenticated_id == target]
+
+    async def console_speedtest(self, node_id_hex: str,
+                                bundle: bool = False) -> dict:
         """Load the link to one node and say how fast it actually is.
 
         Bounded twice over — by bytes and by seconds, whichever ends first — so
@@ -1554,24 +1583,46 @@ class MeshNode:
         sliding window for the rate and the latency under load. The gap
         between those two latencies is what a queue somewhere on the path
         adds when the link is busy — the one number a "how fast" figure alone
-        hides."""
+        hides.
+
+        The window opens as the link shows it can take more: one probe more
+        per echo, until the round trip under load passes twice the one at rest
+        (a queue is filling: the link is full) or a probe is lost. A window
+        reads at most itself per round trip, so a fixed one is a ceiling on the
+        answer — eight is about 1 MB/s at 130 ms — whatever the link carries.
+
+        ``bundle`` loads every direct member of the node's active bundle at
+        once, each with a window of its own, and reports them together and one
+        by one: what multi-link operation adds is the sum, and no single link
+        can show it."""
         try:
             nid = NodeID(bytes.fromhex(node_id_hex))
         except (ValueError, TypeError):
             return {"ok": False, "error": "bad id"}
         if nid == self._id:
             return {"ok": False, "error": "a node cannot measure itself"}
-        peer = self._link_to(nid)
-        if peer is None or peer.session is None:
-            return {"ok": False, "error": "no direct link to that node"}
-        if not self.peer_announces(peer, features.SPEEDTEST):
+        if bundle:
+            members = self._speed_members(nid)
+            if len(members) < 2:
+                return {"ok": False,
+                        "error": "no bundle of two direct links to that node"}
+        else:
+            peer = self._link_to(nid)
+            if peer is None or peer.session is None:
+                return {"ok": False, "error": "no direct link to that node"}
+            members = [peer]
+        if not self.peer_announces(members[0], features.SPEEDTEST):
             return {"ok": False, "error": "that node does not run speed tests"}
 
         payload = os.urandom(_SPEED_CHUNK - _QID_LEN)
         loop = asyncio.get_running_loop()
         inflight: dict[bytes, tuple] = {}
+        books = [{"link": member, "window": _SPEED_INFLIGHT,
+                  "peak": _SPEED_INFLIGHT, "grow": True, "flying": 0,
+                  "idle": [], "loaded": [], "echoed": 0, "lost": 0}
+                 for member in members]
 
-        async def launch() -> None:
+        async def launch(book: dict) -> None:
             qid = os.urandom(_QID_LEN)
             future: asyncio.Future = loop.create_future()
             while len(self._pending_echo) >= _PENDING_ECHO_MAX:
@@ -1579,19 +1630,35 @@ class MeshNode:
                 if not old.done():
                     old.cancel()
             self._pending_echo[qid] = (nid, future)
-            inflight[qid] = (future, time.monotonic())
-            await peer.send(Packet.create(SPEED_PROBE, self._id.raw,
-                                          nid.raw, qid + payload))
+            inflight[qid] = (future, time.monotonic(), book)
+            book["flying"] += 1
+            await book["link"].send(Packet.create(SPEED_PROBE, self._id.raw,
+                                                  nid.raw, qid + payload))
 
         def settle(qid) -> None:
-            future, _at = inflight.pop(qid)
+            future, _at, book = inflight.pop(qid)
+            book["flying"] -= 1
             self._pending_echo.pop(qid, None)
             if not future.done():
                 future.cancel()
 
+        def landed(book: dict, rtt_ms: float) -> None:
+            book["loaded"].append(rtt_ms)
+            if not book["grow"]:
+                return
+            if book["idle"] and rtt_ms > (2.0 * min(book["idle"])
+                                          + _SPEED_QUEUE_SLACK_MS):
+                book["grow"] = False
+                return
+            book["window"] = min(book["window"] + 1, _SPEED_INFLIGHT_MAX)
+            book["peak"] = max(book["peak"], book["window"])
+
+        def lost_one(book: dict) -> None:
+            book["lost"] += 1
+            book["grow"] = False
+            book["window"] = max(_SPEED_INFLIGHT, book["window"] // 2)
+
         sent = echoed = lost = 0
-        idle: list[float] = []
-        loaded: list[float] = []
         first_echo = last_echo = None
         first_size = 0
         started = time.monotonic()
@@ -1599,21 +1666,24 @@ class MeshNode:
         try:
             # At rest first, one probe at a time: the latency of the link with
             # nothing queued on it, which is what "under load" is compared to.
-            for _ in range(_SPEED_IDLE_PROBES):
-                await launch()
-                sent += _SPEED_CHUNK
-                [(qid, (future, at))] = inflight.items()
-                try:
-                    size = await asyncio.wait_for(
-                        asyncio.shield(future),
-                        min(_SPEED_PROBE_TIMEOUT,
-                            max(0.05, deadline - time.monotonic())))
-                    echoed += int(size)
-                    idle.append((time.monotonic() - at) * 1000.0)
-                except Exception:
-                    lost += 1
-                finally:
-                    settle(qid)
+            for book in books:
+                for _ in range(_SPEED_IDLE_PROBES):
+                    await launch(book)
+                    sent += _SPEED_CHUNK
+                    [(qid, (future, at, _book))] = inflight.items()
+                    try:
+                        size = await asyncio.wait_for(
+                            asyncio.shield(future),
+                            min(_SPEED_PROBE_TIMEOUT,
+                                max(0.05, deadline - time.monotonic())))
+                        echoed += int(size)
+                        book["echoed"] += int(size)
+                        book["idle"].append((time.monotonic() - at) * 1000.0)
+                    except Exception:
+                        lost += 1
+                        book["lost"] += 1
+                    finally:
+                        settle(qid)
             load_started = time.monotonic()
             # Then a sliding window: a probe leaves as each echo lands, so the
             # link is never idle waiting for the slowest of a batch, and a lost
@@ -1628,37 +1698,43 @@ class MeshNode:
                     drain_until = now + min(1.0, _SPEED_PROBE_TIMEOUT)
                 if drain_until is not None and now >= drain_until:
                     break
-                while (drain_until is None and len(inflight) < _SPEED_INFLIGHT
-                       and sent < _SPEED_MAX_BYTES):
-                    await launch()
-                    sent += _SPEED_CHUNK
+                for book in books:
+                    while (drain_until is None and book["flying"] < book["window"]
+                           and sent < _SPEED_MAX_BYTES):
+                        await launch(book)
+                        sent += _SPEED_CHUNK
                 if not inflight:
                     break
                 now = time.monotonic()
                 limit = deadline if drain_until is None else drain_until
                 wait = min(_SPEED_PROBE_TIMEOUT, max(0.01, limit - now))
-                await asyncio.wait([future for future, _ in inflight.values()],
+                await asyncio.wait([future for future, _, _ in inflight.values()],
                                    timeout=wait,
                                    return_when=asyncio.FIRST_COMPLETED)
                 now = time.monotonic()
-                for qid, (future, at) in list(inflight.items()):
+                for qid, (future, at, book) in list(inflight.items()):
                     if future.done() and not future.cancelled():
                         size = int(future.result())
                         echoed += size
-                        loaded.append((now - at) * 1000.0)
+                        book["echoed"] += size
+                        landed(book, (now - at) * 1000.0)
                         if first_echo is None:
                             first_echo, first_size = now, size
                         last_echo = now
                         settle(qid)
                     elif now - at >= _SPEED_PROBE_TIMEOUT or future.done():
                         lost += 1
+                        lost_one(book)
                         settle(qid)
         except Exception:
             return {"ok": False, "error": "the link failed during the test"}
         finally:
             lost += len(inflight)
             for qid in list(inflight):
+                inflight[qid][2]["lost"] += 1
                 settle(qid)
+        idle = [ms for book in books for ms in book["idle"]]
+        loaded = [ms for book in books for ms in book["loaded"]]
         elapsed = max(1e-6, time.monotonic() - started)
         loading = max(1e-6, time.monotonic() - load_started)
         # The rate is read between the first echo of the load and the last:
@@ -1694,7 +1770,18 @@ class MeshNode:
             "rtt_ms": (round(sum(loaded) / len(loaded), 1) if loaded
                        else None),
             "best_ms": round(min(everything), 1) if everything else None,
-            "transport": self._peer_scheme(peer),
+            "transport": "+".join(self._peer_scheme(book["link"])
+                                  for book in books),
+            "links": [{
+                "link": self._label(book["link"]),
+                "transport": self._peer_scheme(book["link"]),
+                "echoed_bytes": book["echoed"],
+                "lost_probes": book["lost"],
+                "idle_ms": round(min(book["idle"]), 1) if book["idle"] else None,
+                "rtt_ms": (round(sum(book["loaded"]) / len(book["loaded"]), 1)
+                           if book["loaded"] else None),
+                "window": book["peak"],
+            } for book in books],
         }
 
     async def _handle_echo_request(self, peer: _Peer, packet: Packet) -> None:
@@ -1757,6 +1844,7 @@ class MeshNode:
         while self._running:
             await self._keepalive_sleep(next_sweep)
             job.ran()
+            self._check_slept()
             now = time.monotonic()
             slots = self._neighbor_slots()
             peers = sorted(self._peers,
@@ -1799,6 +1887,7 @@ class MeshNode:
             if now >= next_sweep:
                 next_sweep = now + _LINK_KEEPALIVE_INTERVAL
                 self._reap_silent_links()
+                self._reap_mute_accepted()
                 self._reap_expired_tarpits()
                 self._update_bundles()
                 self._note_failing_links()
@@ -2068,18 +2157,34 @@ class MeshNode:
         return self._ka_bounds
 
     def set_keepalive_bounds(self, fast_min_ms=None, fast_max_ms=None,
-                             slow_min_ms=None, slow_max_ms=None) -> mlo.Bounds:
+                             slow_min_ms=None, slow_max_ms=None, *,
+                             strict: bool = False) -> mlo.Bounds:
         """Change what this node offers, and tell every link about it.
 
         The re-proposal goes out **before** anything probes at a new cadence,
         which is what keeps this from being read as a K1 violation on the far
-        side."""
+        side.
+
+        Four values out of order are sorted, as a peer's are. ``strict`` (what
+        `network.mlo` asks, which reports nothing else of what it applied)
+        refuses instead, naming the order. `config.save` sorts and reports what
+        it stored (`adjusted`); the start-up path sorts and logs it, since a
+        node that will not start over a hand-edited file is worse."""
         held = self._ka_bounds
-        self._ka_bounds = mlo.clamp_bounds(
-            held.fast_min if fast_min_ms is None else fast_min_ms,
-            held.fast_max if fast_max_ms is None else fast_max_ms,
-            held.slow_min if slow_min_ms is None else slow_min_ms,
-            held.slow_max if slow_max_ms is None else slow_max_ms)
+        asked = (held.fast_min if fast_min_ms is None else fast_min_ms,
+                 held.fast_max if fast_max_ms is None else fast_max_ms,
+                 held.slow_min if slow_min_ms is None else slow_min_ms,
+                 held.slow_max if slow_max_ms is None else slow_max_ms)
+        if not mlo.well_formed(*asked):
+            if strict:
+                raise ValueError(
+                    "keepalive bounds must read fast_min < fast_max,"
+                    " slow_min < slow_max, and fast below slow at both ends;"
+                    " asked for fast %s–%s ms, slow %s–%s ms" % asked)
+            self.log("keepalive bounds out of order: read as sorted",
+                     source="node", level=logbook.WARN, topic="keepalive",
+                     asked="%s %s %s %s" % asked)
+        self._ka_bounds = mlo.clamp_bounds(*asked)
         for peer in list(self._peers):
             if peer.authenticated_id is None or peer.session is None:
                 continue
@@ -2503,9 +2608,17 @@ class MeshNode:
 
         **A medium that declares `mlo`.** Exactly what the link we hold had to
         prove: the second link is probed ten times a second too, and only the
-        operator knows whether that is cheap on it."""
+        operator knows whether that is cheap on it.
+
+        Among those, one that already failed since the last success goes
+        behind every one that has not: a peer may announce an address that is
+        only reachable from its own network, and taking the first every time
+        would ask it alone, at every backoff, for as long as the node ran."""
         held = {self._peer_scheme(peer)
                 for peer in self._direct_links_to(target)}
+        failed = self._mlo_dial_log.get(target, (0, 0.0, ()))[2:3]
+        failed = failed[0] if failed else ()
+        candidates = []
         for uri in self._known_addresses(target):
             result = _validate_uri(uri)
             if result is None:
@@ -2520,18 +2633,26 @@ class MeshNode:
                     continue
             except Exception:
                 continue
-            return uri
-        return None
+            if uri not in failed:
+                return uri
+            candidates.append(uri)
+        return candidates[0] if candidates else None
 
-    def _note_mlo_dial(self, target: NodeID, linked: bool) -> None:
+    def _note_mlo_dial(self, target: NodeID, linked: bool,
+                       uri: str | None = None) -> None:
         """How the last ask went, so a second address that never answers is not
-        dialled every sweep for the life of the node."""
+        dialled every sweep for the life of the node — and is not the one
+        asked next time either (`_mlo_second_address`)."""
         if linked:
             self._mlo_dial_log.pop(target, None)
             return
-        failures = self._mlo_dial_log.get(target, (0, 0.0))[0] + 1
+        previous = self._mlo_dial_log.get(target, (0, 0.0, ()))
+        failures = previous[0] + 1
+        failed = tuple(previous[2]) if len(previous) > 2 else ()
+        if uri is not None and uri not in failed:
+            failed = (failed + (uri,))[-_MAX_ADDRESSES:]
         delay = min(_MLO_DIAL_MAX, _MLO_DIAL_MIN * (2 ** min(failures - 1, 5)))
-        self._mlo_dial_log[target] = (failures, time.monotonic() + delay)
+        self._mlo_dial_log[target] = (failures, time.monotonic() + delay, failed)
         self._mlo_dial_log.move_to_end(target)
         while len(self._mlo_dial_log) > _MLO_DIAL_TRACKED:
             self._mlo_dial_log.popitem(last=False)
@@ -2559,7 +2680,7 @@ class MeshNode:
                 continue        # no address a bundle could be made of
             made += 1
             peer = await self._dial_uri(target, uri, _RETRY_DIAL_TIMEOUT)
-            self._note_mlo_dial(target, peer is not None)
+            self._note_mlo_dial(target, peer is not None, uri)
             if peer is not None:
                 # Candidacy is what buys the fast probe, and a bundle is formed
                 # from measurements: start both now rather than at the next
@@ -3452,6 +3573,8 @@ class MeshNode:
                 return False
             if peer.authenticated_id == target and peer.session is not None:
                 return True
+            if peer.answered_as is not None and peer.answered_as != target:
+                return False
             if asyncio.get_event_loop().time() >= deadline:
                 return False
             await asyncio.sleep(_AUTH_POLL_INTERVAL)
@@ -4022,6 +4145,36 @@ class MeshNode:
         # best link, which is exactly the list a bundle exists to widen again.
         return self._stripe(target, peers[:_ROUTE_SEND_FANOUT], exclude)
 
+    def _check_slept(self) -> None:
+        """End every link if this machine just slept past their far ends.
+
+        The monotonic clock every timer here runs on stops while the machine
+        sleeps; the boot clock does not, and the gap between the two grows by
+        exactly the time spent asleep. Without this, every link looks as fresh
+        on waking as when the machine dozed off, and traffic goes down it until
+        its own horizon runs out — measured, again, from the wake.
+
+        Past `_SLEEP_ENDS_LINKS` there is nothing to probe: the far ends have
+        already let these links go, so they are ended here as the losses they
+        are, and the reconnect book dials the nodes again at once. Where the
+        boot clock does not exist this does nothing, and the links time out as
+        they always did."""
+        total = _slept_total()
+        if total is None:
+            return
+        mark, self._slept_mark = self._slept_mark, total
+        if mark is None or total - mark < _SLEEP_ENDS_LINKS:
+            return
+        slept = total - mark
+        peers = list(self._peers)
+        self.log("the machine slept: its links are gone at the far end",
+                 source="node", level=logbook.WARN, topic="link",
+                 slept_s=round(slept), links=len(peers))
+        for peer in peers:
+            self._end_link(peer, f"this machine slept {slept:.0f} s, past the far end's"
+                                 " horizon for a silent link")
+        self._poke_net("woke-from-sleep", urgent=True)
+
     def _drop_failed_peer(self, peer: _Peer, exc: BaseException | None = None) -> None:
         """A send to this peer failed: take it out of routing *now*, tear the
         link down in the background.
@@ -4036,7 +4189,12 @@ class MeshNode:
         reason = "a send failed"
         if exc is not None:
             reason += f": {type(exc).__name__} {' '.join(str(exc).split())[:80]}"
-        self._log_link_end(peer, reason.strip())
+        self._end_link(peer, reason.strip())
+
+    def _end_link(self, peer: _Peer, reason: str) -> None:
+        """Out of routing now, torn down in the background, chased if it was
+        a node's link. Never awaits: callers are receive loops and timers."""
+        self._log_link_end(peer, reason)
         if peer in self._peers:
             self._peers.remove(peer)
         self._forget_hints_via(peer.authenticated_id)
@@ -4371,6 +4529,33 @@ class MeshNode:
             self._spawn_bounded(self._safe_stop_peer(
                 peer, f"never authenticated within {_HANDSHAKE_DEADLINE:.0f} s"))
 
+    def _reap_mute_accepted(self) -> None:
+        """End links we accepted that have not sent a single packet.
+
+        A medium's own keepalives can hold a link up indefinitely with nothing
+        above them. The double-accept guard needs a challenge to react to, and
+        `_reap_stale_unauthenticated` runs only at the unauthenticated ceiling,
+        so a far end that never speaks is out of reach of both.
+
+        Narrow on purpose, because some links are unauthenticated by design: a
+        relay's joiner link stays so for as long as a relayed join lives — and
+        talks from its first second; our own `relay_only` links are ones we
+        dialled; a `RelayedTransport` is not a socket. What is left is a link
+        accepted `_HANDSHAKE_DEADLINE` ago that has delivered nothing at all."""
+        now = time.monotonic()
+        for peer in list(self._peers):
+            if (peer.authenticated_id is not None or peer.is_client_side
+                    or isinstance(peer.transport, RelayedTransport)
+                    or peer.counters.pkts_in
+                    or now - peer.connected_at < _HANDSHAKE_DEADLINE):
+                continue
+            if peer in self._peers:
+                self._peers.remove(peer)
+                self._note_change("links")
+            self._spawn_bounded(self._safe_stop_peer(
+                peer, f"accepted, and not one packet from it in"
+                      f" {_HANDSHAKE_DEADLINE:.0f} s"))
+
     async def _dial_uri(self, node_id: NodeID, uri: str, timeout: float,
                         *, probe: bool = False) -> _Peer | None:
         """Dial one address of one node and require it to prove who it is.
@@ -4423,6 +4608,7 @@ class MeshNode:
                 transport = await self._transport_manager.connect(uri)
                 peer = self._new_peer(transport, is_client_side=True)
                 peer.probation = probe   # set before the handshake can complete
+                peer.expected_id = node_id
                 peer.remote_addr = uri
                 self._peers.append(peer)
                 await peer.start(self._handle_packet)
@@ -4463,6 +4649,7 @@ class MeshNode:
                             type(exc).__name__, time.monotonic() - started)
         finally:
             if peer is not None and not authenticated:
+                self._log_link_end(peer, "the dial did not reach the node it was for")
                 try:
                     await peer.stop()
                 except Exception:
@@ -6807,6 +6994,7 @@ class MeshNode:
                     return
                 except Exception as exc:
                     if peer is not None:
+                        self._log_link_end(peer, "the join through this address failed")
                         try:
                             await peer.stop()
                         except Exception:
@@ -11775,6 +11963,14 @@ Hints come first (the ``have`` byte on an announce, from an
             # would still leave this half holding a link whose authenticated id
             # is our own, which every count of "nodes connected" would believe.
             return self._refuse_handshake(packet, "the identity presented is our own")
+        if peer.expected_id is not None and server_id != peer.expected_id:
+            # We dialled one node and another answered — two nodes behind one
+            # public IP, most often. The dialler drops this link either way, and
+            # past this point it would first come up as a link to whoever
+            # answered, catch-up burst and redundant close included. Ending it
+            # here costs the handshake and nothing else.
+            return self._refuse_handshake(
+                packet, "the address answered as another node than the one dialled")
 
         # Adopting a root is the one irreversible thing a handshake can do to
         # this node: from then on every chain anchored there authenticates. So

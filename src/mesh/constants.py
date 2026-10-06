@@ -279,11 +279,16 @@ _SPEED_WINDOW          = 60.0              # what the *answering* side allows…
 _SPEED_MAX_PER_WINDOW  = 1200              # …in echoes, per identity, per window
 # Probes outstanding at once — a *sliding* window: a new probe leaves as each
 # echo lands, so the link is never idle waiting for the slowest of a batch.
-# Eight is enough to fill the link: past it the transport's own window decides
-# the rate, and more in flight only queues — on loopback UDP, 32 measured the
-# same rate as 8 with five times the latency under load. (Sixteen used to
-# collapse the UDP transport outright; see `gotchas.md`.)
+# It starts at eight and opens by one per echo, up to the ceiling, until the
+# round trip under load passes twice the one at rest plus the slack (a queue is
+# filling, so the link is full) or a probe is lost (then it halves): a fixed
+# window is a ceiling on what the test can read, eight probes per round trip,
+# about 1 MB/s at 130 ms. The ceiling is 1 MB in flight. A burst that large is
+# what the UDP transport has to hold (`gotchas.md`, "A burst that collapsed the
+# UDP transport").
 _SPEED_INFLIGHT        = 8
+_SPEED_INFLIGHT_MAX    = 64
+_SPEED_QUEUE_SLACK_MS  = 5.0
 # A probe not echoed within this is counted lost and its slot reused. Without
 # it one dropped datagram held the whole test until the deadline.
 _SPEED_PROBE_TIMEOUT   = 2.0
@@ -662,6 +667,13 @@ _KA_SEND_WAIT             = 1.0
 # how much later than asked the keepalive loop wakes — a timer that already
 # runs, so measuring costs no wake-up of its own.
 _LOOP_LAG_WARN            = 0.25
+# A machine that slept longer than this finds every link already gone at the
+# far end: past the longest silence any default lets a link live through (the
+# TCP read timeout, 60 s; the UDP keepalive horizon, 75 s). Its own clock does
+# not know — the monotonic clock stops while the machine sleeps, so on waking
+# every link looks as fresh as when it dozed off, and traffic sent down them
+# vanishes until each one times out from scratch.
+_SLEEP_ENDS_LINKS         = 90.0
 # A line that could be written once per packet is written once per this, per
 # key, with the count of what was folded into it. Bounded in keys.
 _LOG_THROTTLE             = 10.0
@@ -1069,14 +1081,17 @@ __all__ = [
     "_SEEK_TTL_PREAUTH",
     "_SHORT_SEEK_GAP",
     "_SHORT_SEEK_LEN",
+    "_SLEEP_ENDS_LINKS",
     "_SLOW_HANDLER",
     "_SPEED_CHUNK",
     "_SPEED_IDLE_PROBES",
     "_SPEED_INFLIGHT",
+    "_SPEED_INFLIGHT_MAX",
     "_SPEED_MAX_BYTES",
     "_SPEED_MAX_PER_WINDOW",
     "_SPEED_MAX_SECONDS",
     "_SPEED_PROBE_TIMEOUT",
+    "_SPEED_QUEUE_SLACK_MS",
     "_SPEED_WINDOW",
     "_STATE_WRITE_INTERVAL",
     "_STORE_RATE_MAX",

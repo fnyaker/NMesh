@@ -157,6 +157,27 @@ class TestReadingItFromAConsole:
         chan = _chan(_Bare())
         assert chan.call("logs.status").ok is False
 
+    async def test_a_time_filter_takes_a_real_time(self):
+        """Unix seconds are about 1.8e9; the shared ceiling on a count is a
+        million, so every real time was refused and only 1970 could be named."""
+        node, chan = self._ready()
+        line_at = node.logs.query()["lines"][0]["at"]
+        answer = chan.call("logs.query", {"since_time": int(line_at) - 60})
+        assert answer.ok, answer
+        assert answer.result["matched"] == 2
+        later = chan.call("logs.query", {"since_time": int(line_at) + 3600})
+        assert later.result["matched"] == 0
+        until = chan.call("logs.query", {"until_time": int(line_at) - 60})
+        assert until.result["matched"] == 0
+
+    async def test_a_sequence_past_a_million_is_still_a_sequence(self):
+        """A busy node writes a million lines; a follower past that number
+        was refused by the shared ceiling on a count."""
+        _node, chan = self._ready()
+        assert chan.call("logs.since", {"seq": 2 * 10 ** 6}).ok
+        assert chan.call("logs.query", {"before_seq": 2 * 10 ** 6}).ok
+        assert chan.call("control.changes", {"since": 2 * 10 ** 6}).ok
+
 
 class TestOneSwitchForBothRecordings:
     async def test_starting_the_trace_starts_the_log(self):

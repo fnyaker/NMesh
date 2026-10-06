@@ -148,6 +148,15 @@ like the regression.
 | 58 | **medium** | Local addresses sorted alphabetically: Docker bridges dialled first, the real LAN address cut from LAN discovery |
 | 59 | **low** | A bundle member opened by the far end showed `remote: null` |
 | 60 | **medium** | A console holding `govern` reached every operation an app declared, those it kept at home included |
+| 61 | **high** | A UDP timeout resent the whole window, so nothing could be timed and the timer climbed to its ceiling on a path that was only slower |
+| 62 | **medium** | A machine that slept kept links its peers had dropped, black-holing traffic for a minute and a half |
+| 63 | **medium** | *Open* — one UDP frame per mesh packet: anything above the MTU is fragmented by IP, and one lost fragment loses the frame |
+| 64 | **medium** | An address two nodes share cost a handshake and a whole redundant link every ten minutes |
+| 65 | **low** | A link closed by a dial's clean-up, a forget or a failed join left no line in the log |
+| 66 | **low** | An accepted UDP link that never sent a packet was held for ever |
+| 67 | **low** | A log could not be filtered by time, nor followed past a million lines |
+| 68 | **medium** | The speed test's fixed window could not read the speed the charter names, nor measure a bundle |
+| 69 | **low** | Keepalive bounds swapped in silence; no transfer kind open to any app; the MLO second link stuck on its first candidate |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -3000,4 +3009,172 @@ over, but a grant meaning more than it says.
 **Fixing it without breaking something** — the reach over an app's operations
 is now its own grant (`apps`, or `full`), so `govern` keeps exactly the reach
 its row in the fleet's table describes.
+
+---
+
+## 61 — high — A UDP timer that could only learn that the path was fast
+
+> **Status — fixed.** F-RTO (RFC 5682): a first timeout resends the oldest
+> frame alone and the next two ACKs decide; held-back frames neither count as a
+> new timeout nor back off again; the backoff comes down only on a measurement.
+> Tests: `tests/test_udp_transport.py::TestATimeoutOnALatePathIsFoundOut`.
+
+**Where** — `src/transports/udp.py`, `get_retransmit_frames`, `process_ack`.
+
+**What happens** — once a path's round trip grew past the timer, a timeout
+resent every frame in flight, Karn's rule then forbade timing any of them, and
+the estimate stayed on the idle round trip while the timer backed off to its
+ceiling. Seen live around two speed tests (107 and 340 kB/s, 28 % and 4.4 % of
+the probes over two seconds, where TCP on the same path carried ~1 MB/s with
+none lost): `srtt` 29 ms beside `rto` 1 600 ms on the same link.
+
+**Reproduce** — `_ReliableLink`, five frames in flight, expire them all:
+`get_retransmit_frames()` returned all five, and acknowledging them timed none.
+
+**Not proved** — that this alone made the 107 kB/s: a model of the path
+without host stalls or fragment loss does not collapse with the old code
+either. 63 is the other suspect.
+
+---
+
+## 62 — medium — A machine that slept kept links its peers had dropped
+
+> **Status — fixed.** `node._check_slept` compares `CLOCK_BOOTTIME` with
+> `CLOCK_MONOTONIC` on every keepalive wake and ends every link after a sleep
+> longer than `_SLEEP_ENDS_LINKS`. Tests:
+> `tests/test_reconnect.py::TestAMachineThatSlept`.
+
+**Where** — `src/node.py`, every liveness timer (they run on the monotonic
+clock, which stops during a suspend).
+
+**What happens** — seen live after a 6 872 s suspend: two UDP links black-holed
+traffic for 96 s (`unacked` 244, send queue full, `FIND_NODE` refused as busy)
+and a TCP link for 60 s, until each one's horizon ran out from the wake.
+
+**Reproduce** — suspend a node with links for longer than two minutes, resume,
+and read `logs.query --contains "link dropped"`: the reasons are keepalive and
+read timeouts more than a minute after the wake.
+
+---
+
+## 63 — medium — One UDP frame per mesh packet, fragmented by IP (open)
+
+**Where** — `src/transports/udp.py`: a frame carries one whole packet, up to
+`_MAX_PAYLOAD` (60 000 bytes).
+
+**What happens** — a 16 kB speed-test probe is one datagram of about twelve IP
+fragments. Losing any one loses the frame, so the frame's loss rate is that of
+a fragment multiplied by twelve, and some networks drop fragments outright. TCP
+segments at the MSS and never sees it — which fits a path where TCP lost
+nothing and UDP lost a third of its probes.
+
+**Reproduce** — a path model with 2 % loss per 1 472-byte fragment: 16 kB frames
+carry ~340 kB/s, 1 200-byte frames ~660 kB/s, on the same link.
+
+**Fixing it without breaking something** — the reliability layer has to split a
+packet across frames under the path MTU and reassemble it, bounded like the
+reorder buffer. It changes the wire format, so it must be negotiated per link
+and an old peer must keep the current framing.
+
+---
+
+## 64 — medium — An address shared by two nodes cost a whole link every ten minutes
+
+> **Status — fixed.** A dial refuses, at the handshake, an answer from any node
+> but the one it was for (`_Peer.expected_id`), and gives up waiting the moment
+> one has answered; the same `(node, address)` pair answering as the same node
+> again is held twice as long, up to `WRONG_ADDRESS_TTL_MAX`. Tests:
+> `tests/test_self_dial.py::TestAnAddressSharedWithAnotherNode`.
+
+**Where** — `src/routing.py` (`note_wrong_address`), `src/node.py`
+(`_dial_uri`, `_handle_handshake_ack`, `_wait_for_peer_authenticated`).
+
+**What happens** — seen live: node 2df86885 advertises the public IP it shares
+with two other nodes. Every `WRONG_ADDRESS_TTL` (600 s), to the second, the
+record expired, the next dial paid a post-quantum handshake, and the link came
+up as one to the node that owns the address — `link up`, the ~324 kB catch-up
+burst of 53 each way — to be closed as redundant 0.1 s later. Read from the
+console as constant churn on healthy links.
+
+**Reproduce** — `logs.query --contains "wrong node"`: the same pair recurs at
+600 s intervals, each next to a `link up` and a `redundant` close.
+
+---
+
+## 65 — low — A link closed by a dial's clean-up left no line in the log
+
+> **Status — fixed.** `_dial_uri`, `console_forget_node` and the join loop
+> write the link's end like every other path. Tests:
+> `tests/test_link_stability.py::TestNoLinkEndsWithoutALine`.
+
+**What happens** — seen live: a TCP link to DTrump vanished from the console
+with no `link dropped` line. It was the link a wrong-node dial had opened (64);
+its `finally` stopped it and said nothing.
+
+---
+
+## 66 — low — An accepted UDP link that never spoke was held for ever
+
+> **Status — fixed.** `_reap_mute_accepted` ends, on every keepalive sweep, a
+> link this node accepted that has delivered no packet by `_HANDSHAKE_DEADLINE`.
+> Tests: `tests/test_node.py::TestAnAcceptedLinkThatNeverSpeaks`.
+
+**What happens** — seen live: an inbound UDP link from DTrump, unauthenticated,
+0 packets in, alive after 991 s. DTrump never sent a challenge, so 55's guard
+(which reacts to one) never fired, and `_reap_stale_unauthenticated` only runs
+when `_MAX_UNAUTH_PEERS` is reached. DTrump also publishes no version, so it may
+run a release older than either guard; the far end's cause is not known.
+
+---
+
+## 67 — low — A log could not be filtered by time, nor followed past a million
+
+> **Status — fixed.** `since_time` / `until_time` declare a ceiling fit for a
+> unix time, and the sequence numbers (`logs.since`, `logs.query before_seq`,
+> `control.changes since`) one fit for a counter. Tests:
+> `tests/test_control_logs.py::TestReadingItFromAConsole`.
+
+**What happens** — every `count` without its own `limit` is held to
+`app_api.MAX_COUNT` = 10⁶. A unix time is ~1.79 × 10⁹, so `logs.query
+--since_time …` was refused for any real date (seen over MCP), and a node that
+had written a million log lines, or moved a million changes, would have refused
+the console following it.
+
+---
+
+## 68 — medium — The speed test could not read the speed the charter names
+
+> **Status — fixed.** The probe window opens with the link (one more per echo,
+> up to 1 MB in flight) until a queue builds or a probe is lost, and `bundle`
+> loads every direct member of a bundle at once. Tests:
+> `tests/test_speedtest.py::TestTheWindowOpensToWhatTheLinkTakes`,
+> `::TestABundleIsMeasuredAsOne`.
+
+**What happens** — eight 16 kB probes in flight, fixed, read at most eight per
+round trip: ~1 MB/s at the 130 ms a loaded path showed live, whatever the link
+carried, against a 4 MB/s goal. On a 20 ms path the same window read 6.7 MB/s,
+which is the window again, not the link. And it loaded one link, so what MLO
+adds could not be measured at all.
+
+---
+
+## 69 — low — Three small ones from the live test
+
+> **Status — fixed.** Tests: `tests/test_config_live.py::TestBoundsOutOfOrderFromAConsole`,
+> `tests/test_app_perms.py::TestAnAppMovesWhatItsPermissionsAllow`,
+> `tests/test_mlo.py::TestOpeningTheSecondLink::test_an_address_that_failed_goes_behind_the_others`.
+
+- **Keepalive bounds out of order were swapped in silence.** `network.mlo` with
+  `fast_min` 5000 and `fast_max` 1000 applied 1000–5000 and said nothing. Now
+  refused with the order named (`set_keepalive_bounds(strict=True)`).
+- **`transfer.kinds` was empty for every app.** A kind's reach is a distance,
+  and an app on this machine is at none, so no kind was ever open to one —
+  contrary to `Docs/AppPermissions/guide`, where `readstate.updates` and
+  `control.updates` cover transfers. An app's answer is now the gate's, for the
+  operation that carries the kind.
+- **The MLO second link always asked the first candidate.** JeffreyEpstein's
+  private `udp://10.200.199.10:9001` was dialled at every backoff; an address
+  that failed now goes behind the others. If a peer announces nothing else of
+  that medium there is still nothing better to dial — that is the peer's
+  announcement, not this node's choice.
 

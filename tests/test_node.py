@@ -284,3 +284,60 @@ class TestAdmission:
         await asyncio.sleep(0.02)
         assert virtual in node._peers
         await node.stop()
+
+
+class TestAnAcceptedLinkThatNeverSpeaks:
+    """Seen live: a UDP link accepted from a far end that never sent a
+    challenge, held up for 991 s by transport keepalives alone. The ceiling
+    sweep runs only under pressure, so nothing ended it."""
+
+    @staticmethod
+    async def _accepted(node: MeshNode, age: float):
+        await node._on_new_transport(FakeTransport())
+        peer = node._peers[-1]
+        peer.connected_at -= age
+        return peer
+
+    async def test_it_is_ended_after_the_handshake_deadline(self):
+        from src.node import _HANDSHAKE_DEADLINE
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        peer = await self._accepted(node, _HANDSHAKE_DEADLINE + 1)
+        node._reap_mute_accepted()
+        assert peer not in node._peers
+        await node.stop()
+
+    async def test_one_still_inside_the_deadline_is_kept(self):
+        from src.node import _HANDSHAKE_DEADLINE
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        peer = await self._accepted(node, _HANDSHAKE_DEADLINE - 5)
+        node._reap_mute_accepted()
+        assert peer in node._peers
+        await node.stop()
+
+    async def test_one_that_speaks_is_kept(self):
+        """A relay's joiner link is unauthenticated on purpose for as long as
+        the relayed join lives — and it talks from its first second."""
+        from src.node import _HANDSHAKE_DEADLINE
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        peer = await self._accepted(node, _HANDSHAKE_DEADLINE * 10)
+        peer.counters.on_in(100)
+        node._reap_mute_accepted()
+        assert peer in node._peers
+        await node.stop()
+
+    async def test_a_link_we_dialled_is_not_its_business(self):
+        """Our own `relay_only` links are dialled, and unauthenticated by
+        design; dials have their own timeouts."""
+        from src.node import _HANDSHAKE_DEADLINE, _Peer
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        peer = _Peer(FakeTransport(), is_client_side=True)
+        peer.relay_only = True
+        peer.connected_at -= _HANDSHAKE_DEADLINE * 10
+        node._peers.append(peer)
+        node._reap_mute_accepted()
+        assert peer in node._peers
+        await node.stop()

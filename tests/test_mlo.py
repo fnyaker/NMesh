@@ -1388,6 +1388,21 @@ class TestOpeningTheSecondLink:
         assert tried == ["fake2://b:2"]
         assert node._mlo_dial_log[TARGET][0] == 1
 
+    async def test_an_address_that_failed_goes_behind_the_others(self):
+        """Always taking the first sent a live node back to one private address
+        of a peer's, unreachable from here, at every backoff for as long as it
+        ran — and never to the peer's other address of the same medium."""
+        node = _node()
+        self._lonely(node, addresses=("fake://a:1", "fake2://b:2", "fake2://c:3"))
+        tried = _dials(node)
+        for _ in range(3):
+            node._update_bundles()
+            await node._mlo_second_link_pass()
+            failures, _until, failed = node._mlo_dial_log[TARGET]
+            node._mlo_dial_log[TARGET] = (failures, 0.0, failed)   # backoff served
+        # Each in turn, then round again once every one has failed.
+        assert tried == ["fake2://b:2", "fake2://c:3", "fake2://b:2"]
+
     async def test_a_link_that_answers_is_forgiven_and_measured_at_once(self):
         """A bundle is formed from measurements, and candidacy is what buys the
         fast probe: waiting for the next sweep is twenty seconds unmeasured."""
@@ -1466,7 +1481,7 @@ class TestOpeningTheSecondLink:
         tried = _dials(node)
         node._mlo_dial_log[TARGET] = (0, 0.0)
         original = node._note_mlo_dial
-        node._note_mlo_dial = lambda target, linked: None   # never backs off
+        node._note_mlo_dial = lambda target, linked, uri=None: None   # never backs off
         node._want_second_link(TARGET)
         task = asyncio.create_task(node._mlo_dial_loop())
         try:

@@ -256,3 +256,50 @@ class TestTheProfiles:
             assert node._mlo_always is True
         finally:
             await node.stop()
+
+
+class TestBoundsOutOfOrderFromAConsole:
+    """`network.mlo` answered a fast floor above the fast ceiling by swapping
+    the two and saying nothing; the operator found out by reading the bounds
+    back. Refused now, with the order named. `config.save` keeps its own
+    answer — it sorts and reports what it stored (above)."""
+
+    async def test_network_mlo_refuses_them(self):
+        node = MeshNode(transport_manager=make_manager())
+        try:
+            before = node.keepalive_bounds()
+            channel = _channel(node, None)
+            reply = await _call(channel, "network.mlo", {
+                "keepalive_fast_min": 5000, "keepalive_fast_max": 1000})
+            assert reply.ok is False and reply.code == "bad_request"
+            assert "fast_min < fast_max" in reply.error
+            assert node.keepalive_bounds() == before
+        finally:
+            await node.stop()
+
+    async def test_in_order_they_are_applied(self):
+        node = MeshNode(transport_manager=make_manager())
+        try:
+            channel = _channel(node, None)
+            reply = await _call(channel, "network.mlo", {
+                "keepalive_fast_min": 200, "keepalive_fast_max": 1500})
+            assert reply.ok, reply.error
+            bounds = node.keepalive_bounds()
+            assert (bounds.fast_min, bounds.fast_max) == (200, 1500)
+        finally:
+            await node.stop()
+
+    async def test_at_start_up_they_are_sorted_and_the_log_says_so(self):
+        """A node that will not start over a hand-edited file is worse than
+        one that runs the sorted values and says it did."""
+        node = MeshNode(transport_manager=make_manager())
+        try:
+            node.logs.hold()
+            node.set_keepalive_bounds(fast_min_ms=5000, fast_max_ms=1000)
+            running = node.keepalive_bounds().as_tuple()
+            assert list(running) == sorted(running)
+            lines = [line for line in node.logs.query()["lines"]
+                     if line["message"] == "keepalive bounds out of order: read as sorted"]
+            assert len(lines) == 1
+        finally:
+            await node.stop()
