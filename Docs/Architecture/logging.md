@@ -110,7 +110,7 @@ one), and the same label is on every trace event that crossed it.
 | source / topic | line | level | what it carries |
 |---|---|---|---|
 | `peers` / `link` | `link up` | info | node, link, address, dialled or accepted |
-| `peers` / `link` | `link dropped` | **warn** if it died on its own, info if we closed it | node, link, address, **reason**, age, seconds since it last answered, recent loss %, the medium's counters (zeros left out) |
+| `peers` / `link` | `link dropped` | **warn** if it died on its own, info if we closed it | node, link, address, **reason**, age, seconds since it last answered, recent loss %, the medium's counters (zeros left out). Every path that takes a link out of the list writes it — a dial that reached somebody else, a node the operator forgot and a failed join included (`unauthenticated link ended`, debug, for a link that never proved an identity) |
 | `transport` / `link` | whatever the medium says (`BaseTransport.note`) | the medium's | the peer closed the link; the peer went silent; a retransmit timeout dropped the window; a send was refused — each with the medium's figures |
 | `peers` / `link` | `a probe could not be sent` | warn | why, and the link's figures — once a minute per link |
 | `peers` / `link` | `link failing: it loses too many probes` / `link recovered` | warn / info | on the crossing only, with the figures |

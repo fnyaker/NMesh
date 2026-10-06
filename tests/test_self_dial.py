@@ -28,12 +28,13 @@ import os
 
 import pytest
 
-from src.node import (MeshNode, CHALLENGE, HANDSHAKE, HANDSHAKE_ACK,
+from src.crypto import CryptoIdentity
+from src.node import (MeshNode, CHALLENGE, HANDSHAKE, HANDSHAKE_ACK, _Peer,
                       _encode_handshake_ack)
 from src import routing as routing_mod
 from src.node_id import NodeID
 from src.packet import Packet
-from tests.conftest import make_manager, make_node
+from tests.conftest import FakeTransport, make_manager, make_node
 
 
 def _node() -> MeshNode:
@@ -333,3 +334,85 @@ class TestRememberingAWrongAddress:
         node._routing.note_wrong_address(target, "fake://bad:1", other)
         assert node._routing.contains(target)
         assert node._routing.get(target).addresses == []
+
+
+class TestAnAddressSharedWithAnotherNode:
+    """Two nodes behind one public IP, and the gossip that keeps naming it for
+    both. Seen live: every ten minutes the record expired, the next dial paid a
+    post-quantum handshake, and the link came up as one to the node that does
+    own the address — catch-up burst and all — to be closed as redundant a tenth
+    of a second later."""
+
+    @staticmethod
+    def _held(node: MeshNode, target: NodeID) -> float:
+        [row] = [r for r in node._routing.wrong_addresses()
+                 if r["node"] == target.raw.hex()]
+        return row["for_seconds"]
+
+    def test_the_same_answer_again_is_held_twice_as_long(self):
+        node = _node()
+        target, other = NodeID(b"\x22" * 20), NodeID(b"\x33" * 20)
+        node._routing.note_wrong_address(target, "fake://shared:1", other)
+        first = self._held(node, target)
+        node._routing.note_wrong_address(target, "fake://shared:1", other)
+        assert self._held(node, target) > 1.9 * first
+
+    def test_the_strikes_outlive_the_record(self, monkeypatch):
+        """The record expiring is exactly when the address comes back; a count
+        forgotten with it would start every cycle at ten minutes again."""
+        node = _node()
+        target, other = NodeID(b"\x22" * 20), NodeID(b"\x33" * 20)
+        node._routing.note_wrong_address(target, "fake://shared:1", other)
+        base = routing_mod.time.monotonic()
+        monkeypatch.setattr(routing_mod.time, "monotonic",
+                            lambda: base + routing_mod.WRONG_ADDRESS_TTL + 1)
+        assert node._routing.wrong_address(target, "fake://shared:1") is None
+        node._routing.note_wrong_address(target, "fake://shared:1", other)
+        assert self._held(node, target) > 1.9 * routing_mod.WRONG_ADDRESS_TTL
+
+    def test_the_hold_is_capped(self):
+        node = _node()
+        target, other = NodeID(b"\x22" * 20), NodeID(b"\x33" * 20)
+        for _ in range(40):
+            node._routing.note_wrong_address(target, "fake://shared:1", other)
+        assert self._held(node, target) <= routing_mod.WRONG_ADDRESS_TTL_MAX
+
+    def test_a_different_answer_starts_again(self):
+        """An address that changed hands is a new fact, not a repeat."""
+        node = _node()
+        target = NodeID(b"\x22" * 20)
+        node._routing.note_wrong_address(target, "fake://shared:1", NodeID(b"\x33" * 20))
+        node._routing.note_wrong_address(target, "fake://shared:1", NodeID(b"\x44" * 20))
+        assert self._held(node, target) <= routing_mod.WRONG_ADDRESS_TTL
+
+    async def test_an_answer_from_another_node_ends_at_the_handshake(self):
+        node, fake = await make_node()
+        peer = node._peers[0]
+        peer.expected_id = NodeID(b"\x22" * 20)
+        other = CryptoIdentity()
+        other_id = NodeID.from_public_key(other.dsa_public_key)
+        challenge = os.urandom(32)
+        peer.received_challenge = challenge
+        peer.pending_kem_secret = b"\x00" * 32
+        ciphertext = b"\x11" * 32
+        signature = other.sign(challenge + ciphertext + other.dsa_public_key)
+        payload = _encode_handshake_ack(ciphertext, other.dsa_public_key, [],
+                                        None, signature)
+        fake.inject(Packet.create(HANDSHAKE_ACK, other_id.raw, node.id.raw, payload))
+        await asyncio.sleep(0.05)
+        await node.stop()
+        assert [row["reason"] for row in node.handshake_refusals()] == [
+            "the address answered as another node than the one dialled"]
+        assert peer.answered_as == other_id
+        assert peer.authenticated_id is None
+
+    async def test_the_dial_gives_up_as_soon_as_somebody_else_answers(self):
+        """Waiting out the whole dial timeout on a link that has already said
+        who it is would hold a dial slot for nothing."""
+        node = _node()
+        peer = _Peer(FakeTransport(), is_client_side=True)
+        peer.answered_as = NodeID(b"\x33" * 20)
+        node._peers.append(peer)
+        found = await asyncio.wait_for(
+            node._wait_for_peer_authenticated(peer, NodeID(b"\x22" * 20), 30.0), 1.0)
+        assert found is False
