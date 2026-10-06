@@ -835,6 +835,16 @@ Ending it costs a FIN; answering it with a handshake would be a ~21 kB reply to
 one datagram from any source address, so this node never takes the dialler's
 part on a link it accepted.
 
+A link this node accepted that has delivered **not one packet** by
+`_HANDSHAKE_DEADLINE` is ended on every keepalive sweep, pressure or not
+(`_reap_mute_accepted`). Seen live: a UDP far end that never sent a challenge
+kept one up for 991 s on transport keepalives alone, out of reach of the guard
+above (which needs a challenge) and of the sweep (which needs the ceiling).
+The exemptions are the links unauthenticated by design, and each is outside
+the rule: a relay's joiner link talks from its first second, our own
+`relay_only` links are ones we dialled, and a relayed virtual peer is not a
+socket.
+
 ## Per-hop handshake (establishing a session between two direct peers)
 
 Flow (see `_on_new_transport`, `_handle_challenge`, `initiate_handshake`,
