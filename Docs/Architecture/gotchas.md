@@ -1726,6 +1726,46 @@ before and after.
 - **`visualViewport`, not `100dvh`.** Android shrinks the visual viewport when
   the keyboard opens; viewport units keep describing the screen behind it, so a
   layout built on them puts the key row under the keyboard.
+- **`TERM` is the far end's, never the node's.** The shell inherited the node
+  process's `TERM`; a node started from a Linux console passed on `linux`, and
+  `top` set its cursor shape with `CSI ? 1 c`. The emulator read every `… c` as
+  "who are you?", answered `CSI ? 1 ; 2 c` into `top`'s input, and `top` filled
+  its status line with "Unknown command" until it was killed — while every
+  keystroke the operator typed competed with the answers. Two fixes, and each
+  would have hidden the other: the shell is started with `xterm-256color`
+  whatever the node has, and the emulator answers only the questions themselves
+  (`CSI c`, `CSI 0 c`, `CSI > c`), never a sequence that shares a final byte
+  with one. **A prefix (`?`, `>`, `=`, `<`) or an intermediate makes it a
+  different sequence**: `CSI > 4;2 m` is vim's keyboard negotiation, not "dim".
+- **Replayed history must not be answered.** Re-attaching replays the recent
+  output into a fresh screen, questions included; answering them types the
+  answers into whatever runs *now*. The replay is written with `term.quiet`.
+- **A click is not an empty selection.** A press and release on one spot kept
+  `{from, to}` equal and non-null, and the cursor is hidden while a selection
+  exists — so focusing the pane with a click hid the cursor for good.
+- **AltGr is Ctrl+Alt.** On Windows the composed character arrives with both
+  flags set; a key handler that treats Ctrl as a control chord drops `|`, `#`,
+  `{` on an AZERTY keyboard. Text goes through the `input` event of a focused
+  field; only non-text keys are read off `keydown`.
+
+## The internal API: a call that waits on the socket it came in on
+
+- **A control call is never awaited inside the connector's read loop.** A call
+  whose operation is modded waits for the mod's `RETURN` — which arrives on the
+  same socket, and is read by the very loop that would be parked awaiting the
+  call. Awaited in place, every modded call from the app that mods it was a 5 s
+  stall ending in the native answer. `CONTROL` is answered from a task, its reply
+  matched by the request's id, and the read loop moves on at once.
+- **A task nobody holds can be collected mid-flight.** `asyncio.create_task`
+  keeps only a weak reference; a fire-and-forget control call or `CALL` answer is
+  added to a set and discarded when done, never left to the garbage collector.
+- **A reply can be larger than a request.** A client accepted frames up to the
+  request ceiling (70 kB) while a control reply may be 512 kB; the first large
+  `node.state` would have ended the connection as a protocol violation. A client
+  reads with `_MAX_REPLY_FRAME`; the node still reads requests with the smaller one.
+- **The shared token is not an identity.** Grants keyed by an app id the client
+  merely *declared* were grants to anyone holding the shared token. Only an app's
+  own token (`token_for`) is answered anything above the normal set.
 
 ## Self-update: installing is not updating
 

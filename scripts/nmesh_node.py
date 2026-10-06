@@ -70,7 +70,8 @@ from src.webconsole import WebConsole
 from src.data_connector import DataConnector, ConnectorClient
 from src.process_launcher import ProcessLauncher
 from src.app_channel import CHAT_APP_ID
-from src.app_registry import FLEET_APP_ID, AppHost, AppRegistry
+from src.app_registry import (BUILTIN_APPS, FLEET_APP_ID, MCP_APP_ID, AppHost,
+                              AppRegistry)
 from src.apps import fleet_console
 from src.apps.chat import ChatApp
 from src.apps.chat_state import ChatState, DrawerStore
@@ -78,6 +79,7 @@ from src.apps.chat_web import ChatBridge
 from src.apps.fleet import FleetApp
 from src.apps.fleet_state import FleetState
 from src.apps.fleet_web import FleetBridge
+from src.apps.mcp import McpApp, McpBridge
 from src.apps import fleet_provision
 from src import config
 
@@ -95,7 +97,7 @@ def _chat_factory(node, connector):
         # Counted as a person, an app enabled by default would mean no node
         # ever sleeps (`DataConnector.attended_clients`).
         client = ConnectorClient(connector.host, connector.port,
-                                 connector.token, CHAT_APP_ID,
+                                 connector.token_for(CHAT_APP_ID), CHAT_APP_ID,
                                  attended=False)
         await client.connect()
         store = DrawerStore(node.app_storage, CHAT_APP_ID)
@@ -113,8 +115,11 @@ def _fleet_factory(node, connector, data_dir, local_console=None):
     provisioning; without one the provision capability reports itself
     unavailable instead of half working."""
     async def build():
+        # Its own token, not the shared one: what fleet was granted (its log,
+        # its links) is held by its app id, and only a client that proved it
+        # is fleet is answered with it (`src/app_perms.py`).
         client = ConnectorClient(connector.host, connector.port,
-                                 connector.token, FLEET_APP_ID,
+                                 connector.token_for(FLEET_APP_ID), FLEET_APP_ID,
                                  attended=False)      # see `_chat_factory`
         await client.connect()
         store = DrawerStore(node.app_storage, FLEET_APP_ID)
@@ -127,6 +132,53 @@ def _fleet_factory(node, connector, data_dir, local_console=None):
                        local_console=local_console)
         return app, FleetBridge(app)
     return build
+
+
+def _mcp_factory(node, connector):
+    """Build the MCP server on demand.
+
+    It is an app like any other as far as the node is concerned: it connects
+    with its own token and reaches the node through the internal API, so what
+    an AI client can do through it is what was granted to *it* on the Apps page.
+    Its port and bearer token live in its drawer, encrypted at rest."""
+    async def build():
+        client = ConnectorClient(connector.host, connector.port,
+                                 connector.token_for(MCP_APP_ID), MCP_APP_ID,
+                                 attended=False)
+        store = DrawerStore(node.app_storage, MCP_APP_ID)
+        app = McpApp(client, store=(store.get, store.put),
+                     log=lambda line: node.log(line, source="app:mcp"))
+        return app, McpBridge(app)
+    return build
+
+
+def _connector_secret(data_dir) -> bytes | None:
+    """The key per-app connector tokens are derived from, kept with the node.
+
+    Kept so an app outside this process — a container given its token once —
+    still authenticates after a restart. 0600 from creation, like the identity
+    key, and never anything but random bytes: a file that is not 32 of them is
+    replaced rather than trusted."""
+    if not data_dir:
+        return None
+    path = os.path.join(data_dir, "connector.secret")
+    try:
+        with open(path, "rb") as handle:
+            secret = handle.read(64)
+        if len(secret) == 32:
+            return secret
+    except OSError:
+        pass
+    secret = os.urandom(32)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(descriptor, secret)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        print(f"  NOTE          : app tokens will change on restart ({exc.strerror})")
+    return secret
 
 
 def _release_publishers(node) -> list:
@@ -500,14 +552,15 @@ async def main() -> None:
     connector = None
     launcher = None
     host = None
-    wants_apps = registry.is_enabled("chat") or registry.is_enabled("fleet")
+    wants_apps = any(registry.is_enabled(app["name"]) for app in BUILTIN_APPS)
     if wants_apps or args.connector_port is not None:
-        # What an app may read of the node's own data is the registry's
-        # answer, asked per frame rather than captured once: an operator who
-        # takes a grant back has taken it back now, not at the next restart.
+        # What an app may do is the permission book's answer, asked per frame
+        # rather than captured once: an operator who takes a permission back
+        # has taken it back now, not at the next restart.
         connector = DataConnector(
             node, host="127.0.0.1", port=args.connector_port or 0,
-            grants=registry.granted_to_id)
+            perms=registry.perms, app_secret=_connector_secret(args.data),
+            reserved_names=tuple(app["name"] for app in BUILTIN_APPS))
         await connector.start()
         launcher = ProcessLauncher(connector, node_id=node.id)
         for cmd in args.launch:
@@ -525,6 +578,7 @@ async def main() -> None:
         host.register("chat", _chat_factory(node, connector))
         host.register("fleet", _fleet_factory(node, connector, args.data,
                                               local_console))
+        host.register("mcp", _mcp_factory(node, connector))
         await host.apply()
 
     console = WebConsole(node, host=args.console_host, port=args.console_port,
@@ -533,6 +587,10 @@ async def main() -> None:
                          config_path=config_path)
     console.start(loop=asyncio.get_running_loop())
     local_console.bind(console)
+    if connector is not None:
+        # Apps reach the node's own operations through the connector — the
+        # internal API — as far as each one was granted.
+        console.bind_connector(connector, registry.perms)
     # An automatic install writes a new tree; only a restart runs it. The
     # console owns that route (stop the node properly, exit, let the service
     # manager bring it back), so the node borrows it rather than growing a

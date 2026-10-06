@@ -52,8 +52,21 @@ class ProcessLauncher:
             "NMESH_NODE_ID": self._node_id.raw.hex() if self._node_id else "",
         }
 
+    def app_env(self, app_id: bytes) -> dict[str, str]:
+        """The same coordinates, for a child that is one particular app: its
+        id, and **its own** token in place of the shared one. Only a client
+        holding its own token is answered anything a person granted that app
+        (`src/app_perms.py`); the shared token says "a local process"."""
+        token_for = getattr(self._connector, "token_for", None)
+        env = self.connection_env()
+        env["NMESH_APP_ID"] = bytes(app_id).hex()
+        if token_for is not None:
+            env["NMESH_CONNECTOR_TOKEN"] = token_for(bytes(app_id))
+        return env
+
     async def launch(self, command, *, name: str | None = None,
-                     env: dict | None = None, cwd: str | None = None) -> LaunchedProcess:
+                     env: dict | None = None, cwd: str | None = None,
+                     app_id: bytes | None = None) -> LaunchedProcess:
         if not isinstance(command, (list, tuple)) or not command:
             raise ValueError("command must be a non-empty list of arguments")
         if any(not isinstance(a, str) for a in command):
@@ -61,7 +74,7 @@ class ProcessLauncher:
         if len(self._procs) >= _MAX_PROCS:
             raise RuntimeError("process launcher at capacity")
         child_env = dict(os.environ)
-        child_env.update(self.connection_env())
+        child_env.update(self.app_env(app_id) if app_id else self.connection_env())
         if env:
             child_env.update(env)
         proc = await asyncio.create_subprocess_exec(*command, env=child_env, cwd=cwd)

@@ -47,7 +47,7 @@ import threading
 import time
 
 from .errors import ControlError
-from .plane import Origin, reaches
+from .plane import Origin
 
 # How many jobs may be running at once, and how many of those a console at a
 # distance may hold. The second is the one that matters: the first bounds this
@@ -97,7 +97,7 @@ class JobBook:
         if found is None:
             raise ControlError("not_found", "no such operation")
         _module, entry = found
-        if not reaches(origin, entry):
+        if not self._plane.permits(origin, op, entry, params):
             # The same sentence the plane itself would have used. A job is not
             # a way to ask for something you may not ask for, and an operator
             # reading this must not have to wonder whether it might be.

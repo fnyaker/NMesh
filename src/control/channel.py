@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from .errors import ControlError, FrameError
 from .frame import Reply, Request, decode_reply, decode_request, encode
-from .plane import Origin
+from .plane import Origin, app_of
 
 
 class BaseChannel:
@@ -84,7 +84,10 @@ class LocalChannel(BaseChannel):
 
     def __init__(self, plane, origin: str = Origin.LOCAL) -> None:
         self._plane = plane
-        self._origin = origin if origin in Origin.ALL else Origin.REMOTE
+        # An app's origin carries its id, and is only ever built by the data
+        # connector for a client that authenticated as that app.
+        self._origin = (origin if origin in Origin.ALL or app_of(origin)
+                        else Origin.REMOTE)
 
     def send(self, raw) -> bytes:
         try:

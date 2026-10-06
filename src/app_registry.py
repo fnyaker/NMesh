@@ -34,9 +34,24 @@ import json
 import os
 import threading
 
+from . import app_perms
 from .app_channel import CHAT_APP_ID, builtin_id
 
 FLEET_APP_ID = builtin_id("fleet")
+MCP_APP_ID = builtin_id("mcp")
+
+# What every built-in app does through the connector anyway — its own section,
+# names, reports, a log line. Asked for like any other app asks, so the Apps
+# page shows the same thing for a built-in as for an app somebody installed.
+_BASE = [
+    {"name": "network", "why": "Its messages travel over the mesh."},
+    {"name": "storage", "why": "It keeps its own state on this node."},
+    {"name": "names", "why": "It shows nodes by name."},
+    {"name": "identity", "why": "It proves who is speaking to the node at the other end."},
+    {"name": "report", "why": "It reports a node that floods it."},
+    {"name": "log", "why": "It says what it is doing."},
+    {"name": "notify", "why": "It tells you when something needs you."},
+]
 
 # The apps shipped with the node. ``page`` is where the console surfaces the
 # app; ``default_enabled`` is the shipped-off/shipped-on decision above.
@@ -48,6 +63,7 @@ BUILTIN_APPS = (
         "app_id": CHAT_APP_ID,
         "default_enabled": True,
         "description": "Messaging, files and calls across the mesh.",
+        "permissions": _BASE,
     },
     {
         "name": "fleet",
@@ -58,6 +74,33 @@ BUILTIN_APPS = (
         "description": ("Remote management and automated deployment: enrol "
                         "nodes, read their status, update them, open a shell, "
                         "discover and provision machines over SSH."),
+        "permissions": _BASE + [
+            {"name": "readstate.links",
+             "why": "An operator managing this node sees its links on their map."},
+            {"name": "readstate.logs",
+             "why": "An operator managing this node can follow its log."},
+        ],
+    },
+    {
+        "name": "mcp",
+        "title": "MCP",
+        # Its settings live with the internal API it exposes, not on a page of
+        # their own: what it serves is that list.
+        "page": "/#apps/api",
+        "app_id": MCP_APP_ID,
+        "default_enabled": False,
+        "description": ("A Model Context Protocol server: every operation this "
+                        "node's console can perform, as tools an AI client can "
+                        "call — within the permissions you grant it here. "
+                        "Loopback only unless you say otherwise."),
+        "permissions": [
+            {"name": "readstate",
+             "why": "Answering questions about this node is reading its state."},
+            {"name": "control",
+             "why": "Every console operation it exposes as a tool needs the "
+                    "matching part of this, and nothing more."},
+            {"name": "log", "why": "It says which tools were called."},
+        ],
     },
 )
 
@@ -75,21 +118,29 @@ BUILTIN_APPS = (
 #   company with, which is the same kind of thing as its log and is why it is
 #   asked for separately: an app that shows a mesh map needs it, and an app
 #   that sends messages does not.
+#
+# These two are the first permissions there were, and they are permissions now
+# (`src/app_perms.py`): `logs` is `readstate.logs`, `links` is `readstate.links`.
+# The names stay so a console from before the change still has something to
+# tick, and so the `apps.grant` operation it calls still answers.
 GRANTS = (
     {
         "name": "logs",
+        "permission": "readstate.logs",
         "title": "Read the node's log",
         "description": ("Query and follow every line this node keeps — the "
                         "core's and every other app's, not only its own."),
     },
     {
         "name": "links",
+        "permission": "readstate.links",
         "title": "Read this node's links",
         "description": ("See which nodes this one is connected to right now, "
                         "over which medium and at what latency."),
     },
 )
 _GRANT_NAMES = tuple(grant["name"] for grant in GRANTS)
+_GRANT_PERMISSION = {grant["name"]: grant["permission"] for grant in GRANTS}
 
 _BY_NAME = {app["name"]: app for app in BUILTIN_APPS}
 _BY_APP_ID = {app["app_id"]: app["name"] for app in BUILTIN_APPS}
@@ -103,7 +154,17 @@ class AppRegistry:
         self._path = os.path.join(state_dir, _FILENAME) if state_dir else None
         self._lock = threading.RLock()
         self._state: dict[str, dict] = {}
+        # What each app asked for and what a human gave it — the built-ins
+        # here, and every app that ever connected with a manifest.
+        self.perms = app_perms.PermissionBook(state_dir)
         self._load()
+        for app in BUILTIN_APPS:
+            self.perms.declare(app["app_id"].hex(), {
+                "name": app["name"], "title": app["title"],
+                "description": app["description"],
+                "permissions": app.get("permissions", [])},
+                source="builtin", fixed=True)
+        self._migrate_grants()
 
     # -- persistence ------------------------------------------------------
 
@@ -131,6 +192,22 @@ class AppRegistry:
                 "grants": {name: _flag(granted.get(name), False)
                            for name in _GRANT_NAMES},
             }
+
+    def _migrate_grants(self) -> None:
+        """Carry the grants of `apps.json` over to the permission book, once.
+
+        A node that had given fleet its log must not lose that on upgrade, and
+        must not have it given back after an operator takes it away again — so
+        only a grant the book has never heard of moves, and it moves as it was."""
+        for app in BUILTIN_APPS:
+            app_hex = app["app_id"].hex()
+            old = self._state.get(app["name"], {}).get("grants") or {}
+            explicit = {row["name"]: row["explicit"]
+                        for row in self.perms.view(app_hex)["permissions"]}
+            for name, value in old.items():
+                permission = _GRANT_PERMISSION.get(name)
+                if value and permission in explicit and explicit[permission] is None:
+                    self.perms.set_grant(app_hex, permission, True)
 
     def _save(self) -> None:
         if not self._path:
@@ -170,6 +247,7 @@ class AppRegistry:
             out = []
             for app in BUILTIN_APPS:
                 entry = self._state.get(app["name"], {})
+                app_hex = app["app_id"].hex()
                 # Field names follow what /api/state already published for
                 # apps (id / name / path); the state flags are the new part.
                 out.append({
@@ -183,11 +261,12 @@ class AppRegistry:
                     "running": app["name"] in running,
                     # Self-describing, like a transport's options: the page
                     # renders what the node declares rather than holding its
-                    # own copy of what a grant is called.
-                    "grants": [dict(grant,
-                                    granted=bool((entry.get("grants") or {})
-                                                 .get(grant["name"])))
-                               for grant in GRANTS],
+                    # own copy of what a grant is called. Read from the
+                    # permission book — the one place a grant is held.
+                    "grants": [dict(grant, granted=self.perms.allows(app_hex, grant["permission"]))
+                               for grant in GRANTS
+                               if grant["permission"] in self.perms.requested(app_hex)],
+                    "permissions": self.perms.view(app_hex)["permissions"],
                 })
             return out
 
@@ -197,11 +276,11 @@ class AppRegistry:
         The one question the connector asks, and it is asked on a path an app
         controls the arguments of, so every unknown app, unknown capability and
         missing entry is a refusal rather than a lookup that happens to fail."""
-        with self._lock:
-            entry = self._state.get(name)
-            if entry is None or capability not in _GRANT_NAMES:
-                return False
-            return bool(entry.get("grants", {}).get(capability))
+        entry = _BY_NAME.get(name)
+        if entry is None or capability not in _GRANT_NAMES:
+            return False
+        return self.perms.allows(entry["app_id"].hex(),
+                                 _GRANT_PERMISSION[capability])
 
     def granted_to_id(self, app_id: bytes, capability: str) -> bool:
         """The same question, asked with the identifier a connector has.
@@ -225,13 +304,11 @@ class AppRegistry:
 
     def set_grant(self, name: str, capability: str, granted: bool) -> bool:
         """Give or take back one grant. Refused for anything not declared."""
-        with self._lock:
-            entry = self._state.get(name)
-            if entry is None or capability not in _GRANT_NAMES:
-                return False
-            entry.setdefault("grants", {})[capability] = bool(granted)
-            self._save()
-            return True
+        entry = _BY_NAME.get(name)
+        if entry is None or capability not in _GRANT_NAMES:
+            return False
+        return self.perms.set_grant(entry["app_id"].hex(),
+                                    _GRANT_PERMISSION[capability], bool(granted))
 
     def set_installed(self, name: str, installed: bool) -> bool:
         """Uninstalling also disables **and drops every grant**: an app must
@@ -246,6 +323,13 @@ class AppRegistry:
             if not installed:
                 entry["enabled"] = False
                 entry["grants"] = {key: False for key in _GRANT_NAMES}
+                # …and every permission above the ordinary ones: an app
+                # reinstalled later starts from nothing, not from what somebody
+                # allowed the app that used to have that name.
+                app_hex = _BY_NAME[name]["app_id"].hex()
+                for permission in self.perms.requested(app_hex):
+                    if app_perms.level(permission) != app_perms.NORMAL:
+                        self.perms.set_grant(app_hex, permission, False)
             self._save()
             return True
 

@@ -14,6 +14,7 @@
 #   ./install.sh --no-start             # install and enable, don't start now
 #   ./install.sh --no-allow-update      # keep the node out of system updates
 #   ./install.sh --docker               # let the node manage this machine's docker
+#   ./install.sh --no-docker            # …or not (a root install does by default)
 #   ./install.sh --reset-password       # set a new console password, print it
 #   ./install.sh --uninstall            # remove the service and the files
 #   ./install.sh --uninstall --purge    # …and the node's identity + state
@@ -38,7 +39,7 @@
 #   NMESH_DATA=path      node state directory
 #   NMESH_SERVICE=name   service name (default nmesh)
 #   NMESH_USER=name      account the service runs as (root install: nmesh)
-#   NMESH_DOCKER=1       same as --docker
+#   NMESH_DOCKER=1|0     same as --docker / --no-docker
 #
 # Everything above the "MAIN" banner is definitions only: the test-suite sources
 # this file with NMESH_INSTALL_LIB=1 to exercise them without installing.
@@ -294,6 +295,47 @@ remove_from_group() {
     return 1
 }
 
+# ── choices that outlive one run ─────────────────────────────────────────────
+# Re-running the installer is how a node is upgraded, so a default must never
+# undo what an operator refused on an earlier run. A refusal is written down
+# here — root's file, outside the tree the node's account owns, because a node
+# able to edit it could grant itself what was taken away.
+choices_file() { echo "${NMESH_CHOICES:-/etc/nmesh/$SERVICE.choices}"; }
+
+remembered() {
+    local file
+    file="$(choices_file)"
+    [ -f "$file" ] || return 0
+    sed -n "s/^$1=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+remember() {
+    local file dir tmp
+    file="$(choices_file)"
+    dir="$(dirname "$file")"
+    [ -d "$dir" ] || run_priv mkdir -p "$dir" 2>/dev/null || return 1
+    tmp="$(mktemp)" || return 1
+    { [ -f "$file" ] && grep -v "^$1=" "$file" 2>/dev/null; echo "$1=$2"; } > "$tmp"
+    run_priv install -m 644 "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+}
+
+# Whether this run grants docker. A word on the command line wins and is
+# remembered; otherwise a root install of a machine that has docker grants it,
+# unless an earlier run refused it. Sets WANT_DOCKER and DOCKER_DEFAULTED.
+settle_docker() {
+    is_root || return 0
+    if [ "$DOCKER_ASKED" = true ]; then
+        remember docker "$([ "$WANT_DOCKER" = true ] && echo yes || echo no)" \
+            || warn "Could not record the docker choice in $(choices_file)"
+    elif [ "$(remembered docker)" = no ]; then
+        info "Docker stays off: it was refused on an earlier run (--docker grants it)"
+    elif group_exists docker; then
+        WANT_DOCKER=true
+        DOCKER_DEFAULTED=true
+    fi
+}
+
 delete_service_user() {
     local name="$1"
     user_exists "$name" || return 0
@@ -375,9 +417,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 ${user:+User=$user}
-$(if [ "$docker" = true ] && [ -n "$user" ]; then echo "# Asked for with --docker. An account that can reach the docker socket can
-# start a privileged container bind-mounting /, so this is root on this machine
-# — re-run install.sh --no-docker to take it back.
+$(if [ "$docker" = true ] && [ -n "$user" ]; then echo "# The node may manage this machine's docker (a root install's default, or
+# --docker). An account that can reach the docker socket can start a privileged
+# container bind-mounting /, so this is root on this machine — re-run
+# install.sh --no-docker to take it back.
 SupplementaryGroups=docker"; fi)
 WorkingDirectory=$prefix
 Environment=NMESH_DATA=$data
@@ -529,14 +572,18 @@ ALLOW_UPDATE=true
 # every install that merely took the default.
 ALLOW_UPDATE_ASKED=false
 UPDATE_GRANTED=false
-# Docker is **off** unless asked for, and stays that way: an account in the
-# `docker` group can start a privileged container bind-mounting `/`, which is
-# the machine. That is a bigger grant than the update wrapper — which runs one
-# fixed command — so it is never a default and never inferred from docker
-# happening to be installed.
+# Docker is **on for a root install** of a machine that has it, unless refused:
+# whoever installs with sudo is the machine's administrator, and a node that
+# cannot manage the containers it was installed beside is a fleet `docker` right
+# that does nothing. It is still root — an account in the `docker` group can
+# start a privileged container bind-mounting `/` — so it is said where it is
+# granted, `--no-docker` refuses it, and a refusal is remembered (`remember`).
+# A user install never gets it by default: that account cannot be put in a
+# group without root, and should not be.
 WANT_DOCKER=false
 DOCKER_ASKED=false
 DOCKER_GRANTED=false
+DOCKER_DEFAULTED=false
 NODE_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -572,6 +619,7 @@ fi
 # can only run as whoever is installing it. `--run-as root` is the way out.
 SERVICE_ACCOUNT="${NMESH_ACCOUNT:-nmesh}"
 if [ "${NMESH_DOCKER:-}" = "1" ]; then WANT_DOCKER=true; DOCKER_ASKED=true; fi
+if [ "${NMESH_DOCKER:-}" = "0" ]; then WANT_DOCKER=false; DOCKER_ASKED=true; fi
 if [ -z "$RUN_USER" ]; then
     if is_root; then RUN_USER="$SERVICE_ACCOUNT"; else RUN_USER="$(id -un)"; fi
 fi
@@ -675,6 +723,9 @@ if [ "$UNINSTALL" = true ]; then
             run_priv rm -rf "$DATA"
             warn "Purged $DATA — this node's identity is gone for good"
         fi
+        # What was refused for that node goes with it: a fresh install is a
+        # fresh set of defaults.
+        if is_root && [ -f "$(choices_file)" ]; then run_priv rm -f "$(choices_file)"; fi
     elif [ -d "$DATA" ]; then
         info "State kept in $DATA (use --purge to delete the node's identity too)"
     fi
@@ -893,11 +944,12 @@ else
 fi
 
 # ── docker ───────────────────────────────────────────────────────────────────
-# Deliberately not like the update grant. That one is a single fixed command the
-# node cannot rewrite; this is membership of a group whose socket starts
-# containers, and a container can bind-mount `/`. So it is **root**, it is never
-# a default, and it is never inferred from docker being installed — somebody has
-# to ask for it, on this machine or in the deploy form that installed it.
+# Not like the update grant. That one is a single fixed command the node cannot
+# rewrite; this is membership of a group whose socket starts containers, and a
+# container can bind-mount `/`. So it is **root**, and it is said so wherever it
+# is granted. A root install grants it when docker is here and nobody refused it
+# — on this run (`--no-docker`) or on an earlier one (remembered).
+settle_docker
 if [ "$WANT_DOCKER" = true ]; then
     if ! group_exists docker; then
         warn "--docker: this machine has no docker group — install docker first"
@@ -908,6 +960,9 @@ if [ "$WANT_DOCKER" = true ]; then
     else
         DOCKER_GRANTED=true
         ok "$RUN_USER may drive this machine's docker — which is root on it"
+        if [ "$DOCKER_DEFAULTED" = true ]; then
+            info "  (the default for a root install — ./install.sh --no-docker takes it back)"
+        fi
     fi
 elif [ "$DOCKER_ASKED" = true ] && [ -n "$RUN_USER" ] && group_exists docker; then
     # The absence of a right has to be expressible, exactly as above.
@@ -1059,6 +1114,7 @@ echo "  Service      : $SERVICE ($INIT)"
 echo "  Follow it    : $(service_hint "$INIT" "$SERVICE")"
 if [ "$DOCKER_GRANTED" = true ]; then
 echo "  Docker       : ${RUN_USER:-root} can drive it — which is root on this machine"
+echo "                 (--no-docker takes it back)"
 fi
 echo ""
 if [ "$INIT" = runit ]; then

@@ -229,6 +229,38 @@ Reach, written once, in `plane.REACHED_BY`:
 | `LOCAL` | everything |
 | `GOVERN` | `govern=True` and `remote=True` |
 | `REMOTE` | `remote=True` |
+| `app:<id>` | what a person granted that app — asked of the gate, not of this table |
+
+### Origins: and an app on this machine
+
+`Origin.app(app_hex)` is an app attached to the data connector, driving the node
+through the **internal API**: a `CONTROL` frame carrying the same request a page
+sends, answered by the same plane ([`../AppPermissions/guide`](../AppPermissions/guide)).
+The connector builds that origin, and only for a client that authenticated with the
+app's **own** token — the shared token says "a local process" and is refused
+`unauthorized`. The id is in the origin so a job, visible to exactly the origin that
+started it, is one app's and no other's.
+
+An app origin reaches nothing by distance. The plane asks its **gate**
+(`set_app_gate`, an `app_perms.ControlGate` over the permission book) and the gate
+answers from what a person granted: a read needs `readstate.<scope>`, a write
+`control.<scope>`, `jobs.start` and `apps.call` are answered for what they carry,
+and `apps.grant` / `permit` / `forget` / `token` are refused to every app whatever
+it holds — permissions never move themselves. No gate means no app reaches
+anything. `ControlPlane.permits(origin, op, entry, params)` is the one question for
+every kind of caller, which is what `catalogue`, `check` and `jobs.start` ask.
+
+### Mods: an operation an app stands in front of
+
+`set_hooks` gives the plane a registry of hooks (`DataConnector.hooks`). When an
+operation has one, `invoke` asks it — `before` (new arguments), `replace` (an answer
+instead), `after` (a changed answer) — and an app needs `modding` to install one.
+The node survives a mod rather than trusting it: the native operation is the
+fallback for a hook that fails, times out or answers something that is not an
+answer; arguments a `before` hook hands on are bound against the declaration again;
+the app that installed a hook never sees its own calls through it; and `apps.*`,
+`control.*`, `jobs.*` and `web.*` cannot be modded at all — a mod that could rewrite
+the catalogue or a grant could hide itself from the page that exists to show it.
 
 ## Everything travels, and the two things that stood in the way
 
@@ -384,18 +416,22 @@ keeps working, with one implementation behind it.
 | `pseudo` | `get` `search` `save` `lookup`~ | `/api/pseudo` (`?q=`, `?wide=1`) |
 | `control` | `catalogue` `changes` | — |
 | `jobs` | `start` `poll` `list` `forget` | — (new) |
-| `apps` | `catalogue` `call` `list` `set` `grant` | `/api/app-api`, `/api/app-call`, `/api/apps/*` |
+| `apps` | `catalogue` `call` `list` `set` `grant` `permissions` `permit`\* `forget`\* `token`° `api` | `/api/app-api`, `/api/app-call`, `/api/apps/*` |
 | `releases` | `overview` `check`~ `apply`\*~ `publish`\*~ `install`\*~ `trust`\* `untrust`\* `auto`\* `endorse`\* | `/api/releases`, `/api/releases/*`, `/api/update/check`, `/api/update/apply` |
 | `packages` | `search` `held` `entry` `lookup`~ `describe`~ `install`\*~ `trust`\* `subscribe`\* | `/api/packages`, `/api/packages/<id>`, `/api/packages/*` |
 | `keys` | `overview` `create`\*~ `adopt`\*~ `offer`\*~ `accept`\*~ `refuse`\* `forget`\* | `/api/keys`, `/api/keys/*` |
 | `store` | `overview` `list` `install` `update` `uninstall` | `/api/store`, `/api/store/catalog`, `/api/store/installed`, `/api/store/install|update|uninstall` |
 | `transfer` | `kinds` `fetch`~ `take` `offer` `put` `commit`~ `drop` | `/api/packages/<id>/download`, `/api/app/publish`, `/api/store/publish` |
 | `join` | `network` `invite`\* `ticket`\* `block`\* `use_block` | `/api/join`, `/api/invite`, `/api/ticket`, `/api/invite/block`, `/api/join/block` |
+| `web` | `routes` `request`° | — (new) |
 
 `\*` needs the fleet's `govern` capability as well as `manage`. `~` travels as a
 **job** — `jobs.start` hands back a ticket, `jobs.poll` answers what became of
 it — because it declares more than `REMOTE_BUDGET` and the relay cannot hold a
-call open that long. **Nothing is local-only**, and
+call open that long. `°` never leaves this machine, and there are exactly two:
+`apps.token` (the credential an app connects with — the connector listens on
+this machine only) and `web.request` (the routes chat's and fleet's pages call
+— a managed node is not a jump host). **Nothing else is local-only**, and
 `tests/test_control_plane.py` asserts it operation by operation.
 
 
@@ -455,6 +491,27 @@ by the relay, but `/api/app-call` was not — so an operator managing a node cou
 reach chat's declared operations on it (adding a contact to *their* address
 book) through a route the denylist did not name. The permission is now on the
 operation, where a new route cannot slip past it.
+
+## Apps that declare nothing: the `web` module
+
+Chat's and fleet's pages call routes nobody declared as operations. Rather than
+write each one again, `web.routes` reads them **from what the browser is sent** —
+the page's script bundle, scanned for its `api(...)` calls and the method of each
+(`src/app_web.py`) — and `web.request` calls one exactly as listed, replayed over
+the loopback against this console under a session that lives for that one call.
+
+`web.request` is one of the two operations that **never leave this machine**
+(`°` in the table, with `apps.token`): a managed node is not a jump host, and a
+remote console reaching chat's and fleet's page surfaces would make it one. An app
+reaches it only with `control.appweb`.
+
+## The internal API, listed
+
+`apps.api` answers every operation this node exposes — the plane's, the apps',
+and the page routes — with how it is reached, the permission an app needs, any app
+modding it, and the MCP tool it becomes. It is what *Apps → Internal API* shows and
+the same derivation the MCP app's tools come from (`Docs/Apps/mcp`), so the two
+cannot disagree.
 
 ## Two changes to what the API answers
 

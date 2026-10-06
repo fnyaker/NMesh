@@ -294,13 +294,14 @@ FLEET_HTML = """<!doctype html>
                 <code class="inline">install.sh</code> already has. Chosen here because a machine
                 installed from this page is a machine nobody is going to log into afterwards to
                 change its mind.</p>
-              <label class="check"><input id="dep-docker" type="checkbox">
+              <label class="check"><input id="dep-docker" type="checkbox" checked>
                 <span>Let the node manage that machine's <b>docker</b> — its account joins the
                   <code class="inline">docker</code> group</span></label>
-              <p class="muted small">Off by default, and it is not a small tick: an account that
-                can reach the docker socket can start a privileged container bind-mounting
-                <code class="inline">/</code>. That is root on that machine. It is also what the
-                <code class="inline">docker</code> capability needs in order to work at all.</p>
+              <p class="muted small">On by default for a system install of a machine that has
+                docker, like <code class="inline">install.sh</code> run with sudo. It is not a small
+                tick: an account that can reach the docker socket can start a privileged container
+                bind-mounting <code class="inline">/</code> — that is root on that machine. Untick it
+                and the machine is told no, and remembers it across upgrades.</p>
               <label class="check"><input id="dep-update" type="checkbox" checked>
                 <span>Let it run its own system updates (one fixed root command)</span></label>
               <label class="check"><input id="dep-fleet" type="checkbox" checked>
@@ -1659,7 +1660,7 @@ async function openShell(){
   const node = $("shell-node").value;
   if(!TERM_SESSION) TERM_SESSION = new ShellSession($("term"), {});
   if(!node){ TERM_SESSION.say("No node has granted you a shell."); return; }
-  if(await TERM_SESSION.open(node)) $("term").focus();
+  if(await TERM_SESSION.open(node)) TERM_SESSION.focus();
 }
 
 // ---- wiring ----------------------------------------------------------------
@@ -1980,45 +1981,13 @@ $("term-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const line = $("term-in").value;
   $("term-in").value = "";
-  if(TERM_SESSION) await TERM_SESSION.send(line + "\n");
+  // A return, as Enter sends: a line feed is not what a raw-mode program reads
+  // as the end of a line.
+  if(TERM_SESSION) await TERM_SESSION.typed(line + "\r", true);
 });
-// Raw keystrokes: this is what makes it a terminal rather than a form. The pane
-// is focusable, so a click puts the keyboard where the user is looking.
-$("term").addEventListener("keydown", async (event) => {
-  if(!TERM_SESSION || !TERM_SESSION.live()) return;
-  // Copy and paste are the browser's while something is selected on the screen.
-  if((event.ctrlKey || event.metaKey) && ["c", "v", "C", "V"].includes(event.key) &&
-     TERM_SESSION.screen.selected()) return;
-  // Shift with a page key scrolls the scrollback rather than reaching the pty —
-  // the convention every terminal uses, and the only way back up now that the
-  // screen is drawn rather than laid out.
-  if(event.shiftKey && (event.key === "PageUp" || event.key === "PageDown")){
-    if(TERM_SESSION.screen.scrollBy(
-        (event.key === "PageUp" ? -1 : 1) * (TERM_SESSION.screen.rows - 1))){
-      TERM_SESSION.paint(true);
-    }
-    event.preventDefault();
-    return;
-  }
-  const bytes = keyBytes(event, TERM_SESSION.term);
-  if(bytes === null) return;
-  event.preventDefault();
-  await TERM_SESSION.send(bytes);
-});
-$("term").addEventListener("paste", async (event) => {
-  if(!TERM_SESSION || !TERM_SESSION.live()) return;
-  event.preventDefault();
-  await TERM_SESSION.paste((event.clipboardData || window.clipboardData).getData("text"));
-});
-// The pointer, the wheel and the selection belong to the session: it owns the
-// screen they act on, and there is no text in the DOM for a browser to select.
-$("term").addEventListener("copy", (event) => {
-  if(!TERM_SESSION) return;
-  const picked = TERM_SESSION.screen.selected();
-  if(!picked) return;
-  event.preventDefault();
-  event.clipboardData.setData("text/plain", picked);
-});
+// Keystrokes, the clipboard and the pointer are the session's own (see
+// `ShellSession.bind`): one keyboard path for both places a shell is drawn, so
+// a key that works in the full-screen terminal works here too.
 // The panel changes size without the window moving — a tab switch, a rail
 // folding away — and a pty told the old size draws every box to the wrong
 // place. So the element is watched, not the window.

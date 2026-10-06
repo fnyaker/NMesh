@@ -1,0 +1,286 @@
+# App permissions — what an app may do on this node
+
+`src/app_perms.py` · `src/data_connector.py` · `src/control/modules/apps.py`
+
+An app used to get one of two answers: everything the data connector offers — its
+own section of the mesh, a drawer, a DHT namespace, names, the node's signature on
+an assertion — for holding the connector's token, and two grants beside it
+(`logs`, `links`) that an operator ticked on the Apps page. That was enough while
+the apps were the two that ship with the node. It stops being enough the moment an
+app can **drive** the node — call the operations the console calls, or replace one
+of them — because "it holds the token" is then the whole answer to "may it restart
+this machine?".
+
+So permissions are **named**, arranged in a **tree**, **asked for** in a manifest
+and **granted by a person**.
+
+## The tree
+
+Every permission there is, and its level. Nothing outside this list exists: a
+manifest that asks for something else is told which name it got wrong.
+
+| Permission | Level | What it allows |
+|---|---|---|
+| `network` | normal | end-to-end messages on the app's own section |
+| `storage` | normal | the app's own encrypted drawer |
+| `dht` | normal | entries under the app's own DHT namespace |
+| `names` | normal | reading node names, finding a node by name |
+| `identity` | normal | assertions signed in the node's name, scoped to this app ([`../AppAuth/guide`](../AppAuth/guide)) |
+| `log` | normal | lines in the node's log, attributed to the app |
+| `notify` | normal | a problem on the notice board, filed under the app |
+| `report` | normal | reporting a node that abuses it (never answered) |
+| `readstate` | sensitive | **everything below** — what the console shows, without changing any of it |
+| `readstate.node` | sensitive | version, uptime, addresses, links, known nodes, names |
+| `readstate.links` | sensitive | the links alone — a medium, a latency, an age (was the `links` grant) |
+| `readstate.logs` | sensitive | the whole log, the core's and every app's (was the `logs` grant) |
+| `readstate.alerts` | sensitive | the notice board |
+| `readstate.trace` | sensitive | the protocol trace |
+| `readstate.config` | sensitive | settings and transport options |
+| `readstate.trust` | sensitive | trust anchors, witnesses, membership, signing keys held (never the keys) |
+| `readstate.updates` | sensitive | releases, packages, the installed set, transfers |
+| `readstate.apps` | sensitive | apps, their state, and their read-only operations |
+| `control` | dangerous | **everything below** — what an operator at the console can do |
+| `control.node` | dangerous | ping, speed test, forget, retry, restart, rename |
+| `control.network` | dangerous | probing, punching, listening, discovery, multi-link |
+| `control.config` | dangerous | settings and transports |
+| `control.diagnostics` | dangerous | starting the trace, keeping the log, clearing alerts |
+| `control.trust` | dangerous | trust, revocation, witnesses, invitations, joining a network |
+| `control.updates` | dangerous | releases, packages, the store, signing keys, transfers |
+| `control.apps` | dangerous | enabling apps and calling the operations they declare — **never** their permissions |
+| `control.appweb` | dangerous | the routes an app's own page calls, for an app that declares no operations |
+| `modding` | dangerous | standing in front of the node's own operations — before, after, or instead of them |
+
+**A parent covers its children.** Granting `readstate` grants all nine reads;
+granting `readstate.logs` grants that one. Taking a parent back takes its children
+with it: a page that unticks `readstate` and leaves `readstate.logs` ticked has
+said two contradictory things, and the narrower one is kept.
+
+**Three levels, by blast radius.**
+
+- *normal* — what every connector client always had. Allowed when the manifest asks
+  for it, and for an app with **no manifest at all** (every app written before
+  manifests existed — an upgrade must not take its section away). An operator can
+  still take one back.
+- *sensitive* — reading this node's state. Off until a person grants it.
+- *dangerous* — driving the node or replacing what it does. Off until granted, and
+  the page says what it means before the switch moves.
+
+## The manifest
+
+An app says what it wants, and why. At install time from its package — a
+`nmesh.json` at the root of its files — or at run time over the connector (the
+`MANIFEST` frame, `ConnectorClient.declare`):
+
+```json
+{
+  "name": "statusboard",
+  "title": "Status board",
+  "version": "1.2.0",
+  "description": "A wall display of this node and its links.",
+  "permissions": [
+    {"name": "readstate.node", "why": "to show this node's state"},
+    {"name": "readstate.links", "why": "to draw its links"},
+    "network"
+  ],
+  "api": [
+    {"name": "refresh", "summary": "Redraw now", "changes": true}
+  ]
+}
+```
+
+- **Declaring asks; it grants nothing above normal.** The answer (`PERMS`) says
+  what was asked and what is held — the two differ until a person decides.
+- **Least privilege is what an app asks for now.** A new manifest that no longer
+  asks for something drops the grant; asking for it again does not bring it back.
+- **A manifest is hostile input**: at most 32 kB, 32 permissions, 32 operations; a
+  name is `[a-z][a-z0-9_]{0,31}`; text is cut to its bound and stripped of anything
+  unprintable (a direction override in a "why" is how a reason lies about itself on
+  the page that shows it). An unknown *field* is ignored — a newer app on an older
+  node — and an unknown *permission* is refused by name.
+- **A built-in's manifest is this build's.** Chat, fleet and MCP declare theirs from
+  the source at every start, and a client claiming one of their ids cannot rewrite
+  what they ask for.
+- `api` is optional: the operations the app answers, declared exactly like a
+  built-in's ([`../AppAPI/guide`](../AppAPI/guide)). Only an app connected with
+  its own token may expose any, and never under a built-in's name.
+
+## Who an app is: its own token
+
+A grant is held by an **app id**, so it is only as good as the proof that the
+client asking *is* that app. The connector's shared token cannot be that proof —
+every local process that ever held it could claim any id. So each app has **its
+own token**, derived from a secret the node keeps (`<data>/connector.secret`, mode
+0600, never sent anywhere):
+
+```
+token_for(app_id) = "app-" ‖ base64url(HMAC-SHA256(secret, "nmesh-app-token\0" ‖ app_id)[:24])
+```
+
+| A client authenticated with… | is answered… |
+|---|---|
+| the app's own token | everything that app was granted |
+| the shared token | the normal set and **nothing above it**, whatever was granted to the id it claims |
+
+The built-in apps connect with their own tokens. An app outside the node gets its
+token from the Apps page — *Permissions → Connector token*, on this machine only
+(`apps.token` never travels) — or is launched with it
+([`../ProcessLauncher/guide`](../ProcessLauncher/guide)). The secret is kept, so a
+container given its token once keeps working across restarts.
+
+## What each frame needs
+
+Checked on every frame, against the book as it is *now*: taking a permission back
+takes effect on the next frame, not the next connection.
+
+| Frames | Needs |
+|---|---|
+| `SEND`, and delivery of `RECV` | `network` |
+| `STORE_*` | `storage` |
+| `APP_DHT_*` | `dht` |
+| `PSEUDO_*` | `names` |
+| `AUTH_ASSERT`, `AUTH_VERIFY` | `identity` |
+| `LOG_WRITE` | `log` |
+| `NOTIFY` | `notify` |
+| `ABUSE` | `report` |
+| `LOG_QUERY`, `LOG_SINCE`, `LOG_WATCH` | `readstate.logs` |
+| `LINKS` | `readstate.links` |
+| `CONTROL` | the app's own token, then what the operation needs (below) |
+| `MOD_HOOK` | the app's own token and `modding` |
+
+A refused question is still **answered** — with the empty answer (`absent`, `[]`,
+`refused: true`) — so an app that is not permitted never looks like a node that has
+wedged.
+
+## The internal API
+
+`CONTROL` carries one control-plane frame — the same document a console page sends
+to `POST /api/control` — and is answered with the plane's reply, matched by the
+request's `id`. The app reaches **every operation the console has**, through the
+same validation, under an origin of its own (`app:<id>`), and the plane asks the
+permission book what that origin may call:
+
+| An operation… | needs |
+|---|---|
+| that reads (`changes` not declared) | `readstate.<scope>` |
+| that changes something | `control.<scope>` |
+| `control.catalogue`, `control.changes`, `jobs.poll/list/forget` | nothing more (the catalogue is filtered, a job is visible to the app that started it) |
+| `jobs.start` | what the operation it starts needs |
+| `apps.call` | `readstate.apps` for a read, `control.apps` for one that changes state — and never an operation declared `operator` |
+| `apps.grant`, `apps.permit`, `apps.forget`, `apps.token` | **nothing an app can hold** |
+
+The scope is the module's (`app_perms.MODULE_SCOPE`): `node` and `pseudo` are
+`node`; `config` and `transports` are `config`; `trace`, `logs`, `alerts` read as
+themselves and write as `diagnostics`; `trust` and `join` are `trust`; `keys`,
+`releases`, `packages`, `store`, `transfer` are `updates`; `web` reads as `apps`
+and writes as `appweb`. A module that is not mapped is reachable by no app, and
+`tests/test_app_perms.py` fails the day the plane grows one.
+
+**Permissions never move themselves.** The four operations that decide what an app
+may do are refused to every app origin, whatever it holds. An app with
+`control.apps` can enable another app; it cannot give itself, or anybody, anything.
+
+**Internal only, by default.** The connector listens on the loopback (or a Unix
+socket, 0600). Nothing here is reachable from the network unless an app puts it
+there — which is exactly what the MCP app does, deliberately and behind its own
+token ([`../Apps/mcp`](../Apps/mcp)). The **Apps → Internal API** page lists every
+endpoint with the permission an app needs for it, the same list the MCP app's tools
+come from.
+
+```python
+client = ConnectorClient(host, port, token_for_this_app, APP_ID)
+await client.connect()
+await client.declare({"name": "statusboard", "permissions": ["readstate"]})
+reply = await client.control("node.state")      # {"ok": true, "result": {...}}
+reply = await client.control("node.restart")    # {"ok": false, "code": "refused",
+                                                #  "error": "node.restart needs the control.node permission"}
+```
+
+## Apps that declare nothing: their page's routes
+
+Chat and fleet declare a handful of operations; most of what they do lives behind
+the routes their own pages call. Writing each again as an operation would be a
+second implementation of every one, so the routes are **read from what the browser
+is sent** (`src/app_web.py`): the bundle the console serves for the page is scanned
+for the calls it makes — `api("/api/chat/send", "POST", …)` — with the method each
+uses. What the page can do is, by construction, what is offered:
+
+- `web.routes` lists them, per app with a page that is running;
+- `web.request` calls one, exactly as listed (method and path), replayed over the
+  loopback against this console under a session that exists for that one call.
+
+`web.request` **never leaves this machine** — a managed node is not a jump host,
+and this would make it one — and an app reaches it only with `control.appweb`.
+
+## Modding
+
+An app holding `modding` may stand in front of one of the node's operations:
+
+```python
+async def tag(payload):            # {"op", "mode", "params", "result"?}
+    return {"result": dict(payload["result"], shown_by="statusboard")}
+await client.hook("node.state", "after", tag)
+```
+
+| Mode | The hook is asked | and answers |
+|---|---|---|
+| `before` | with the arguments | `{"params": …}` — new arguments |
+| `replace` | with the arguments | `{"result": …}` — the answer, instead of the node's |
+| `after` | with the arguments and the node's answer | `{"result": …}` — a changed answer |
+
+What makes that something a node **survives** rather than something it is at the
+mercy of:
+
+- **The native operation is the fallback.** A hook that raises, answers garbage, or
+  takes longer than `_MOD_TIMEOUT` (5 s) is ignored — the call is answered as if
+  there were none, and the failure is written down where an operator looks.
+- **What a mod hands on is checked again.** Arguments from a `before` hook are bound
+  against the declaration like a caller's: an undeclared one or a wrong kind falls
+  back to the caller's own.
+- **A mod never sees its own calls**, or a hook that calls what it hooks would
+  recurse.
+- **One hook per operation**, and it belongs to the client that installed it: it
+  goes when the client does, and it is asked of the book at every call — taking
+  `modding` back takes every hook with it at once.
+- **What says what the node is cannot be modded**: `apps.*`, `control.*`, `jobs.*`
+  and `web.*`. A mod that could rewrite the catalogue or a grant could hide itself
+  from the page that exists to show it. The Internal API page marks every modded
+  operation with the app that mods it.
+
+## In the console
+
+*Apps → Installed*: each app's card says how many permissions it asked for and how
+many it holds; **Permissions** opens the list — only what it asked for, each with
+its level, the node's description and the app's own reason. A dangerous one asks
+for confirmation first. *Connected apps* lists every app that is not built in and
+declared a manifest: attached now (with its own token or only the shared one),
+installed with a `nmesh.json`, or remembered from before; it is where an app's
+connector token is read (this machine only) and where an app is forgotten.
+
+*Apps → Internal API*: every endpoint, what it does, the permission an app needs,
+and the MCP tool it becomes.
+
+## Control-plane operations
+
+| Operation | Reach | What it does |
+|---|---|---|
+| `apps.permissions` | remote | every app's manifest, what it asked for and holds, and the tree |
+| `apps.permit` | govern | give or take back one permission from one app |
+| `apps.forget` | govern | drop an app that is not built in, and its grants |
+| `apps.token` | this machine only | the connector token one app authenticates with |
+| `apps.api` | remote | every endpoint, with the permission it needs and its MCP tool |
+| `web.routes` | remote | the routes each app's page calls |
+| `web.request` | this machine only | call one of them |
+
+Granting is `govern`, not `manage`: what an app may do on a node is a decision
+about trust, like pinning a signing key, and an operator handed a node's console to
+restart a service was not handed that.
+
+## Storage
+
+`<data>/app_perms.json`, mode 0600, written atomically: per app id, the manifest and
+the grants a person made. Bounded (`MAX_APPS` = 64; the app with no grant seen
+longest ago goes first, a built-in never). Read defensively: a corrupt file, a grant
+that is not the literal `true`, an id that is not 16 lowercase hex characters, a
+permission that does not exist — each is nothing granted, never a crash. The two
+grants of `apps.json` (`logs`, `links`) are carried over once, as they were, and
+never again after an operator changes them.

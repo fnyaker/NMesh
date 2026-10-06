@@ -32,7 +32,8 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
   identity once, and says nothing about how it behaves afterwards. Nothing is
   trusted by default; what trust exists is named, local and revocable — the
   anchors an operator pinned, the capabilities a human granted in Fleet, the
-  witnesses they designated.
+  witnesses they designated, the permissions a human granted an app (held by the
+  app's own identity, never by whoever holds a shared token).
 - **Hearsay is never authority.** A node's opinion of another node travels, and
   is weighed by whoever receives it — never obeyed. If a report from a stranger
   could get a node cut off, anybody able to speak could cut anybody off, and the

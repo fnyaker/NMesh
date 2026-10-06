@@ -54,6 +54,22 @@ class Context:
         self._api = api
         self._host = host
         self._restart = restart
+        # Things built after the context, handed to it once they exist: the
+        # permission book, the data connector, the console's own web surface.
+        # Named, so a module asks for one of these and nothing else.
+        self._provided: dict = {}
+
+    PROVIDED = ("plane", "perms", "connector", "web")
+
+    def provide(self, **things) -> None:
+        for name, value in things.items():
+            if name not in self.PROVIDED:
+                raise ValueError(f"nothing called {name!r} is provided")
+            self._provided[name] = value
+
+    def provided(self, name: str):
+        """One of :data:`PROVIDED`, or ``None`` when this node has none."""
+        return self._provided.get(name)
 
     def bind_loop(self, loop) -> None:
         """Point the bridge at the loop the node is actually running on.
