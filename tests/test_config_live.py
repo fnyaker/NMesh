@@ -72,7 +72,8 @@ class TestSavingAppliesWhatItCan:
                 reply = await _call(channel, "config.save", {"settings": {
                     "mlo_always": True, "dynamic_address": True,
                     "transport_balance": 70, "update_check_minutes": 60,
-                    "update_when_active": True, "no_abuse_gossip": True}})
+                    "update_when_active": True, "no_abuse_gossip": True,
+                    "route_hold_minutes": 3}})
                 assert reply.ok, reply.error
                 assert reply.result["restart_required"] is False
                 assert reply.result["pending"] == []
@@ -82,6 +83,7 @@ class TestSavingAppliesWhatItCan:
                 assert node._update_check_seconds == 3600
                 assert node._update_when_active is True
                 assert node._gossip_abuse is False
+                assert node._route_hold == 180
                 stored, problems = node_config.load(path)
                 assert problems == []
                 assert stored["mlo_always"] is True
@@ -192,6 +194,10 @@ class TestTheProfiles:
                 assert values["keepalive_slow_min_ms"] <= previous["keepalive_slow_min_ms"]
                 assert values["keepalive_fast_min_ms"] <= previous["keepalive_fast_min_ms"]
                 assert values["update_check_minutes"] <= previous["update_check_minutes"]
+                # A relay is kept no longer as the bar goes right; zero (spread
+                # over every relay) is the far end of it.
+                assert (values["route_hold_minutes"] == 0 or previous["route_hold_minutes"] == 0
+                        or values["route_hold_minutes"] <= previous["route_hold_minutes"])
             previous = values
 
     def test_a_hand_tuned_node_is_custom(self):
@@ -218,6 +224,7 @@ class TestTheProfiles:
                 assert reply.result["restart_required"] is False
                 assert node.keepalive_bounds().as_tuple() == (2000, 5000, 60000, 120000)
                 assert node._update_check_seconds == 1440 * 60
+                assert node._route_hold == 3600
                 got = await _call(channel, "config.get", {})
                 assert got.result["profile"] == 1
 

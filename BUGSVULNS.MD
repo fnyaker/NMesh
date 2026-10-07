@@ -162,6 +162,7 @@ like the regression.
 | 72 | **low** | A speed test run past the far end's echo ceiling read the ceiling as loss |
 | 73 | **low** | One lost MLO second-link handshake cost a minute of backoff (an integration test waiting 30 s failed on it once) |
 | 74 | **low** | An idle UDP link through a stalling path resent one frame in nine for nothing, and never timed the late ones |
+| 76 | **medium** | A Kademlia lookup bought dials, punches and path probes to nodes long gone; routed traffic changed relay every packet, and the map drew the far end's last relay as ours |
 | 75 | **low** | Console layout: the logo out of its tile, table rows off their line, the top bar clipped on a phone, the full map short of the screen |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
@@ -3369,4 +3370,38 @@ is why both of those keep 50 ms.
   line).
 
 `gotchas.md`, "Console layout: four rules that undid another".
+
+---
+
+## 76 — medium — Lookups dialled the gone, and routes changed every packet
+
+> **Status — fixed.** Tests:
+> `tests/test_routed_paths.py::TestWhatARoutedPacketBuys`,
+> `::TestALookupDoesNotAskTheSilentAgain`, `::TestARoutedNodeKeepsItsRelay`.
+
+**Where** — `src/node.py`: `_route_outbound`, `kad_lookup`, `_update_bundles`,
+`_console_topology`.
+
+**What happens** — seen live on 0.4.65: the activity feed gave up on reaching
+Glooglo, slowy and Diddy (offline for over twelve minutes, marked silent)
+through DTrump and through JeffreyEpstein, each every two to five minutes; their
+address books showed a dial on every address in the last five minutes; 22 of 24
+hole punches had failed. Every routed packet — a FIND_NODE included — asked for
+a direct link and measured paths to its destination, and a lookup kept asking
+the gone nodes because peers still named them. Separately, the two routed
+nodes the node did talk to were bundled over both relays (MRLO), so their
+traffic alternated relay per packet, and the map drew whichever relay their
+last packet arrived by.
+
+**Fixed** — no dial or punch towards an id known to be gone, and a lookup skips
+ids it has found silent (a lookup still dials a node that is there: that is how
+two nodes sharing only a relay become neighbours); only DATA and end-to-end
+handshakes buy measured paths; one relay is held per routed
+node for `route_hold_minutes` (10 by default, on the energy bar from an hour to
+zero), left at once if it fails; the map draws the held relay.
+
+**Not changed** — the PKG_FIND answers in the same capture (19 questions of
+107 bytes answered with 37 kB each) are bounded by `_query_allowed`, the same
+valve as FIND_VALUE and DIR_FIND; an answer larger than its question is the
+cost of a signed directory.
 

@@ -534,6 +534,27 @@ of it as of a link: does it answer, how fast, how much does it lose.
 - **What the send path does with it.** A direct link to the target still leads.
   Failing that, a first hop we have **measured** leads over one we guessed —
   and the guesses stay in the list behind it, as fallbacks.
+- **What a routed packet buys.** Measured paths to its destination only when
+  it is a conversation — DATA or an end-to-end handshake
+  (`_CONVERSATION_TYPES`); a lookup addressed to a node only to ask it about
+  somebody else is not one. A direct link (`_maybe_upgrade_path`: a dial on
+  every known address, then a hole punch) for any routed packet — a lookup
+  answered through a relay is how two nodes that only share that relay come to
+  hold a link — **except towards an id known to be gone** (`is_silent`). And a
+  lookup no longer asks such an id because a peer still names it in an answer.
+  Before both, every lookup that named a node gone for hours bought a dial on
+  all its addresses, a punch and three path probes, every few minutes.
+- **One relay per conversation, held** (`_route_lead`, `route_hold_minutes`,
+  default 10). The measured paths are standbys; one of them carries the
+  traffic for the hold, then the node moves to another healthy one — a relay
+  that keeps a conversation for ever sees all of it. A relay that stops
+  delivering (dead, or losing past `_LOSS_RESCUE_SHARE`) is left at once,
+  whatever the hold says, and with nowhere else to go the hold is renewed. Each
+  move is a line in the log and the activity feed ("rotated", "failover"), and
+  the map draws the relay held, not the one the last packet *from* there came
+  by — that is the far end's choice, and drawn as ours it changed with every
+  packet. The hold is one of the settings the energy bar moves: an hour at the
+  frugal end, ten minutes by default, zero at *Maximum*.
 - **Bounds.** The book is bounded on both axes (`MAX_TARGETS = 16`,
   `MAX_PER_TARGET = 3`) and follows what the node is actually *talking to*
   (`note_interest`, `INTEREST_TTL = 300 s`) rather than what it has heard of. A
@@ -549,7 +570,9 @@ kinds, and the bundle never learns which is which: it reads `recent_ms`,
 whichever it picked back into a link to send down.
 
 - **MRLO** — several measured routed paths to one identity carrying its traffic
-  together, with no direct link at all.
+  together, with no direct link at all. Only with `route_hold_minutes` at 0:
+  spreading over relays changes the way there with every packet, so by default
+  one relay is held instead (above).
 - **HMLO** — the hybrid: a direct link and a routed path measured at the same
   time. If they are within one skew of each other the bundle spreads traffic
   over both; if they are not — usually, since a routed path crosses more hops —

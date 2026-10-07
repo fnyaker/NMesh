@@ -410,6 +410,10 @@ async def main() -> None:
     ap.add_argument("--mlo-drop-percent", type=int, default=None,
                     help="share of probes a bundled link may lose before it is "
                          "benched (default 10%%; it rejoins at half that)")
+    ap.add_argument("--route-hold-minutes", type=int, default=None,
+                    help="minutes a node reached through a relay keeps that "
+                         "relay before moving to another healthy one (default "
+                         "10; 0 spreads its traffic over every relay)")
     ap.add_argument("--keepalive-fast-min-ms", type=int, default=None,
                     help="fastest this node will ever be probed, striping or not")
     ap.add_argument("--keepalive-fast-max-ms", type=int, default=None,
@@ -516,6 +520,11 @@ async def main() -> None:
     if args.mlo_skew_ms is not None or args.mlo_drop_percent is not None:
         node.set_mlo_settings(skew_ms=args.mlo_skew_ms,
                               drop_percent=args.mlo_drop_percent)
+    if args.route_hold_minutes is not None:
+        try:
+            node.set_route_hold(args.route_hold_minutes * 60)
+        except ValueError as exc:
+            print(f"  route-hold-minutes: {exc} — keeping the default")
     node.set_keepalive_bounds(fast_min_ms=args.keepalive_fast_min_ms,
                               fast_max_ms=args.keepalive_fast_max_ms,
                               slow_min_ms=args.keepalive_slow_min_ms,
