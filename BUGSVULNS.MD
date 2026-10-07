@@ -3495,3 +3495,22 @@ argument as omitted only when the key is absent, so a present `null` reached
 way; POST with a body worked, which is why the existing tests passed.
 
 **Fixed** — `body` is sent only when it is an object.
+
+## 81 — low — `test_spool_transport::test_bidirectional_over_directory` lost one message, once
+
+> **Status — open.** Seen once in CI (run 37657786505, PR #111), on a commit
+> that touched only the MCP bridge.
+
+**What happens** — after both sessions came up, `host` received `g2h` and
+`guest` never received `h2g` within 25 s.
+
+**Tried, without reproducing it** — 8 serial runs; 12 runs beside 14 busy CPU
+loops; 96 runs, 24 at a time; the whole integration suite under `-n auto` ten
+times; 45 runs of the scenario with every spool write delayed by a random
+0–150 ms. All passed.
+
+**Noticed on the way, not shown to matter** — `SpoolTransport.send` writes each
+record from its own `asyncio.to_thread` call, so two sends in flight on one link
+can reach the file in either order. A link is expected to keep order (TCP and
+the UDP layer do). The delayed-write runs above reorder records and still lost
+nothing — the E2E retry recovers — so this is not offered as the cause.
