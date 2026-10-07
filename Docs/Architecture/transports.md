@@ -1047,7 +1047,7 @@ never be starved by a slow or dead peer placed earlier in the list. If the count
 of live links falls below the floor at the end of a cycle, neighbourhood
 maintenance is woken immediately. Both ends do this → traffic in both
 directions; any incoming frame rearms the timeout. Started in `start()`/`join()`,
-stopped in `stop()`. Never raises. (That PING also carries `advertised_uris` →
+stopped in `stop()`. Never raises. (That PING also carries `announced_uris` →
 address gossip, see `routing.md`.)
 
 **Two clocks, not one.** Since multi-link operation (below) a link may need a
@@ -1290,7 +1290,7 @@ Those names are listed in `features.SINCE_NEGOTIATION` and asked through
 
 ## What a probe weighs
 
-The PING carries `advertised_uris` because liveness and address gossip happened
+The PING carries our addresses (`announced_uris`) because liveness and address gossip happened
 to want the same packet. That was free at one probe per link per twenty seconds.
 At ten a second it is the packet — measured on a node advertising five
 addresses:

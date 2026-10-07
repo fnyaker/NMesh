@@ -346,6 +346,43 @@ def expand_listen_uri(uri: str, local_ips: list[str], extra: list[str] = ()) -> 
     return out
 
 
+def announcement_order(uris: list[str], limit: int) -> list[str]:
+    """The ``limit`` of ``uris`` worth spending a bounded announcement on.
+
+    Every list that leaves this node is cut — eight addresses on a PING or a
+    FOUND_NODE entry, sixteen in a join block — and the expansion lists one
+    listener's URIs after another's, a dozen each on a host with container
+    bridges. A cut by position would keep the first medium alone, so each
+    medium takes its turn, in listener order, and within one a globally
+    routable address (or a name the operator wrote) goes before a private one.
+    Within a class the host's own order stands: it puts the addresses the
+    default routes leave from first."""
+    groups: dict[str, list[str]] = {}
+    for uri in uris:
+        parsed = _validate_uri(uri)
+        if parsed is not None:
+            groups.setdefault(parsed[0], []).append(uri)
+    queues = [sorted(group, key=lambda u: not _uri_is_public(u))
+              for group in groups.values()]
+    out: list[str] = []
+    while len(out) < limit and any(queues):
+        for queue in queues:
+            if queue and len(out) < limit:
+                out.append(queue.pop(0))
+    return out
+
+
+def _uri_is_public(uri: str) -> bool:
+    parsed = _validate_uri(uri)
+    hp = split_host_port(parsed[1]) if parsed is not None else None
+    if hp is None:
+        return False
+    try:
+        return ipaddress.ip_address(hp[0]).is_global
+    except ValueError:
+        return True               # a name: the operator's word for where we are
+
+
 def _is_link_local(ip: str) -> bool:
     try:
         return ipaddress.ip_address(ip.split("%", 1)[0]).is_link_local

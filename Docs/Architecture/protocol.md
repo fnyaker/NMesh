@@ -108,7 +108,7 @@ and gone once they update.
 | Type | Val | Role |
 |---|---|---|
 | DATA | 0x00 | application data (E2E encrypted) |
-| PING / PONG | 0x01 / 0x02 | liveness + **address gossip** (the PING carries `advertised_uris`; the PONG is **unconditional** — a node with no announceable address is entitled to one). The PING may carry a trailer, and the PONG then echoes its token — see below |
+| PING / PONG | 0x01 / 0x02 | liveness + **address gossip** (the PING carries `announced_uris` — at most eight, every medium keeping a share; the PONG is **unconditional** — a node with no announceable address is entitled to one). The PING may carry a trailer, and the PONG then echoes its token — see below |
 | FIND_NODE / FOUND_NODE | 0x03 / 0x04 | Kademlia lookup (nearby nodes) |
 | FIND_VALUE / FOUND_VALUE | 0x05 / 0x06 | DHT lookup by key |
 | STORE | 0x07 | store a DHT value (content-addressed) |

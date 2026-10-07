@@ -2522,6 +2522,19 @@ running X.
   the whole script after the tree had been copied. It is a warning now, and the
   installation stays usable by hand.
 
+## Eight addresses, all TCP
+
+`advertised_uris()` expands each wildcard listener over every local address,
+TCP's listener first; a live host with a VPN, Tailscale and a dozen Docker and
+libvirt bridges advertised 32 URIs. Every bounded list cut it by position — a
+PING to eight, a join block to sixteen — so what actually left the node was
+TCP only: no peer ever heard a UDP address of ours from us, and a join block
+offered the host nothing to open a hole towards. The console showed all 32, so
+the list looked right wherever anybody looked. Bounded lists now go through
+`announced_uris()` (`ip_utils.announcement_order`), which gives each medium its
+turn. → When a list is cut, check what the cut keeps, not only what the full
+list holds.
+
 ## Neighbourhood maintenance
 
 - **Two dialers, one address.** `_pending_connections` stops two
