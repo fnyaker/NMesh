@@ -352,6 +352,10 @@ class MeshNode:
         self._cert_task: asyncio.Task | None = None
         self._renewals_served: dict[bytes, float] = {}
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
+        # One dial per (node, address) at a time; a second caller waits on the
+        # first one's outcome. Each entry lives for one dial, so the table is
+        # bounded by how many dials can be in flight at once.
+        self._dials_in_flight: dict[tuple[str, str], asyncio.Future] = {}
         self._pending_lookups: dict[NodeID, asyncio.Event] = {}
         self._pending_finds: dict[bytes, asyncio.Future] = {}
         # Nodes whose FOUND_NODE carried `_HINTS_OK`, so we may send them
@@ -4838,6 +4842,33 @@ class MeshNode:
         if len(self._peers) >= _MAX_PEERS:
             self._note_dial(node_hex, uri, "peer limit")
             return None
+        if probe:
+            # A probe is a deliberate second link; it must not be handed the
+            # link another caller is opening.
+            return await self._open_dial(node_id, node_hex, uri, timeout, probe)
+        key = (node_hex, uri)
+        shared = self._dials_in_flight.get(key)
+        if shared is not None:
+            try:
+                async with asyncio.timeout(timeout):
+                    return await asyncio.shield(shared)
+            except TimeoutError:
+                return None
+        shared = asyncio.get_running_loop().create_future()
+        self._dials_in_flight[key] = shared
+        peer = None
+        try:
+            peer = await self._open_dial(node_id, node_hex, uri, timeout, probe)
+            return peer
+        finally:
+            if self._dials_in_flight.get(key) is shared:
+                del self._dials_in_flight[key]
+            if not shared.done():
+                shared.set_result(peer)
+
+    async def _open_dial(self, node_id: NodeID | None, node_hex: str, uri: str,
+                         timeout: float, probe: bool) -> _Peer | None:
+        """The dial itself, once `_dial_uri` has decided it is worth one."""
         peer = None
         authenticated = False
         started = time.monotonic()

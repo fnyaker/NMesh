@@ -229,6 +229,16 @@ therefore apply the same timeout, tear a failed attempt down the same way, and �
 the part that matters to an operator — record the same outcome against the same
 address. It never raises: a dial that fails is the normal case, not an error.
 
+**One dial per address at a time.** Those callers do not know about each other:
+the neighbour loop, the address-retry loop and a routed packet's upgrade can all
+pick the same unlinked node in the same second, and each walks its addresses.
+`_dial_uri` keeps `_dials_in_flight`, keyed by node and address, and a caller
+arriving while that dial is open waits for its outcome — under its *own*
+timeout — instead of opening a second socket. A probe dial
+(`probe=True`) is exempt: it is a deliberate second link. The entry lives for
+one dial and is released even when the first caller is cancelled, which hands
+the waiters `None`.
+
 ## Re-dialling an address
 
 Four mechanisms, one dial function (above). Three of them run by themselves;
