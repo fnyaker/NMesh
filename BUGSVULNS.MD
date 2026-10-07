@@ -3464,21 +3464,15 @@ which reads as a bundle about to happen.
 **Fixed** — a bundle remembers the gap that refused it (`Bundle.apart_ms`);
 the map state is `apart` with `apart_ms`, and `mlo_status` carries it.
 
-**Still open** — why a TCP probe measures ~40 ms above the UDP one on the same
-path while the kernel's own TCP RTT reads 64–76 ms (below the probe's 102–118):
-the extra time is spent above the socket, in a queue on one end or the other.
-Not reproduced locally yet. Before the VPN exit moved it was 10 ms (33 vs 23),
-under the skew, so the bundle formed.
-
-Narrowed since: on loopback (two local nodes, one TCP and one UDP link, fast
-probes) both measure 0.5–0.6 ms, so nothing in our send or receive path adds
-time to TCP alone. Live, the kernel puts the path at ~48 ms (`ss -ti`: BBR
-`mrtt` 48.7, `rcv_rtt` 58–61) while its own srtt reads 76–100 ms — the base
-plus our delayed-ACK timeout (`ato:40`), the shape of a far end whose answer
-leaves more than 40 ms after the PING arrived. UDP probes (~75 ms) carry part of
-that too. So the time is spent on the relays, between reading a probe and
-answering it, and more on their TCP link than on their UDP one. Not visible
-from this node; the next step is the relay's own loop lag.
+**Not NMesh — the path.** A TCP probe measured ~40 ms above the UDP one on
+the same path while the kernel's own TCP RTT read 64–76 ms; this entry first
+put the time on the relays, between reading a probe and answering it. That was
+wrong. Off the VPN (public address 82.67.171.179, same build 0.4.70, same
+relays), TCP and UDP probes agree within a millisecond on every link —
+JeffreyEpstein 14.0 / 14.1 ms, DTrump 19.3 / 19.2, The island 14.2 / 13.9 —
+and all four bundles are `active`. On loopback they agree too (0.5 / 0.6 ms).
+So the extra time was added on the VPN path (`tun0`), to TCP and not to UDP.
+Nothing in the node is left to fix; `apart` is the map saying so honestly.
 
 ## 80 — low — Every GET page route failed through MCP
 

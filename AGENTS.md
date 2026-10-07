@@ -387,6 +387,12 @@ scope. Add yours.
   a check that it finds anything at all). Caught only because the unit count
   went *down* by one after adding a test. → Before writing a file, check it
   does not exist (`git ls-files`, or `Read`); a shell redirect never asks.
+- **A cause named from one network.** A 40 ms TCP-over-UDP probe gap was put
+  on the relays' answering ("the time is spent on the relays") from
+  measurements taken on one path, through a VPN. Off the VPN the gap was gone on
+  every link; the relays had never been the cause. → Before naming where time
+  goes, vary the path: a second network, or loopback, is what separates the
+  code from the road.
 - **An empty log answer read as "nothing happened".** After a restart the log
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not
