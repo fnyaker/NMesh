@@ -643,7 +643,7 @@ else", constantly, and "handshake refused: the challenge presents our own
 identity". They read as routing bugs. They are one line of arithmetic.
 
 `_extra_addrs` holds IPs somebody reported seeing us at. `advertised_uris()`
-paired each with the **local listener port**. `81.240.12.33` + `:9000` is not an
+paired each with the **local listener port**. `93.184.216.33` + `:9000` is not an
 address — it is a claim that this machine's NAT forwards 9000, made from no
 evidence — and every node behind that router makes the *same* claim. The router
 forwards to one of them. So:
@@ -2556,8 +2556,8 @@ and the same guard file refuses a random port pick anywhere under `tests/`.
   `_ensure_route_to` racing for one node, but the address-retry loop calls
   `_dial_uri` directly, so with `retry_interval` set it and the neighbour loop
   opened the same address twice, two milliseconds apart, and waited out the same
-  timeout twice (seen live on 0.4.66: `tcp://159.26.105.57:9000`,
-  `udp://51.254.199.185:42488`, both doubled). `_dial_uri` now coalesces on
+  timeout twice (seen live on 0.4.66: `tcp://203.0.113.57:9000`,
+  `udp://203.0.113.10:42488`, both doubled). `_dial_uri` now coalesces on
   `(node, address)`; see *One dial per address at a time* in `transports.md`.
 
 - The distant-bucket scan uses `routing.get_closest(target, k)` sorted by XOR: if

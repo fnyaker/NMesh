@@ -15,7 +15,7 @@ from src.mesh.codecs import _decode_addresses_at
 from src.node import MeshNode, PING, _decode_conn_block
 from tests.conftest import make_manager, make_node
 
-LOCAL = ["10.96.0.24", "fdeb:446c:912d:8da::", "10.39.251.77", "100.85.0.1"] + [
+LOCAL = ["10.8.0.2", "fd00:db8::1", "10.1.2.3", "100.64.0.1"] + [
     f"172.{n}.0.1" for n in range(17, 29)]
 
 
@@ -38,8 +38,8 @@ class TestAnnouncementOrder:
         assert announcement_order(uris, 3) == uris[:3]
 
     def test_a_public_address_goes_first(self):
-        uris = ["tcp://10.0.0.1:1", "tcp://172.17.0.1:1", "tcp://81.240.12.33:1"]
-        assert announcement_order(uris, 2)[0] == "tcp://81.240.12.33:1"
+        uris = ["tcp://10.0.0.1:1", "tcp://172.17.0.1:1", "tcp://93.184.216.33:1"]
+        assert announcement_order(uris, 2)[0] == "tcp://93.184.216.33:1"
 
     def test_a_name_counts_as_public(self):
         uris = ["tcp://10.0.0.1:1", "tcp://node.example.org:1"]
@@ -67,8 +67,8 @@ class TestWhatLeavesTheNode:
         addresses, _end = _decode_addresses_at(ping.payload)
         await node.stop()
         assert len(addresses) == 8
-        assert "udp://10.96.0.24:9001" in addresses
-        assert "tcp://10.96.0.24:9000" in addresses
+        assert "udp://10.8.0.2:9001" in addresses
+        assert "tcp://10.8.0.2:9000" in addresses
         assert not any(a.startswith("tcp://172.") for a in addresses)
 
     def test_a_join_block_lists_udp_endpoints(self):

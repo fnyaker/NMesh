@@ -983,7 +983,7 @@ arrived on it*. The gossip path simply never applied it.
   concrete `tcp://their.public.ip:9000` and nothing here applies.
 - **When a collision happens anyway, the cause is named.** "It answers as
   somebody else" is true and useless; `_wrong_node_detail` says *both nodes are
-  behind 81.240.12.33, and one port can only reach one of them*.
+  behind 93.184.216.33, and one port can only reach one of them*.
 
 ### …and the proof is produced rather than waited for
 

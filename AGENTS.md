@@ -189,6 +189,12 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
   code had it not been said out loud.
 - **Tell the person you work for, in the same turn**, in plain words: what
   fails, how to reproduce it, how bad it is, and whether you fixed it.
+- **Never with the live network's details.** The repository is public and the
+  mesh a bug was seen on is somebody's own: write "relay A", "node C", an
+  address from 192.0.2.0/24, 198.51.100.0/24 or 203.0.113.0/24 (IANA's
+  93.184.216.0/24 where a test needs one the internet routes) — never a real
+  address, node name, hostname, account or path. `tests/test_no_live_addresses.py`
+  refuses a real IPv4 literal; names have no pattern, so they are on you.
 - **Write it down where the next reader looks**: a fixed trap goes in
   `Docs/Architecture/gotchas.md`; one still open goes in `BUGSVULNS.MD` (or an
   issue), with the reproduction.
@@ -393,6 +399,12 @@ scope. Add yours.
   every link; the relays had never been the cause. → Before naming where time
   goes, vary the path: a second network, or loopback, is what separates the
   code from the road.
+- **A live network copied into a public repository.** Bug reports, gotchas and
+  a test written from live observations carried the operator's public
+  addresses, relays' addresses, interface addresses and every node's name —
+  merged, in a public repository. → Write an incident with placeholders from
+  the start (see *Report every bug*); before a push, grep the diff for what
+  the session's live tools showed.
 - **A commit made on a red suite.** `pytest -q | tail -1 && git commit …`:
   the pipe's status is `tail`'s, so `1 failed` printed and the commit and push
   went ahead. → Never chain a commit after a piped test run; run the tests,

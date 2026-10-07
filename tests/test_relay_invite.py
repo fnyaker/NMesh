@@ -84,8 +84,8 @@ class TestWhichRelaysAJoinerIsGiven:
     async def test_a_world_address_comes_before_a_lan_one(self):
         node = MeshNode(transport_manager=make_manager())
         self._peer(node, NodeID(b"\x02" * 20), addr="tcp://192.168.1.7:9000")
-        self._peer(node, NodeID(b"\x03" * 20), addr="tcp://81.240.12.33:9000")
-        assert node._select_relays()[0] == "tcp://81.240.12.33:9000"
+        self._peer(node, NodeID(b"\x03" * 20), addr="tcp://93.184.216.33:9000")
+        assert node._select_relays()[0] == "tcp://93.184.216.33:9000"
 
     async def test_a_lan_address_is_still_offered_last(self):
         """A joiner on that LAN can use it, and an ordered list costs
@@ -99,27 +99,27 @@ class TestWhichRelaysAJoinerIsGiven:
         since `advertised_uris` requires proof, a claim it has had to earn."""
         node = MeshNode(transport_manager=make_manager())
         self._peer(node, NodeID(b"\x02" * 20), addr="tcp://192.168.1.7:9000",
-                   advertises=["tcp://81.240.12.33:9000"])
-        assert node._select_relays()[0] == "tcp://81.240.12.33:9000"
+                   advertises=["tcp://93.184.216.33:9000"])
+        assert node._select_relays()[0] == "tcp://93.184.216.33:9000"
 
     async def test_a_peer_that_dialled_us_is_a_relay_too(self):
         """It is the half of the mesh most likely to be publicly reachable, and
         it was skipped outright."""
         node = MeshNode(transport_manager=make_manager())
         self._peer(node, NodeID(b"\x02" * 20), client=False,
-                   advertises=["tcp://81.240.12.33:9000"])
-        assert node._select_relays() == ["tcp://81.240.12.33:9000"]
+                   advertises=["tcp://93.184.216.33:9000"])
+        assert node._select_relays() == ["tcp://93.184.216.33:9000"]
 
     async def test_the_list_is_bounded(self):
         node = MeshNode(transport_manager=make_manager())
         for index in range(12):
             self._peer(node, NodeID(bytes([index + 2]) * 20),
-                       addr="tcp://81.240.12.%d:9000" % (index + 1))
+                       addr="tcp://93.184.216.%d:9000" % (index + 1))
         assert len(node._select_relays()) == 5
 
     def test_what_counts_as_world_reachable(self):
         node = MeshNode(transport_manager=make_manager())
-        for uri in ("tcp://81.240.12.33:9000", "tcp://example.org:9000",
+        for uri in ("tcp://93.184.216.33:9000", "tcp://example.org:9000",
                     "fake://relay:1"):
             assert node._is_world_address(uri), uri
         for uri in ("tcp://192.168.1.7:9000", "tcp://10.0.0.4:1",

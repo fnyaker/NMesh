@@ -33,10 +33,10 @@ def _tcp_mgr() -> TransportManager:
 
 class TestIPv6Preference:
     def test_global_ipv6_sorts_first(self):
-        uris = ["tcp://192.168.1.5:9000", "tcp://[2a01:e0a:1::5]:9000",
+        uris = ["tcp://192.168.1.5:9000", "tcp://[2606:2800:220:1::5]:9000",
                 "udp://8.8.8.8:9001"]
         ordered = _order_by_preference(uris)
-        assert ordered[0] == "tcp://[2a01:e0a:1::5]:9000"
+        assert ordered[0] == "tcp://[2606:2800:220:1::5]:9000"
 
     def test_link_local_ipv6_not_preferred(self):
         # fe80:: is not global → not moved ahead of an IPv4 that came first

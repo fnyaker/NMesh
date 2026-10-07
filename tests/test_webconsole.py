@@ -653,7 +653,7 @@ class TestManagement:
             # no UDP listener yet → rejected
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/punch/open", token,
-                {"endpoint": "90.54.169.91:9001"})
+                {"endpoint": "93.184.216.91:9001"})
             # One shape for every refusal on this API: the status says what
             # kind, the sentence says why (`src/control/errors.py`).
             assert status == 400 and j["error"]
@@ -661,10 +661,10 @@ class TestManagement:
             node._udp_server._sock.sendto = lambda *a: None  # no real traffic
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/punch/open", token,
-                {"endpoint": "90.54.169.91:9001"})
+                {"endpoint": "93.184.216.91:9001"})
             assert status == 200 and j["ok"] is True
-            assert j["host"] == "90.54.169.91" and j["port"] == 9001
-            assert ("90.54.169.91", 9001) in node._manual_holes
+            assert j["host"] == "93.184.216.91" and j["port"] == 9001
+            assert ("93.184.216.91", 9001) in node._manual_holes
             # malformed endpoint
             status, _, _, j = await asyncio.to_thread(
                 _request, console, "POST", "/api/punch/open", token,

@@ -75,39 +75,39 @@ class TestWhatMayBeAnnounced:
         node = _node()
         node._addresses = ["tcp://0.0.0.0:9000"]
         node._local_ips = ["192.168.1.20"]
-        node._extra_addrs = ["81.240.12.33"]
-        assert "tcp://81.240.12.33:9000" not in node.advertised_uris()
+        node._extra_addrs = ["93.184.216.33"]
+        assert "tcp://93.184.216.33:9000" not in node.advertised_uris()
 
     def test_and_is_announced_once_the_listener_is_proved(self):
         node = _node()
         node._addresses = ["tcp://0.0.0.0:9000"]
         node._local_ips = ["192.168.1.20"]
-        node._extra_addrs = ["81.240.12.33"]
+        node._extra_addrs = ["93.184.216.33"]
         node._note_public_scheme("tcp")
-        assert "tcp://81.240.12.33:9000" in node.advertised_uris()
+        assert "tcp://93.184.216.33:9000" in node.advertised_uris()
 
     def test_the_proof_is_per_transport(self):
         """tcp forwarded and udp not is an ordinary router configuration."""
         node = _node()
         node._addresses = ["tcp://0.0.0.0:9000", "udp://0.0.0.0:9000"]
         node._local_ips = []
-        node._extra_addrs = ["81.240.12.33"]
+        node._extra_addrs = ["93.184.216.33"]
         node._note_public_scheme("tcp")
-        assert node.advertised_uris() == ["tcp://81.240.12.33:9000"]
+        assert node.advertised_uris() == ["tcp://93.184.216.33:9000"]
 
     def test_a_concrete_listen_uri_is_the_operator_s_way_to_say_so(self):
         """Somebody who knows their forwarding works has always been able to
         state it, and still can: only wildcards are expanded."""
         node = _node()
-        node._addresses = ["tcp://81.240.12.33:9000"]
+        node._addresses = ["tcp://93.184.216.33:9000"]
         node._local_ips = ["192.168.1.20"]
-        assert node.advertised_uris() == ["tcp://81.240.12.33:9000"]
+        assert node.advertised_uris() == ["tcp://93.184.216.33:9000"]
 
 
 class TestWhatCountsAsProof:
     def test_a_peer_off_our_networks_proves_it(self):
         node = _node()
-        assert node._off_our_networks(_link(node, "81.240.12.33")) is True
+        assert node._off_our_networks(_link(node, "93.184.216.33")) is True
 
     def test_a_peer_on_our_lan_does_not(self):
         """It dialled a LAN address. That proves the listener and says nothing
@@ -124,14 +124,14 @@ class TestWhatCountsAsProof:
         """Nothing was opened to us."""
         from src.node import RelayedTransport
         node = _node()
-        peer = _link(node, "81.240.12.33")
+        peer = _link(node, "93.184.216.33")
         peer.transport = RelayedTransport.__new__(RelayedTransport)
         assert node._off_our_networks(peer) is False
 
     def test_proving_it_announces_the_new_set(self):
         node = _node()
         node._addresses = ["tcp://0.0.0.0:9000"]
-        node._extra_addrs = ["81.240.12.33"]
+        node._extra_addrs = ["93.184.216.33"]
         sent: list[str] = []
         node._announce_addresses_soon = lambda reason: sent.append(reason)
         node._note_public_scheme("tcp")
@@ -161,7 +161,7 @@ class TestTheTwoAudiences:
         assert all(r["confirmed"] for r in rows)
 
     def test_is_global_ip_is_one_answer(self):
-        assert is_global_ip("81.240.12.33") and not is_global_ip("192.168.1.1")
+        assert is_global_ip("93.184.216.33") and not is_global_ip("192.168.1.1")
 
 
 class TestTheProofIsProduced:
@@ -195,7 +195,7 @@ class TestTheProofIsProduced:
     async def test_a_round_asks_and_backs_off_when_it_proves_nothing(self):
         node = _node()
         self._listening(node, ["tcp://0.0.0.0:9000"])
-        _link(node, "81.240.12.33")
+        _link(node, "93.184.216.33")
         asked = []
 
         async def _probe():
@@ -216,7 +216,7 @@ class TestTheProofIsProduced:
     async def test_a_round_that_proved_something_starts_over(self):
         node = _node()
         self._listening(node, ["tcp://0.0.0.0:9000", "udp://0.0.0.0:9000"])
-        _link(node, "81.240.12.33")
+        _link(node, "93.184.216.33")
 
         async def _probe():
             node._public_schemes.add("tcp")
@@ -240,7 +240,7 @@ class TestTheProofIsProduced:
         """This loop dying takes the node's public address with it, quietly."""
         node = _node()
         self._listening(node, ["tcp://0.0.0.0:9000"])
-        _link(node, "81.240.12.33")
+        _link(node, "93.184.216.33")
         calls = []
 
         async def _boom():
@@ -275,9 +275,9 @@ class TestNamingTheCollision:
         """"It answers as somebody else" is true and tells an operator
         nothing."""
         node = _node()
-        node._extra_addrs = ["81.240.12.33"]
-        detail = node._wrong_node_detail("tcp://81.240.12.33:9000", TARGET)
-        assert "81.240.12.33" in detail and "one port" in detail
+        node._extra_addrs = ["93.184.216.33"]
+        detail = node._wrong_node_detail("tcp://93.184.216.33:9000", TARGET)
+        assert "93.184.216.33" in detail and "one port" in detail
 
     def test_anything_else_still_names_who_answered(self):
         node = _node()

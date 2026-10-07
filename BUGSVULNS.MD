@@ -3070,7 +3070,7 @@ read timeouts more than a minute after the wake.
 > of at most `_SEGMENT` (1 200) bytes, negotiated per link (`FLAG_SEGMENTS`);
 > an old peer keeps whole packets. Tests:
 > `tests/test_udp_transport.py::TestAPacketIsSplitUnderTheDatagramSize`.
-> Confirmed live before the fix, through Proton VPN to DTrump: 16 kB pings lost
+> Confirmed live before the fix, through Proton VPN to relay B: 16 kB pings lost
 > 62 %, 1.1 kB pings 6 %; speed tests over UDP carried 0.06–0.24 MB/s and
 > reported 12–36 % of probes unechoed, where TCP on the same path carried
 > 0.42 MB/s and lost none. Both ends must run the fix for it to engage.
@@ -3105,7 +3105,7 @@ and an old peer must keep the current framing.
 **Where** — `src/routing.py` (`note_wrong_address`), `src/node.py`
 (`_dial_uri`, `_handle_handshake_ack`, `_wait_for_peer_authenticated`).
 
-**What happens** — seen live: node 2df86885 advertises the public IP it shares
+**What happens** — seen live: node c0ffee00 advertises the public IP it shares
 with two other nodes. Every `WRONG_ADDRESS_TTL` (600 s), to the second, the
 record expired, the next dial paid a post-quantum handshake, and the link came
 up as one to the node that owns the address — `link up`, the ~324 kB catch-up
@@ -3123,7 +3123,7 @@ console as constant churn on healthy links.
 > write the link's end like every other path. Tests:
 > `tests/test_link_stability.py::TestNoLinkEndsWithoutALine`.
 
-**What happens** — seen live: a TCP link to DTrump vanished from the console
+**What happens** — seen live: a TCP link to relay B vanished from the console
 with no `link dropped` line. It was the link a wrong-node dial had opened (64);
 its `finally` stopped it and said nothing.
 
@@ -3135,10 +3135,10 @@ its `finally` stopped it and said nothing.
 > link this node accepted that has delivered no packet by `_HANDSHAKE_DEADLINE`.
 > Tests: `tests/test_node.py::TestAnAcceptedLinkThatNeverSpeaks`.
 
-**What happens** — seen live: an inbound UDP link from DTrump, unauthenticated,
-0 packets in, alive after 991 s. DTrump never sent a challenge, so 55's guard
+**What happens** — seen live: an inbound UDP link from relay B, unauthenticated,
+0 packets in, alive after 991 s. relay B never sent a challenge, so 55's guard
 (which reacts to one) never fired, and `_reap_stale_unauthenticated` only runs
-when `_MAX_UNAUTH_PEERS` is reached. DTrump also publishes no version, so it may
+when `_MAX_UNAUTH_PEERS` is reached. relay B also publishes no version, so it may
 run a release older than either guard; the far end's cause is not known.
 
 ---
@@ -3188,8 +3188,8 @@ adds could not be measured at all.
   contrary to `Docs/AppPermissions/guide`, where `readstate.updates` and
   `control.updates` cover transfers. An app's answer is now the gate's, for the
   operation that carries the kind.
-- **The MLO second link always asked the first candidate.** JeffreyEpstein's
-  private `udp://10.200.199.10:9001` was dialled at every backoff; an address
+- **The MLO second link always asked the first candidate.** relay A's
+  private `udp://10.0.199.10:9001` was dialled at every backoff; an address
   that failed now goes behind the others. If a peer announces nothing else of
   that medium there is still nothing better to dial — that is the peer's
   announcement, not this node's choice.
@@ -3214,7 +3214,7 @@ adds could not be measured at all.
 `src/transports/udp.py` (`UDPServer._dispatch_datagram`, `_answer_closed`).
 
 **What happens** — seen live on 0.4.62, from the first seconds after a restart:
-inbound UDP links from The island's listener (`udp://10.200.100.13:9001`) to
+inbound UDP links from node C's listener (`udp://10.0.100.13:9001`) to
 ours, one every ~14 ms — the round trip — 13 000 in four minutes. Each sends
 its `CAPABILITIES` and `CHALLENGE`, receives the far end's, and is ended by the
 double-accept guard (55), and the next one opens at once. A trace shows our
@@ -3245,16 +3245,16 @@ way per round, a link serial burned per round, and the log ring filled with
 > `tests/test_self_dial.py::TestAnAddressAnotherLinkAlreadyHolds`. `_dial_uri`
 > records `wrong node` without opening a socket when one of our authenticated
 > links to another node runs to that address (`_address_held_by`). Seen a
-> third time while fixing it, on a link we *accepted*: a dial to The island at
-> `udp://51.254.199.185:9001` — where JeffreyEpstein's listener reaches ours
-> from — was refused at the handshake, and JeffreyEpstein closed the 606 s link
+> third time while fixing it, on a link we *accepted*: a dial to node C at
+> `udp://203.0.113.10:9001` — where relay A's listener reaches ours
+> from — was refused at the handshake, and relay A closed the 606 s link
 > 20 ms later. The accepted link's endpoint is what the check reads for it.
 
 **Where** — `src/node.py` (`_dial_uri`, `_handle_handshake_ack`); the far end's
 redundant-link reaper.
 
-**What happens** — seen live on 0.4.62: a dial to The island at an address
-JeffreyEpstein (then DTrump) owns is refused here at the handshake (64), as
+**What happens** — seen live on 0.4.62: a dial to node C at an address
+relay A (then relay B) owns is refused here at the handshake (64), as
 designed. But the far end has already answered the handshake and counted the
 link as its own, so its reaper closes the *older* link to us, a healthy one —
 `link dropped … the peer closed the connection` 2 ms and 33 ms beside the two
@@ -3279,7 +3279,7 @@ another node: skip it in the candidates rather than learn it from a handshake.
 
 **Where** — `src/node.py` (`console_speedtest`, `_handle_speed_probe`).
 
-**What happens** — seen live on 0.4.62: three tests to DTrump inside half a
+**What happens** — seen live on 0.4.62: three tests to relay B inside half a
 minute (512, 512 over a bundle, then one more). The answering side echoes at
 most `_SPEED_MAX_PER_WINDOW` (1200) probes per identity a minute and drops the
 rest **silently**, by design. The third test got 176 echoes, then nothing: it
@@ -3336,7 +3336,7 @@ book on failure, so the next occurrence says which dial failed and how.
 **Where** — `src/transports/udp.py`, `_acknowledge`, `_sample`, `set_profile`.
 
 **What happens** — seen live through a VPN on 0.4.63: 404 retransmit timeouts in
-575 s on an idle link to DTrump, 239 of them spurious, the timer at 55 ms beside
+575 s on an idle link to relay B, 239 of them spurious, the timer at 55 ms beside
 probe round trips up to 288 ms; 14 % of its frames were resends. With one frame
 in flight the frames slower than the timer were exactly the ones resent, and
 Karn's rule kept them out of the estimate.
@@ -3383,8 +3383,8 @@ is why both of those keep 50 ms.
 `_console_topology`.
 
 **What happens** — seen live on 0.4.65: the activity feed gave up on reaching
-Glooglo, slowy and Diddy (offline for over twelve minutes, marked silent)
-through DTrump and through JeffreyEpstein, each every two to five minutes; their
+gone node E, gone node F and gone node G (offline for over twelve minutes, marked silent)
+through relay B and through relay A, each every two to five minutes; their
 address books showed a dial on every address in the last five minutes; 22 of 24
 hole punches had failed. Every routed packet — a FIND_NODE included — asked for
 a direct link and measured paths to its destination, and a lookup kept asking
@@ -3414,9 +3414,9 @@ cost of a signed directory.
 
 **What happens** — seen live on 0.4.66 with `retry_interval` at 60 s on TCP and
 UDP: the log showed pairs of `dial timeout` for one node and one address two
-milliseconds apart (`The island` at `tcp://159.26.105.57:9000`,
-`tcp://146.70.194.72:9000`, `udp://10.200.100.13:9001`,
-`udp://51.254.199.185:42488`). Each pair is two sockets and, over UDP, two
+milliseconds apart (`node C` at `tcp://203.0.113.57:9000`,
+`tcp://198.51.100.22:9000`, `udp://10.0.100.13:9001`,
+`udp://203.0.113.10:42488`). Each pair is two sockets and, over UDP, two
 handshakes sent to an address that answers neither. `_pending_connections`
 dedupes `_ensure_route_to` per node, but the address-retry loop dials through
 `_dial_uri` directly and so never saw it.
@@ -3432,7 +3432,7 @@ caller waits on its outcome under its own timeout. Probe dials are exempt.
 entry, `console_connect_request`, `console_connect_accept`,
 `console_invite_block`; `src/ip_utils.py`: `announcement_order`.
 
-**What happens** — seen live on 0.4.67: LAPEEEEEEEE advertised 32 URIs (tun0,
+**What happens** — seen live on 0.4.67: the observing node advertised 32 URIs (tun0,
 a ULA, Tailscale, twelve Docker bridges, libvirt, each on TCP 9000 then UDP
 9001). A PING carries eight and took the first eight: all TCP, four of them
 `172.x` bridges. Join blocks took the first sixteen: TCP only, so the host of a
@@ -3455,7 +3455,7 @@ host whose LAN is not on a default route would still spend slots on bridges.
 
 **Where** — `src/node.py`: `_link_state`; `src/mlo.py`: `Bundle.update`.
 
-**What happens** — seen live on 0.4.68: to JeffreyEpstein and DTrump, TCP
+**What happens** — seen live on 0.4.68: to relay A and relay B, TCP
 probes measured 112–118 ms and UDP 76–78 ms after the VPN exit changed; 40 ms is
 past `mlo_skew_ms` (30), so `Bundle.update` rightly refused the pair. The map
 drew them as `forming` — "second link up, measuring" — for as long as it lasted,
@@ -3467,9 +3467,9 @@ the map state is `apart` with `apart_ms`, and `mlo_status` carries it.
 **Not NMesh — the path.** A TCP probe measured ~40 ms above the UDP one on
 the same path while the kernel's own TCP RTT read 64–76 ms; this entry first
 put the time on the relays, between reading a probe and answering it. That was
-wrong. Off the VPN (public address 82.67.171.179, same build 0.4.70, same
+wrong. Off the VPN (public address 198.51.100.7, same build 0.4.70, same
 relays), TCP and UDP probes agree within a millisecond on every link —
-JeffreyEpstein 14.0 / 14.1 ms, DTrump 19.3 / 19.2, The island 14.2 / 13.9 —
+relay A 14.0 / 14.1 ms, relay B 19.3 / 19.2, node C 14.2 / 13.9 —
 and all four bundles are `active`. On loopback they agree too (0.5 / 0.6 ms).
 So the extra time was added on the VPN path (`tun0`), to TCP and not to UDP.
 Nothing in the node is left to fix; `apart` is the map saying so honestly.
