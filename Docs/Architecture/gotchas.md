@@ -2524,6 +2524,14 @@ running X.
 
 ## Neighbourhood maintenance
 
+- **Two dialers, one address.** `_pending_connections` stops two
+  `_ensure_route_to` racing for one node, but the address-retry loop calls
+  `_dial_uri` directly, so with `retry_interval` set it and the neighbour loop
+  opened the same address twice, two milliseconds apart, and waited out the same
+  timeout twice (seen live on 0.4.66: `tcp://159.26.105.57:9000`,
+  `udp://51.254.199.185:42488`, both doubled). `_dial_uri` now coalesces on
+  `(node, address)`; see *One dial per address at a time* in `transports.md`.
+
 - The distant-bucket scan uses `routing.get_closest(target, k)` sorted by XOR: if
   the current bucket is saturated, the oldest candidate rises and is tried first
   — which may target a node that is already connected. `_connect_routing`

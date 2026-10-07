@@ -3405,3 +3405,21 @@ zero), left at once if it fails; the map draws the held relay.
 valve as FIND_VALUE and DIR_FIND; an answer larger than its question is the
 cost of a signed directory.
 
+## 77 — low — Two loops dialled the same address at once
+
+> **Status — fixed.** Tests: `tests/test_dial_coalesce.py`.
+
+**Where** — `src/node.py`: `_dial_uri`, called by `_retry_pass` and by
+`_connect_routing` (neighbour loop, upgrades, reconnects).
+
+**What happens** — seen live on 0.4.66 with `retry_interval` at 60 s on TCP and
+UDP: the log showed pairs of `dial timeout` for one node and one address two
+milliseconds apart (`The island` at `tcp://159.26.105.57:9000`,
+`tcp://146.70.194.72:9000`, `udp://10.200.100.13:9001`,
+`udp://51.254.199.185:42488`). Each pair is two sockets and, over UDP, two
+handshakes sent to an address that answers neither. `_pending_connections`
+dedupes `_ensure_route_to` per node, but the address-retry loop dials through
+`_dial_uri` directly and so never saw it.
+
+**Fixed** — `_dial_uri` keeps one dial per `(node, address)` in flight; a second
+caller waits on its outcome under its own timeout. Probe dials are exempt.
