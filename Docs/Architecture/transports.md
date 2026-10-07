@@ -202,6 +202,15 @@ be held against the address:
 | `this address is this node itself` | our own advertised address list | yes |
 | `answered claiming our own identity` | nothing — a `CHALLENGE` on a link that has authenticated nothing | **no** |
 
+`answered as <id>` is also recorded **without dialling** when one of our
+authenticated links to another node already runs to that address — dialled
+there, or reached from there (`_address_held_by`). The proof is the same
+signature, made on that link. Dialling it anyway is refused at the handshake,
+but only after the far end has answered and counted the new link as its own —
+and its reaper then closes the older, healthy link to us as redundant
+(`BUGSVULNS.MD` 71). A second link to the *same* node is still dialled: address
+steering does that on purpose.
+
 The third is the net for a self-dial at an address we did not recognise as ours:
 it ends the link before a 21 kB handshake is built for it, but a *claim* must
 never be what strikes an address off — otherwise saying "I am somebody else"
@@ -716,7 +725,12 @@ UDP is connectionless and unreliable → a **reliability layer**:
     (`_answer_closed`) — never a new connection. A frame is from the old link
     when its sequence sits near the cursor we stopped at; a genuinely new dial
     from the same port starts from a fresh random cursor and is accepted as
-    before. A FIN from anybody is never a new connection.
+    before. A FIN from anybody is never a new connection. A link the *far
+    end* closed is remembered too (`_peer_finished`): a frame it sent just
+    before its FIN can arrive after it on a path that reorders, and taken for
+    a new dial it opens a transport whose fresh random cursor the far end, in
+    turn, takes for a new dial of its own (`gotchas.md` "Two listeners
+    accepting each other").
 - **It says what happens to it** (`note`): a retransmit timeout that dropped the
   window to its floor (once per `_NOTE_GAP`, with how many since), a send
   refused, the peer going silent, the peer closing — each with the round trip,
