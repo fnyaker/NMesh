@@ -160,7 +160,9 @@ like the regression.
 | 70 | **medium** | Two UDP listeners accepted each other's challenge as a new link, about seventy times a second, without end |
 | 71 | **medium** | A dial refused as the wrong node still cost the node that answered its healthy link |
 | 72 | **low** | A speed test run past the far end's echo ceiling read the ceiling as loss |
-| 73 | **low** | *Open* — the MLO second link was not opened within 30 s once, in a full serial integration run; never reproduced |
+| 73 | **low** | One lost MLO second-link handshake cost a minute of backoff (an integration test waiting 30 s failed on it once) |
+| 74 | **low** | An idle UDP link through a stalling path resent one frame in nine for nothing, and never timed the late ones |
+| 75 | **low** | Console layout: the logo out of its tile, table rows off their line, the top bar clipped on a phone, the full map short of the screen |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -3291,7 +3293,17 @@ test that could pass the ceiling is refused before a probe leaves, with
 
 ---
 
-## 73 — low — The MLO second link was not opened in time, once (open)
+## 73 — low — The MLO second link was not opened in time, once
+
+> **Status — fixed.** Cause found by reading, not by reproducing: a failed
+> second-link dial backed off `_MLO_DIAL_MIN` = 60 s, longer than the test's
+> wait, so any lost first handshake failed it — and cost a lossy pair in the
+> field a minute of bundle, then two, then four. Now 10 s, doubling to 15 min.
+> Tests: `tests/test_mlo.py::TestOpeningTheSecondLink::test_one_failed_dial_is_asked_again_soon`,
+> `tests/integration/test_mlo_pair.py::TestTheSecondLinkOpensItself::test_a_first_dial_that_fails_is_tried_again`
+> (fails on the old constant). Why the first dial failed in that one run is
+> not known; the test now prints the dial book and the MLO state if it happens
+> again.
 
 **Where** — `tests/integration/test_mlo_pair.py::TestTheSecondLinkOpensItself::test_a_pair_that_starts_with_one_link_ends_up_bundled`,
 the `_wait` for a second link (line 215).
@@ -3309,4 +3321,52 @@ address the host announces.
 
 **Next step** — make the test print `guest.mlo_status()` and the host's address
 book on failure, so the next occurrence says which dial failed and how.
+
+---
+
+## 74 — low — An idle UDP link resent one frame in nine for nothing
+
+> **Status — fixed.** A late original is timed (an ACK sooner after the resend
+> than half the minimum round trip answers the original), and the timer floor
+> is 200 ms for traffic nobody declared, 50 ms for realtime and bulk. Tests:
+> `tests/test_traffic_profiles.py::TestALateOriginalIsTimed`,
+> `::TestTheTimerFloor`.
+
+**Where** — `src/transports/udp.py`, `_acknowledge`, `_sample`, `set_profile`.
+
+**What happens** — seen live through a VPN on 0.4.63: 404 retransmit timeouts in
+575 s on an idle link to DTrump, 239 of them spurious, the timer at 55 ms beside
+probe round trips up to 288 ms; 14 % of its frames were resends. With one frame
+in flight the frames slower than the timer were exactly the ones resent, and
+Karn's rule kept them out of the estimate.
+
+**Reproduce** — `_ReliableLink` pair on a simulated clock and a path with
+stalls of 50–300 ms (`gotchas.md`, "A timer that fired on every stall"): 11 %
+useless resends at the 50 ms floor, 2.8 % at 200 ms.
+
+**Cost, measured** — a lone lost frame at 200 ms is recovered at p99 237 ms
+instead of 78 ms, and bulk loses a fifth of its throughput at 10 % loss; which
+is why both of those keep 50 ms.
+
+---
+
+## 75 — low — The console's layout, undone by its own rules
+
+> **Status — fixed** (`src/webassets/ui.py`, `src/webassets/console.py`). Found
+> with a headless browser at 1440 and 390 px wide.
+
+- the logo's letters outside their tile on every page (`.brand span` matched the
+  mark);
+- the Connected nodes rows: the first cell's border short of the row's and its
+  text off its neighbours' line (a `td` set to `display:flex`);
+- the top bar on a phone showing "Running s d1d24a…" — a centred button clipping
+  both ends of the node's name;
+- the full-screen map on a phone short of the screen by its desktop margin;
+- the Apps page's empty state centred in the first grid column;
+- the feed's time column wide enough to leave each time far from its dot;
+- on the map, edge labels over the names of the nodes they lead to, and two
+  different "loss" figures for one link (lifetime in the list, recent on the
+  line).
+
+`gotchas.md`, "Console layout: four rules that undid another".
 

@@ -119,6 +119,7 @@ from .mesh import codecs as _codecs
 from .mesh import constants as _constants
 from .mesh import messages as _messages
 from .mesh import peers as _peers
+from .mesh import traffic as _traffic
 
 # Re-exported by their own ``__all__`` rather than with ``import *``: a star
 # import at module level would put these names in ``node.py``'s namespace but
@@ -597,6 +598,8 @@ class MeshNode:
         # identity -> Bundle. One per node we hold links to, bounded by the
         # link ceiling and dropped with the last link to that identity.
         self._bundles: OrderedDict[NodeID, mlo.Bundle] = OrderedDict()
+        # What apps said their traffic to a node needs (`set_traffic_profile`).
+        self._traffic = _traffic.TrafficProfiles()
         # Identities one link short of a bundle, and how the last ask for that
         # second link went. Filled by `_update_bundles` (which is the one place
         # that decides who could be bundled), spent by `_mlo_dial_loop`.
@@ -1599,7 +1602,8 @@ class MeshNode:
         return 0
 
     async def console_speedtest(self, node_id_hex: str,
-                                bundle: bool = False) -> dict:
+                                bundle: bool = False,
+                                profile: str = "bulk") -> dict:
         """Load the link to one node and say how fast it actually is.
 
         Bounded twice over — by bytes and by seconds, whichever ends first — so
@@ -1622,7 +1626,14 @@ class MeshNode:
         ``bundle`` loads every direct member of the node's active bundle at
         once, each with a window of its own, and reports them together and one
         by one: what multi-link operation adds is the sum, and no single link
-        can show it."""
+        can show it.
+
+        ``profile`` is ``"bulk"`` unless asked otherwise: a speed test asks how
+        much a link carries, which is what bulk traffic is set up to get out of
+        it (`set_traffic_profile`). ``"default"`` measures the link as traffic
+        nobody declared finds it."""
+        if profile not in ("bulk", "default"):
+            return {"ok": False, "error": "profile is bulk or default"}
         try:
             nid = NodeID(bytes.fromhex(node_id_hex))
         except (ValueError, TypeError):
@@ -1699,6 +1710,9 @@ class MeshNode:
         first_size = 0
         started = time.monotonic()
         deadline = started + _SPEED_MAX_SECONDS
+        if profile == "bulk":
+            self.set_traffic_profile(_SPEED_APP_ID, nid, "bulk",
+                                     _SPEED_MAX_SECONDS + _SPEED_PROBE_TIMEOUT + 5)
         try:
             # At rest first, one probe at a time: the latency of the link with
             # nothing queued on it, which is what "under load" is compared to.
@@ -1770,6 +1784,8 @@ class MeshNode:
                 inflight[qid][2]["lost"] += 1
                 settle(qid)
             self._speed_spend(nid, sent // _SPEED_CHUNK - reserved)
+            if profile == "bulk":
+                self.set_traffic_profile(_SPEED_APP_ID, nid, None)
         idle = [ms for book in books for ms in book["idle"]]
         loaded = [ms for book in books for ms in book["loaded"]]
         elapsed = max(1e-6, time.monotonic() - started)
@@ -1795,6 +1811,7 @@ class MeshNode:
             "ok": True,
             "node": nid.raw.hex(),
             "seconds": round(elapsed, 2),
+            "profile": profile,
             "sent_bytes": sent,
             "echoed_bytes": echoed,
             "lost_bytes": max(0, sent - echoed),
@@ -1927,6 +1944,7 @@ class MeshNode:
                 self._reap_mute_accepted()
                 self._reap_expired_tarpits()
                 self._update_bundles()
+                self._apply_traffic_profiles()
                 self._note_failing_links()
                 if self._rescue:
                     # Here and not inside `_note_failing_links`: an asyncio
@@ -2688,7 +2706,7 @@ class MeshNode:
         failed = tuple(previous[2]) if len(previous) > 2 else ()
         if uri is not None and uri not in failed:
             failed = (failed + (uri,))[-_MAX_ADDRESSES:]
-        delay = min(_MLO_DIAL_MAX, _MLO_DIAL_MIN * (2 ** min(failures - 1, 5)))
+        delay = min(_MLO_DIAL_MAX, _MLO_DIAL_MIN * (2 ** min(failures - 1, 7)))
         self._mlo_dial_log[target] = (failures, time.monotonic() + delay, failed)
         self._mlo_dial_log.move_to_end(target)
         while len(self._mlo_dial_log) > _MLO_DIAL_TRACKED:
@@ -2817,6 +2835,11 @@ class MeshNode:
         bundle = self._bundles.get(target)
         if bundle is None or not bundle.active:
             return peers
+        # Realtime traffic is not spread: striped packets arrive out of order,
+        # and whatever plays them in order waits for the slower link's — a
+        # call hears that wait as jitter. It goes down the best link alone.
+        if self._traffic and self._traffic.realtime(target.raw):
+            return peers
         turn = bundle.next_key()
         if turn is None:
             return peers
@@ -2824,6 +2847,58 @@ class MeshNode:
         if lead is None or lead is peers[0]:
             return peers
         return [lead] + [peer for peer in peers if peer is not lead]
+
+    def set_traffic_profile(self, app_id: bytes, target: NodeID,
+                            profile: str | None,
+                            ttl: float = _traffic.DEFAULT_TTL) -> bool:
+        """Say what one app's traffic to ``target`` needs, for ``ttl`` seconds:
+        ``"realtime"``, ``"bulk"``, or ``None`` to take it back. Declared again
+        to keep it. False when refused (an unknown profile, a full table).
+
+        Optional by design: what it changes costs something somebody else
+        pays — resends of frames that were only late, a congestion control
+        that does not back off for others the way the default does — so it is
+        only done for traffic an app says wants it."""
+        accepted = self._traffic.declare(app_id, target.raw, profile, ttl,
+                                         time.monotonic())
+        if accepted:
+            self._apply_traffic_profiles()
+        return accepted
+
+    def forget_traffic_profiles(self, app_id: bytes) -> None:
+        """An app has gone: whatever it declared goes with it."""
+        self._traffic.forget_app(app_id)
+        self._apply_traffic_profiles()
+
+    def traffic_profile(self, target: NodeID) -> frozenset:
+        return self._traffic.of(target.raw)
+
+    def _apply_traffic_profiles(self) -> None:
+        """Tell every link what the traffic it carries asks of it.
+
+        A profile is declared for a **target**, and the links that carry it are
+        the links to whichever node leads the way there: the target itself when
+        we hold a link to it, the first hop otherwise. Every link to that node,
+        not only the best, since a bundle spreads over all of them. Run when a
+        declaration changes, when a link comes up, and on the keepalive sweep
+        (which is where expiry and a changed route are noticed); a link is only
+        told when what it carries changed."""
+        self._traffic.expire(time.monotonic())
+        wanted: dict[NodeID, set] = {}
+        for raw in self._traffic.targets():
+            target = NodeID(raw)
+            candidates = self._route_candidates(target)
+            if not candidates or candidates[0].authenticated_id is None:
+                continue
+            wanted.setdefault(candidates[0].authenticated_id, set()).update(
+                self._traffic.of(raw))
+        for peer in self._peers:
+            if peer.authenticated_id is None:
+                continue
+            want = frozenset(wanted.get(peer.authenticated_id, ()))
+            if peer.traffic_profile != want:
+                peer.traffic_profile = want
+                medium.set_profile(peer.transport, want)
 
     def mlo_status(self) -> dict:
         """What multi-link operation is doing, for an operator.
@@ -5373,6 +5448,49 @@ class MeshNode:
             "broken": broken,
         }
 
+    def _link_state(self, peer: '_Peer', now: float) -> dict:
+        """What the map says about the way to one node, decided here once.
+
+        Read off the same places the node acts on — the sweep's failing
+        verdict, the bundle, the MLO books — so the drawing can never disagree
+        with what the node is doing. ``quality`` is the best link's: ``failing``
+        (losing more than a link may, `_link_is_failing`), ``lossy`` (losing
+        some, or jittering), else ``clean``. ``mlo`` is ``None`` with nothing
+        to say, or one of:
+
+        * ``seeking`` — one link, and a second one is being asked for
+          (``retry_in`` seconds if the last ask failed);
+        * ``forming`` — two links or more, the bundle still measuring them;
+        * ``active`` — the bundle carries the traffic on every member;
+        * ``degraded`` — a member is benched for losing, the rest carry;
+        * ``parallel`` — several links, none of them bundleable."""
+        node_id = peer.authenticated_id
+        recent = peer.quality.recent_loss()
+        jitter = peer.quality.as_dict().get("jitter_ms") or 0.0
+        if peer.failing or self._link_is_failing(peer):
+            quality = "failing"
+        elif (recent or 0.0) >= _LINK_LOSSY_SHARE or jitter > _LINK_JITTER_MS:
+            quality = "lossy"
+        else:
+            quality = "clean"
+        links = len(self._direct_links_to(node_id))
+        bundle = self._bundles.get(node_id)
+        mlo_state, retry_in = None, None
+        if bundle is not None and (bundle.active or bundle.benched()):
+            mlo_state = "degraded" if bundle.benched() else "active"
+        elif links >= 2:
+            mlo_state = "forming" if bundle is not None else "parallel"
+        elif node_id in self._mlo_short or node_id in self._mlo_dial_log:
+            mlo_state = "seeking"
+            until = self._mlo_dial_log.get(node_id, (0, 0.0))[1]
+            if until > now:
+                retry_in = round(until - now)
+        return {"quality": quality,
+                "loss": None if recent is None else round(recent, 3),
+                "links": links, "mlo": mlo_state, "retry_in": retry_in,
+                "carrying": len(bundle.keys) if bundle is not None and bundle.keys else 1,
+                "profile": sorted(self._traffic.of(node_id.raw))}
+
     def _console_topology(self, now: float) -> dict:
         direct = []
         direct_ids: set[NodeID] = set()
@@ -5389,6 +5507,7 @@ class MeshNode:
                 "since": max(0.0, now - peer.connected_at),
                 "remote": (peer.remote_addr
                            or self._link_view(peer, now).get("remote")),
+                "state": self._link_state(peer, now),
                 "evidence": "authenticated-direct-link",
             })
         routed = []
@@ -11979,6 +12098,8 @@ Hints come first (the ``have`` byte on an announce, from an
         self._log_link_up(peer, "answered its handshake")
         self._routing.add(claimed_id, [], bob_dsa_pub)
         kept = self._collapse_redundant_links(peer)
+        if self._traffic:
+            self._apply_traffic_profiles()
         self._stop_chasing(peer.authenticated_id)
         self._note_change("links")
         self._note_change("nodes")
@@ -12115,6 +12236,8 @@ Hints come first (the ``have`` byte on an announce, from an
         peer.session          = SessionKey(shared_secret)
         peer.pending_kem_secret = None
         kept = self._collapse_redundant_links(peer)
+        if self._traffic:
+            self._apply_traffic_profiles()
         self._stop_chasing(peer.authenticated_id)
         self._note_change("links")
         self._note_change("nodes")

@@ -347,6 +347,9 @@ input[type="checkbox"][role="switch"]:checked::after{transform:translateX(14px)}
 .card.quiet{box-shadow:none;background:var(--surface-2)}
 .cards{display:grid;gap:var(--s-4);
   grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr))}
+/* An empty state in a grid of tiles spans the grid, or it sits in the first
+   column as if it were one tile. */
+.cards>.empty{grid-column:1/-1}
 
 /* -- disclosure ---------------------------------------------------------- */
 details.card>summary{list-style:none;cursor:pointer;padding:var(--s-4) var(--s-5);
@@ -457,7 +460,7 @@ tbody tr[data-clickable]{cursor:pointer}
 .feed .k.warn,.feed .k.refused{background:var(--warn)}
 .feed .k.release{background:var(--accent)}
 .feed .when{color:var(--text-muted);font-variant-numeric:tabular-nums;
-  flex:none;min-width:5.5em;text-align:right}
+  flex:none;min-width:3.5em;text-align:right}
 .feed .what{color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap}
 .feed .n{color:var(--text-muted);flex:none}
@@ -600,7 +603,9 @@ dialog.full>.sheet{max-height:calc(100vh - var(--s-5));height:min(88vh,900px)}
   .sheet-body{padding:var(--s-4);padding-bottom:calc(var(--s-4) + env(safe-area-inset-bottom))}
   .sheet-head,.sheet-foot{padding-inline:var(--s-4)}
   .sheet-foot{padding-bottom:calc(var(--s-3) + env(safe-area-inset-bottom))}
-  dialog.full{height:100dvh;max-height:100dvh}
+  /* The width too: `dialog.full` out-ranks the bare `dialog` above, and its
+     desktop margin would leave a strip of page beside the sheet. */
+  dialog.full{height:100dvh;max-height:100dvh;max-width:100vw;width:100vw}
   dialog.full>.sheet{height:100dvh;max-height:100dvh;border-radius:0;border:0}
 }
 
@@ -692,7 +697,8 @@ SHELL = """
   background:var(--accent);color:var(--accent-fg);font:700 var(--fs-xs)/1 var(--font);
   letter-spacing:.02em}
 .brand b{font-size:var(--fs-md);font-weight:640;letter-spacing:-.01em;display:block}
-.brand span{font-size:var(--fs-xs);color:var(--text-faint);display:block;margin-top:-2px}
+/* The subtitle only: the mark is a span too, and must keep its grid. */
+.brand span span{font-size:var(--fs-xs);color:var(--text-faint);display:block;margin-top:-2px}
 .nav{display:flex;flex-direction:column;gap:2px}
 .nav-label{padding:var(--s-3) var(--s-2) var(--s-1)}
 .nav button,.nav a{display:flex;align-items:center;gap:var(--s-3);width:100%;min-height:34px;
@@ -725,7 +731,9 @@ SHELL = """
 .topbar .who button{font-family:var(--mono);font-size:var(--fs-xs);min-height:var(--ctl-h-sm);
   /* Left, not the button default of centre: a centred label clips at both ends
      on a narrow screen, so the node's name would lose its first letters and the
-     ellipsis would never appear. */
+     ellipsis would never appear. A block, because a button is a flex box and
+     neither `text-align` nor an ellipsis reaches the text of one. */
+  display:block;line-height:calc(var(--ctl-h-sm) - 2px);
   color:var(--text-muted);text-align:left}
 
 /* -- driving another node ------------------------------------------------ */

@@ -277,6 +277,18 @@ class BaseTransport(ABC):
         dropped."""
         return ""
 
+    def set_profile(self, profile: frozenset) -> None:
+        """What the traffic on this link asks of it, as apps declared it
+        (`MeshNode.set_traffic_profile`): a set holding ``"realtime"``,
+        ``"bulk"``, both or neither.
+
+        ``realtime`` wants a lost packet back fast, at the price of resending
+        some that were only late; ``bulk`` wants the most bytes a long path will
+        carry. Each medium does what it can with that and nothing it cannot — a
+        hint, never a requirement, and the default does nothing, which is the
+        right answer for a file on a USB stick."""
+        return None
+
     def idle_timeout(self) -> float | None:
         """Seconds of silence after which *this medium* gives up on the link,
         or ``None`` where it never does.

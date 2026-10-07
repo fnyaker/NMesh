@@ -106,3 +106,46 @@ class TestCall:
         app = ChatApp(StubClient())
         call = AudioCall(app)
         assert call.render(SRC, 99, WavSink("/dev/null")) is None
+
+
+class _Declaring(StubClient):
+    def __init__(self):
+        super().__init__()
+        self.profiles = []
+
+    async def set_profile(self, target, profile, ttl=60.0):
+        self.profiles.append((target, profile))
+        return True
+
+
+class TestACallSaysItIsRealtime:
+    async def test_declared_while_it_runs_and_taken_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "a.wav")
+            _sine_wav(path)
+            client = _Declaring()
+            await AudioCall(ChatApp(client)).place(DST, WavSource(path), pace=False)
+        assert client.profiles[0] == (DST, "realtime")
+        assert client.profiles[-1] == (DST, None)
+
+    async def test_a_client_that_cannot_say_it_still_calls(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "a.wav")
+            _sine_wav(path)
+            sent = await AudioCall(ChatApp(StubClient())).place(
+                DST, WavSource(path), pace=False)
+        assert sent > 0
+
+
+class TestAFileSaysItIsBulk:
+    async def test_a_file_of_several_chunks_is_bulk_while_it_goes(self):
+        from src.apps.chat import FILE_CHUNK_SIZE
+        client = _Declaring()
+        await ChatApp(client).send_file(DST, "f.bin", b"x" * (FILE_CHUNK_SIZE * 3))
+        assert client.profiles[0] == (DST, "bulk")
+        assert client.profiles[-1] == (DST, None)
+
+    async def test_a_small_file_declares_nothing(self):
+        client = _Declaring()
+        await ChatApp(client).send_file(DST, "f.txt", b"hello")
+        assert client.profiles == []

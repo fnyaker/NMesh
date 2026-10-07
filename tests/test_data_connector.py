@@ -754,3 +754,58 @@ class TestWhoCountsAsSomebodyBeingHere:
         finally:
             await client.close()
             await conn.stop(); await node.stop()
+
+
+class TestSayingWhatTrafficNeeds:
+    """`PROFILE`: an app says its traffic to one node is realtime or bulk, for
+    a while. The node decides what that changes; the app only says it."""
+
+    async def test_a_declaration_reaches_the_node(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, APP)
+        await client.connect()
+        target = NodeID(b"\x42" * 20)
+        try:
+            assert await client.set_profile(target, "realtime", 30)
+            assert node.traffic_profile(target) == {"realtime"}
+            assert await client.set_profile(target, None)
+            assert node.traffic_profile(target) == frozenset()
+        finally:
+            await client.close()
+            await conn.stop(); await node.stop()
+
+    async def test_it_goes_when_the_app_does(self):
+        node, _, conn = await _make()
+        client = ConnectorClient(conn.host, conn.port, TOKEN, APP)
+        await client.connect()
+        target = NodeID(b"\x42" * 20)
+        try:
+            assert await client.set_profile(target, "bulk", 600)
+        finally:
+            await client.close()
+        try:
+            assert await _until(lambda: not node.traffic_profile(target))
+        finally:
+            await conn.stop(); await node.stop()
+
+    async def test_a_malformed_declaration_is_answered_no(self):
+        from src.data_connector import _PROFILE, _PROFILE_OK
+        node, _, conn = await _make()
+        reader, writer = await _open(conn)
+        try:
+            assert await _auth(reader, writer) == _AUTH_OK
+            for body in (b"", b"\x42" * 20, b"\x42" * 20 + b"\x09\x00\x10",
+                         b"\x42" * 24):
+                await _write_frame(writer, _PROFILE, body)
+                assert await _read_frame(reader) == (_PROFILE_OK, b"\x00")
+            assert not node._traffic
+        finally:
+            writer.close()
+            await conn.stop(); await node.stop()
+
+    def test_the_client_refuses_what_it_cannot_say(self):
+        client = ConnectorClient("127.0.0.1", 1, TOKEN, APP)
+        with pytest.raises(ValueError):
+            asyncio.run(client.set_profile(b"short", "bulk"))
+        with pytest.raises(ValueError):
+            asyncio.run(client.set_profile(b"\x42" * 20, "turbo"))

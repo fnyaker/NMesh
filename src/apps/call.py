@@ -30,6 +30,9 @@ _MAGIC = b"NAUD"
 _HDR = struct.Struct("!4sIBBI")   # magic | rate | channels | sampwidth | samples/frame
 _MAX_FRAMES = 200_000             # per stream, ~1h at 20ms frames — bounded
 _MAX_STREAMS = 32
+# How often a call renews its realtime declaration, well inside the minute it
+# is declared for.
+_PROFILE_RENEW_S = 20.0
 
 
 @dataclass(frozen=True)
@@ -157,17 +160,31 @@ class AudioCall:
 
     async def place(self, target, source: AudioSource, stream_id: int = 1,
                     pace: bool = True) -> int:
-        """Stream `source` to `target`. Returns the number of audio frames sent."""
-        await self._chat.send_frame(
-            target, stream_id, 0, encode_header(source.fmt, source.samples_per_frame))
-        seq = 1
-        interval = source.frame_ms / 1000.0
-        for frame in source.frames():
-            await self._chat.send_frame(target, stream_id, seq, frame)
-            seq += 1
-            if pace:
-                await asyncio.sleep(interval)
-        return seq - 1
+        """Stream `source` to `target`. Returns the number of audio frames sent.
+
+        Declared realtime traffic while it lasts: a lost frame is resent as
+        soon as it can be and the stream is never spread over two links."""
+        declare = getattr(self._chat, "declare_traffic", None)
+        if declare is not None:
+            await declare(target, "realtime")
+        try:
+            await self._chat.send_frame(
+                target, stream_id, 0,
+                encode_header(source.fmt, source.samples_per_frame))
+            seq = 1
+            interval = source.frame_ms / 1000.0
+            renew = max(1, int(_PROFILE_RENEW_S / max(interval, 0.001)))
+            for frame in source.frames():
+                await self._chat.send_frame(target, stream_id, seq, frame)
+                seq += 1
+                if declare is not None and seq % renew == 0:
+                    await declare(target, "realtime")
+                if pace:
+                    await asyncio.sleep(interval)
+            return seq - 1
+        finally:
+            if declare is not None:
+                await declare(target, None)
 
     # -- receiving --
 

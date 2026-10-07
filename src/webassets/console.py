@@ -164,8 +164,11 @@ INDEX_HTML = """<!doctype html>
           <div class="card-body">
             <svg id="graph" class="mesh-graph clickable" viewBox="0 0 420 250" role="img"
                  aria-label="Connected nodes — click to open the full map"></svg>
-            <p class="tiny muted">Solid: authenticated direct link. Dashed: session routed
-              through a first hop — anything deeper is opaque to this node by design.</p>
+            <p class="tiny muted">A line is an authenticated direct link: amber while it
+              loses probes, red and dashed once it is failing, doubled when MLO bundles
+              it, dotted beside it while MLO looks for a second link. A faint dashed
+              line is a session routed through a first hop — anything deeper is opaque
+              to this node by design.</p>
           </div>
         </article>
       </div>
@@ -1169,6 +1172,10 @@ INDEX_HTML = """<!doctype html>
         <span class="row"><i class="dot direct"></i>direct link</span>
         <span class="row"><i class="dot routed"></i>routed session</span>
         <span class="row"><i class="dot reported"></i>reported by a machine you manage</span>
+        <span class="row"><i class="seg lossy"></i>losing probes</span>
+        <span class="row"><i class="seg failing"></i>failing</span>
+        <span class="row"><i class="seg bundled"></i>MLO bundle</span>
+        <span class="row"><i class="seg seeking"></i>MLO looking for a second link</span>
       </span>
       <span class="grow"></span>
       <span id="map-summary" class="badge"></span>
@@ -1297,7 +1304,11 @@ CONSOLE_PAGE_CSS = """
 }
 /* A node's own links, unfolded under it: indented, quieter, and not clickable
    as a row — the node above is the thing you open. */
-.link-row.group>td:first-child{display:flex;align-items:center;gap:var(--s-2)}
+.link-row>td:first-child{white-space:nowrap}
+/* The fold button and the name share a line inside the cell, never as the
+   cell: a `td` set to flex stops being a table cell, keeps its own height, and
+   its border and text no longer line up with the rest of the row. */
+.link-row .cell-row{display:inline-flex;align-items:center;gap:var(--s-2);vertical-align:middle}
 .link-row .fold{width:20px;min-height:20px;font-size:var(--fs-xs);flex:none}
 .link-row[data-inner]{background:var(--surface-2)}
 .link-row[data-inner]>td{color:var(--text-muted)}
@@ -1365,8 +1376,26 @@ CONSOLE_PAGE_CSS = """
 .map-link:hover,.map-link.on{border-color:var(--accent);background:var(--accent-soft)}
 .map-link .top{display:flex;gap:var(--s-2);align-items:baseline}
 .map-link .top b{font-family:var(--mono);font-size:var(--fs-xs);flex:1 1 auto;min-width:0;
-  overflow:hidden;text-overflow:ellipsis}
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mesh-graph .edge.lossy{stroke:var(--warn)}
+.mesh-graph .edge.failing{stroke:var(--danger);stroke-dasharray:6 3}
+/* The second line of a node with more than one link, one style per thing MLO
+   can be doing: a bundle carrying is a solid pair, the rest are drafts of one. */
+.mesh-graph .edge.twin{stroke-width:1.3;pointer-events:none}
+.mesh-graph .edge.twin.active{stroke:var(--accent)}
+.mesh-graph .edge.twin.degraded{stroke:var(--warn);stroke-dasharray:5 3}
+.mesh-graph .edge.twin.forming{stroke:var(--accent);stroke-dasharray:4 4;opacity:.7}
+.mesh-graph .edge.twin.seeking{stroke:var(--text-faint);stroke-dasharray:1 4;
+  stroke-linecap:round}
+.mesh-graph .edge.twin.parallel{stroke:var(--border-strong)}
+#map-svg .edge.twin{vector-effect:non-scaling-stroke}
+.map-link .mlo.ok{color:var(--ok)}
+.map-link .mlo.warn{color:var(--warn)}
+.map-legend .seg{display:inline-block;width:18px;height:0;border-top:2px solid var(--border-strong)}
+.map-legend .seg.lossy{border-top-color:var(--warn)}
+.map-legend .seg.failing{border-top:2px dashed var(--danger)}
+.map-legend .seg.bundled{border-top:5px double var(--accent)}
+.map-legend .seg.seeking{border-top:2px dotted var(--text-faint)}
 #map-svg .edge.on{stroke:var(--accent);stroke-width:3}
 #map-svg .node.picked circle:not(.hit){stroke:var(--accent);stroke-width:3}
 #map-svg .node.picked text{fill:var(--text);font-weight:700}
@@ -1935,7 +1964,10 @@ function svgEl(name, attrs){
 // medium and the latency, and thickens it with what it carries.
 const GRAPH_SMALL = {w:420, h:250, rx:96, ry:58, rx2:168, ry2:100, r:9, self:12,
                      rx3:216, ry3:124, labels:false};
-const GRAPH_BIG = {w:900, h:520, rx:250, ry:150, rx2:390, ry2:225, r:13, self:18,
+// The inner ring is wide because the expanded map labels every edge, and a
+// label as long as "tcp · 0.8 ms · 24% loss · MLO measuring" needs the room
+// to stay clear of the name of the node at its end.
+const GRAPH_BIG = {w:900, h:520, rx:330, ry:180, rx2:420, ry2:235, r:13, self:18,
                    // A third ring, for what other machines report. Placed
                    // outside the two this node can vouch for, because distance
                    // from the centre is exactly what it means here: how far
@@ -2000,7 +2032,8 @@ function graphShape(state, size){
   const topology = state.topology || {};
   const grown = size.labels ? mapReported(state) : {nodes:[], edges:[]};
   return JSON.stringify([size.w, !!size.labels, state.id,
-    (topology.direct || []).map((node) => [node.id, node.pseudo || ""]),
+    (topology.direct || []).map((node) => [node.id, node.pseudo || "",
+                                           (node.state || {}).mlo || ""]),
     (topology.routed || []).map((node) => [node.id, node.via, node.pseudo || ""]),
     // Reported nodes and edges only on the expanded map: the card on the
     // overview answers "am I connected", which is this node's own question.
@@ -2017,8 +2050,9 @@ function patchGraph(svg, state, size){
     if(line){
       line.setAttribute("stroke-width",
         graphWeight((counters.bytes_in || 0) + (counters.bytes_out || 0)).toFixed(2));
-      line.classList.toggle("lossy",
-        (quality.loss || 0) >= 0.1 || (quality.jitter_ms || 0) > 150);
+      const health = edgeHealth(node);
+      line.classList.toggle("lossy", health === "lossy");
+      line.classList.toggle("failing", health === "failing");
     }
     const label = svg.querySelector('[data-elabel="' + CSS.escape(node.id) + '"]');
     if(label) label.textContent = edgeLabelText(node);
@@ -2028,11 +2062,53 @@ function patchGraph(svg, state, size){
   graphSummary(state, size);
 }
 
-function edgeLabelText(node){
+// What the way to one node is doing, as the node decided it
+// (`MeshNode._link_state`) — read, never re-derived. A node too old to say gets
+// the rule this page used before: amber past a tenth lost or 150 ms of jitter.
+function edgeHealth(node){
+  const state = node.state || {};
+  if(state.quality) return state.quality === "clean" ? "" : state.quality;
   const quality = node.quality || {};
+  return (quality.loss || 0) >= 0.1 || (quality.jitter_ms || 0) > 150 ? "lossy" : "";
+}
+
+// Multi-link operation, in words an operator reads without the manual.
+const MLO_WORDS = {
+  seeking: "looking for a second link",
+  forming: "second link up, measuring",
+  active: "bundled",
+  degraded: "bundled, a link benched for losing",
+  parallel: "several links, not bundled",
+};
+function mloWords(node){
+  const state = node.state || {};
+  if(!state.mlo) return "";
+  if(state.mlo === "active") return "bundled on " + state.carrying + " links";
+  if(state.mlo === "seeking" && state.retry_in)
+    return MLO_WORDS.seeking + ", next try in " + fmtDuration(state.retry_in);
+  return MLO_WORDS[state.mlo] || state.mlo;
+}
+
+function edgeLabelText(node){
+  const quality = node.quality || {}, state = node.state || {};
+  const loss = state.loss == null ? quality.loss : state.loss;
+  const mlo = {active: "MLO ×" + (state.carrying || 2), degraded: "MLO, 1 benched",
+               forming: "MLO measuring", seeking: "MLO seeking"}[state.mlo];
   return (node.transport || "?") +
     (node.rtt_ms == null ? "" : " · " + node.rtt_ms + " ms") +
-    (quality.loss ? " · " + Math.round(quality.loss * 100) + "% loss" : "");
+    (loss ? " · " + Math.round(loss * 100) + "% loss" : "") +
+    (mlo ? " · " + mlo : "") +
+    ((state.profile || []).length ? " · " + state.profile.join(", ") : "");
+}
+
+// The second line of a node holding (or after) more than one link, drawn
+// beside the first: what MLO is doing is read off the pair, not off a colour.
+function twinLine(from, to, offset, kind, id){
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const ox = -dy / length * offset, oy = dx / length * offset;
+  return svgEl("line", {x1:from.x + ox, y1:from.y + oy, x2:to.x + ox, y2:to.y + oy,
+                        class:"edge twin " + kind, "data-twin":id});
 }
 
 // Thickness carries volume: a fat pale line is a busy healthy link.
@@ -2090,16 +2166,19 @@ function renderGraph(svg, state, size){
   direct.forEach((node) => {
     const point = place.get(node.id);
     const counters = node.counters || {};
-    const quality = node.quality || {};
-    const lossy = (quality.loss || 0) >= 0.1 || (quality.jitter_ms || 0) > 150;
+    const health = edgeHealth(node), mlo = (node.state || {}).mlo;
     const line = svgEl("line", {
       x1:centre.x, y1:centre.y, x2:point.x, y2:point.y,
-      class:"edge" + (lossy ? " lossy" : ""), "data-edge":node.id,
+      class:"edge" + (health ? " " + health : ""), "data-edge":node.id,
       "stroke-width":graphWeight((counters.bytes_in || 0) + (counters.bytes_out || 0)).toFixed(2)});
     svg.appendChild(line);
+    if(mlo) svg.appendChild(twinLine(centre, point, size.labels ? 5 : 3.5, mlo, node.id));
     if(size.labels){
+      // Halfway while there are few: the label then sits clear of the node's
+      // own name. With many, the middles crowd the centre (`edgeLabelAt`).
       const label = svgEl("text", Object.assign(
-        edgeLabelAt(centre, point), {class:"elabel", "data-elabel":node.id}));
+        edgeLabelAt(centre, point, direct.length <= 4 ? .5 : null),
+        {class:"elabel", "data-elabel":node.id}));
       label.textContent = edgeLabelText(node);
       svg.appendChild(label);
     }
@@ -2210,12 +2289,20 @@ function paintMap(){
     '">Details</button></div></div>').join("") : "");
   setHTML("map-links", direct.length ? direct.map((node) => {
     const quality = node.quality || {}, counters = node.counters || {};
-    const loss = quality.loss == null ? null : Math.round(quality.loss * 100);
+    // The recent share, the one the line beside it is drawn from: the lifetime
+    // one is a different number under the same word.
+    const share = (node.state || {}).loss == null ? quality.loss : node.state.loss;
+    const loss = share == null ? null : Math.round(share * 100);
     return '<div class="map-link' + (MAP_PICK === node.id ? " on" : "") +
       '" data-link="' + esc(node.id) + '">' +
       '<div class="top"><b>' + esc(nodeLabel(node.id, node.pseudo)) + "</b>" +
       badge(node.transport || "?", "") +
-      (loss ? badge(loss + "%", "warn") : "") + overlayBadges(node.id) + "</div>" +
+      (loss ? badge(loss + "%", edgeHealth(node) === "failing" ? "danger" : "warn") : "") +
+      ((node.state || {}).profile || []).map((name) => badge(name, "")).join("") +
+      overlayBadges(node.id) + "</div>" +
+      (mloWords(node) ? '<div class="tiny mlo ' +
+        ({active: "ok", degraded: "warn"}[(node.state || {}).mlo] || "muted") +
+        '">MLO: ' + esc(mloWords(node)) + "</div>" : "") +
       '<div class="tiny muted">' +
       (node.rtt_ms == null ? "no probe yet" : node.rtt_ms + " ms" +
         (quality.jitter_ms ? " ±" + quality.jitter_ms : "")) +
@@ -2660,14 +2747,14 @@ function groupRowHTML(group, unfolded){
     ((link.link || {}).scheme) || "?"))];
   const key = "g:" + group.id;
   return '<tr class="link-row group" data-clickable data-node-id="' + esc(group.id) +
-    '"><td class="mono">' +
+    '"><td class="mono"><span class="cell-row">' +
     '<button class="icon sm fold" data-fold="' + esc(group.id) + '" aria-expanded="' +
     (open ? "true" : "false") + '" aria-label="' +
     (open ? "Hide" : "Show") + ' the links to ' + esc(nodeLabel(group.id, group.pseudo)) + '">' +
     '<svg class="ic turn" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5 12 15.5l6-6"/></svg>' +
-    "</button>" + esc(nodeLabel(group.id, group.pseudo)) + "</td>" +
+    "</button>" + esc(nodeLabel(group.id, group.pseudo)) + "</span></td>" +
     '<td><span class="badge ok">' + esc(plural(group.links.length, "link")) +
-      "</span></td>" +
+      '</span> <span data-v="' + esc(key + ":mlo") + '"></span></td>' +
     "<td>" + esc(schemes.join(", ")) + "</td>" +
     '<td class="num"><span data-v="' + esc(key + ":rtt") + '"></span>' +
       '<div class="tiny muted" data-v="' + esc(key + ":jitter") + '"></div></td>' +
@@ -2683,6 +2770,16 @@ function groupValues(group, out){
   out[key + ":rtt"] = best.rtt_ms == null ? "—" : best.rtt_ms + " ms";
   out[key + ":jitter"] = quality.jitter_ms ? "±" + quality.jitter_ms + " ms" : "";
   out[key + ":seen"] = best.seen_ago == null ? "live" : fmtAgo(best.seen_ago);
+  // What MLO makes of these links, as the node decided it: the topology carries
+  // it per node, so it is read from there rather than guessed from the count.
+  const drawn = (((STATE || {}).topology || {}).direct || []).find(
+    (node) => node.id === group.id);
+  const mlo = ((drawn || {}).state || {}).mlo;
+  out[key + ":mlo"] = {html: mlo && mlo !== "parallel"
+    ? badge({active: "MLO bundled", degraded: "MLO, 1 benched",
+             forming: "MLO measuring", seeking: "MLO seeking"}[mlo] || mlo,
+            {active: "ok", degraded: "warn"}[mlo] || "")
+    : ""};
   return out;
 }
 

@@ -116,6 +116,12 @@ def idle_timeout(transport) -> float | None:
     return value
 
 
+def set_profile(transport, profile: frozenset) -> None:
+    """Tell a link what its traffic asks of it. A medium that cannot, or that
+    fails trying, is left as it was."""
+    _ask(transport, "set_profile", None, frozenset(profile))
+
+
 def stats(transport) -> dict:
     """Whatever counters this medium keeps, bounded and flattened to scalars."""
     raw = _ask(transport, "stats", None)

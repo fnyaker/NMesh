@@ -13,6 +13,7 @@ import socket
 import struct
 
 from ..core_release import PUBLISHER_ID_LEN as _RELEASE_ID_LEN
+from ..app_channel import builtin_id as _builtin_app_id
 from .messages import *  # noqa: F401,F403
 
 
@@ -282,6 +283,9 @@ _SPEED_MAX_BYTES       = 8 * 1024 * 1024   # one test, in one direction
 _SPEED_MAX_SECONDS     = 10.0
 _SPEED_WINDOW          = 60.0              # what the *answering* side allows…
 _SPEED_MAX_PER_WINDOW  = 1200              # …in echoes, per identity, per window
+# The section a speed test declares its traffic profile under, as if it were an
+# app (`MeshNode.set_traffic_profile`): reserved, so no app can take it back.
+_SPEED_APP_ID          = _builtin_app_id("speedtest")
 # Probes outstanding at once — a *sliding* window: a new probe leaves as each
 # echo lands, so the link is never idle waiting for the slowest of a batch.
 # It starts at eight and opens by one per echo, up to the ceiling, until the
@@ -378,7 +382,13 @@ _MLO_SOURCES_MAX = 16       # distinct things that can say "somebody is here"
 # link is all routing needs. So a bundle only ever formed when the pair
 # happened to dial each other over two media, or when an operator pressed
 # "retry every address" by hand.
-_MLO_DIAL_MIN = 60.0        # backoff after an address that did not answer…
+# What the map calls a lossy link: more than one probe in fifty lost recently,
+# or a jitter that a call would hear. A failing one is the sweep's own verdict.
+_LINK_LOSSY_SHARE = 0.03
+_LINK_JITTER_MS = 150.0
+# One lost handshake is common on a lossy path and must not cost a minute of
+# bundle; a dead address keeps doubling and soon costs one dial a quarter hour.
+_MLO_DIAL_MIN = 10.0        # backoff after an address that did not answer…
 _MLO_DIAL_MAX = 900.0       # …doubling to here, so a dead address costs little
 _MLO_DIAL_TRACKED = 64      # identities remembered, in either book
 _MLO_DIAL_PER_PASS = 1      # dials one pass may make…
@@ -960,6 +970,8 @@ __all__ = [
     "_MLO_DIAL_IDLE_MAX",
     "_MLO_DIAL_MAX",
     "_MLO_DIAL_MIN",
+    "_LINK_LOSSY_SHARE",
+    "_LINK_JITTER_MS",
     "_MLO_DIAL_PER_PASS",
     "_MLO_DIAL_TRACKED",
     "_MLO_SOURCES_MAX",
@@ -1096,6 +1108,7 @@ __all__ = [
     "_SPEED_INFLIGHT_MAX",
     "_SPEED_MAX_BYTES",
     "_SPEED_MAX_PER_WINDOW",
+    "_SPEED_APP_ID",
     "_SPEED_MAX_SECONDS",
     "_SPEED_PROBE_TIMEOUT",
     "_SPEED_QUEUE_SLACK_MS",
