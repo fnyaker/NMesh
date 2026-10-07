@@ -234,6 +234,8 @@ class MeshNode:
         self._reach_pending: OrderedDict[tuple, float] = OrderedDict()
         self._running = False
         self._peers: list[_Peer] = []
+        # remote address -> until: see _end_double_accept.
+        self._double_accepted: OrderedDict[str, float] = OrderedDict()
         self._invite = InviteManager()
         self._cert_store_path = cert_store_path
         self._cert_store = (CertStore.load(cert_store_path, self._id)
@@ -430,6 +432,9 @@ class MeshNode:
         # measured keeps its own ceiling and the side measuring cannot raise it.
         self._speed_rate: OrderedDict[bytes, tuple] = OrderedDict()
         self._speed_seen: OrderedDict[bytes, float] = OrderedDict()
+        # The same count kept by the side measuring, per target: see
+        # _speed_spend.
+        self._speed_spent: OrderedDict[bytes, tuple] = OrderedDict()
         # Pseudos: the changeable name beside the unchangeable id. One book
         # holds every claim we have verified — our own included — and answers
         # both "what is this node called?" and "who is called this?".
@@ -1570,6 +1575,29 @@ class MeshNode:
                 and member.session is not None
                 and member.authenticated_id == target]
 
+    def _speed_spend(self, target: NodeID, probes: int) -> int:
+        """Count ``probes`` against what ``target`` will answer this window,
+        or say in how many seconds it would: ``0`` when counted.
+
+        The far end stops echoing at `_SPEED_MAX_PER_WINDOW`, silently, so a
+        test run past it reads the ceiling as loss on a link that lost
+        nothing. A negative count gives back what a test reserved and did not
+        send. The window is held a second longer than the far end's, whose
+        own starts when our first probe arrives."""
+        now = time.monotonic()
+        span = _SPEED_WINDOW + 1.0
+        for key in [k for k, (_, ws) in self._speed_spent.items()
+                    if now - ws > span]:
+            del self._speed_spent[key]
+        while (len(self._speed_spent) >= _MAX_PEERS
+               and target.raw not in self._speed_spent):
+            self._speed_spent.popitem(last=False)
+        count, started = self._speed_spent.get(target.raw, (0, now))
+        if probes > 0 and count + probes > _SPEED_MAX_PER_WINDOW:
+            return max(1, int(started + span - now) + 1)
+        self._speed_spent[target.raw] = (max(0, count + probes), started)
+        return 0
+
     async def console_speedtest(self, node_id_hex: str,
                                 bundle: bool = False) -> dict:
         """Load the link to one node and say how fast it actually is.
@@ -1613,6 +1641,14 @@ class MeshNode:
             members = [peer]
         if not self.peer_announces(members[0], features.SPEEDTEST):
             return {"ok": False, "error": "that node does not run speed tests"}
+        reserved = (_SPEED_MAX_BYTES // _SPEED_CHUNK
+                    + _SPEED_IDLE_PROBES * len(members))
+        wait = self._speed_spend(nid, reserved)
+        if wait:
+            return {"ok": False, "retry_after": wait,
+                    "error": f"that node answers at most {_SPEED_MAX_PER_WINDOW}"
+                             f" probes a minute and this one would pass it:"
+                             f" try again in {wait} s"}
 
         payload = os.urandom(_SPEED_CHUNK - _QID_LEN)
         loop = asyncio.get_running_loop()
@@ -1733,6 +1769,7 @@ class MeshNode:
             for qid in list(inflight):
                 inflight[qid][2]["lost"] += 1
                 settle(qid)
+            self._speed_spend(nid, sent // _SPEED_CHUNK - reserved)
         idle = [ms for book in books for ms in book["idle"]]
         loaded = [ms for book in books for ms in book["loaded"]]
         elapsed = max(1e-6, time.monotonic() - started)
@@ -4471,6 +4508,9 @@ class MeshNode:
             if self._unauthenticated_peers() >= _MAX_UNAUTH_PEERS:
                 await transport.close()
                 return
+        if self._double_accept_held(transport):
+            await transport.close()
+            return
         peer = self._new_peer(transport, is_client_side=False)
         self._peers.append(peer)
         self._poke_net("peer-connected")
@@ -4496,12 +4536,40 @@ class MeshNode:
         both ends' keepalives held the link up indefinitely. Taking the dialler's
         part here instead would answer a datagram from any source address with
         a ~21 kB handshake, so the link is ended: the FIN tells the far end, and
-        the next dial opens one the normal way. Never raises, never awaits."""
+        the next dial opens one the normal way. Never raises, never awaits.
+
+        Ending it once is not enough when each end takes what is left of the
+        last link for a new one: both challenge again, both end it again, at
+        the pace of the round trip. So the address is held for a moment, and a
+        link accepted from it meanwhile is closed before it says anything —
+        with nothing from this end to answer, the far end has nothing to
+        accept."""
+        address = medium.endpoints(peer.transport)["remote"]
+        if address:
+            self._double_accepted.pop(address, None)
+            while len(self._double_accepted) >= _DOUBLE_ACCEPT_TRACKED:
+                self._double_accepted.popitem(last=False)
+            self._double_accepted[address] = (time.monotonic()
+                                              + _DOUBLE_ACCEPT_HOLD)
         if peer in self._peers:
             self._peers.remove(peer)
             self._note_change("links")
         self._spawn_bounded(self._safe_stop_peer(
             peer, "both ends accepted this link; neither would dial"))
+
+    def _double_accept_held(self, transport: BaseTransport) -> bool:
+        """Was the last link accepted from this address one both ends
+        accepted, a moment ago?"""
+        if not self._double_accepted:
+            return False
+        address = medium.endpoints(transport)["remote"]
+        until = self._double_accepted.get(address) if address else None
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            del self._double_accepted[address]
+            return False
+        return True
 
     def _unauthenticated_peers(self) -> int:
         """Links that have not proved who they are yet — virtual relay peers
@@ -4597,6 +4665,15 @@ class MeshNode:
             if node_id is not None:
                 self._routing.note_wrong_address(node_id, uri, self._id)
             return None
+        holder = self._address_held_by(uri, node_id)
+        if holder is not None:
+            # A handshake would refuse it too, but only once the far end has
+            # answered and counted the new link as its own — and its reaper
+            # then closes the older, healthy link to us as redundant.
+            self._note_dial(node_hex, uri, "wrong node",
+                            self._wrong_node_detail(uri, holder))
+            self._routing.note_wrong_address(node_id, uri, holder)
+            return None
         if len(self._peers) >= _MAX_PEERS:
             self._note_dial(node_hex, uri, "peer limit")
             return None
@@ -4656,6 +4733,25 @@ class MeshNode:
                     pass
                 if peer in self._peers:
                     self._peers.remove(peer)
+        return None
+
+    def _address_held_by(self, uri: str,
+                         node_id: NodeID | None) -> NodeID | None:
+        """The other node one of our authenticated links runs to at ``uri``,
+        or ``None``.
+
+        A link that authenticated there proved, against our own challenge, who
+        answers at that address now; that is something we established, not a
+        claim, so it is enough to know the address is not ``node_id``'s."""
+        if node_id is None:
+            return None
+        for peer in self._peers:
+            held = peer.authenticated_id
+            if held is None or held == node_id:
+                continue
+            if uri in (peer.remote_addr,
+                       medium.endpoints(peer.transport)["remote"]):
+                return held
         return None
 
     def _wrong_node_detail(self, uri: str, found: NodeID) -> str:

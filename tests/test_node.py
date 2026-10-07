@@ -286,6 +286,84 @@ class TestAdmission:
         await node.stop()
 
 
+class _FromAddress(FakeTransport):
+    def __init__(self, remote: str) -> None:
+        super().__init__()
+        self._remote_uri = remote
+        self.closed = False
+
+    def endpoints(self) -> dict:
+        return {"local": None, "remote": self._remote_uri}
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class TestTwoListenersAcceptingEachOther:
+    """Ending a double accept once did not end it: seen live, two UDP listeners
+    took what was left of each link for a new one, and challenged and ended
+    links at each other seventy times a second for half an hour (BUGSVULNS 70).
+    """
+
+    async def _double_accept(self, node: MeshNode, remote: str) -> _FromAddress:
+        from src.node import CHALLENGE
+        transport = _FromAddress(remote)
+        await node._on_new_transport(transport)
+        peer = node._peers[-1]
+        await node._handle_challenge(peer, Packet.create(
+            CHALLENGE, os.urandom(20), b"\xff" * 20, os.urandom(32)))
+        await asyncio.sleep(0.02)
+        assert peer not in node._peers
+        return transport
+
+    async def test_the_next_link_from_that_address_is_not_challenged(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        await self._double_accept(node, "udp://10.0.0.5:9001")
+        again = _FromAddress("udp://10.0.0.5:9001")
+        await node._on_new_transport(again)
+        assert again.closed
+        assert again.sent == []
+        assert node._peers == []
+        await node.stop()
+
+    async def test_another_address_is_challenged_as_usual(self):
+        """A far end dialling us normally does so from a fresh source port."""
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        await self._double_accept(node, "udp://10.0.0.5:9001")
+        other = _FromAddress("udp://10.0.0.5:40123")
+        await node._on_new_transport(other)
+        assert not other.closed
+        assert other.sent
+        await node.stop()
+
+    async def test_the_hold_ends(self):
+        import src.node as node_mod
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        await self._double_accept(node, "udp://10.0.0.5:9001")
+        # Age the entry rather than patch the clock the event loop reads.
+        node._double_accepted["udp://10.0.0.5:9001"] -= (
+            node_mod._DOUBLE_ACCEPT_HOLD + 1)
+        later = _FromAddress("udp://10.0.0.5:9001")
+        await node._on_new_transport(later)
+        assert not later.closed
+        assert later.sent
+        await node.stop()
+
+    async def test_it_is_bounded(self):
+        import src.node as node_mod
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        from src.node import _Peer
+        for port in range(node_mod._DOUBLE_ACCEPT_TRACKED + 8):
+            node._end_double_accept(_Peer(_FromAddress(f"udp://10.0.0.5:{port}"),
+                                          is_client_side=False))
+        assert len(node._double_accepted) <= node_mod._DOUBLE_ACCEPT_TRACKED
+        await node.stop()
+
+
 class TestAnAcceptedLinkThatNeverSpeaks:
     """Seen live: a UDP link accepted from a far end that never sent a
     challenge, held up for 991 s by transport keepalives alone. The ceiling

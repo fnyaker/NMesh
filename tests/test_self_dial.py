@@ -416,3 +416,79 @@ class TestAnAddressSharedWithAnotherNode:
         found = await asyncio.wait_for(
             node._wait_for_peer_authenticated(peer, NodeID(b"\x22" * 20), 30.0), 1.0)
         assert found is False
+
+
+class _EndpointTransport(FakeTransport):
+    def __init__(self, remote: str) -> None:
+        super().__init__()
+        self._remote_uri = remote
+
+    def endpoints(self) -> dict:
+        return {"local": None, "remote": self._remote_uri}
+
+
+class TestAnAddressAnotherLinkAlreadyHolds:
+    """A dial to an address one of our links already reaches another node at.
+    The handshake refuses it, but too late to be free: the far end has answered
+    and counted the new link as its own, and its reaper closes the older,
+    healthy link to us as redundant. Seen live twice in three dials."""
+
+    def _node_linked_to(self, holder: NodeID, *, dialled: str | None = None,
+                        remote: str | None = None) -> MeshNode:
+        node = _node()
+        peer = _Peer(_EndpointTransport(remote) if remote else FakeTransport(),
+                     is_client_side=dialled is not None)
+        peer.remote_addr = dialled
+        peer.authenticated_id = holder
+        node._peers.append(peer)
+        return node
+
+    async def _dial(self, node: MeshNode, target: NodeID, uri: str):
+        opened = []
+
+        async def connect(u):
+            opened.append(u)
+            raise ConnectionRefusedError
+        node._transport_manager.connect = connect
+        await node._dial_uri(target, uri, 0.5)
+        await node.stop()
+        return opened, (node._dial_log.get(target.raw.hex()) or {}).get(uri)
+
+    async def test_an_address_we_dialled_another_node_at_is_not_dialled(self):
+        holder, target = NodeID(b"\x33" * 20), NodeID(b"\x22" * 20)
+        node = self._node_linked_to(holder, dialled="fake://shared:1")
+        node._routing.add(target, ["fake://shared:1"])
+        opened, row = await self._dial(node, target, "fake://shared:1")
+        assert opened == []
+        assert row["outcome"] == "wrong node"
+        assert holder.raw.hex() in row["detail"]
+        assert node._routing.wrong_address(target, "fake://shared:1") == holder.raw
+
+    async def test_an_address_another_node_reached_us_from_is_not_dialled(self):
+        holder, target = NodeID(b"\x33" * 20), NodeID(b"\x22" * 20)
+        node = self._node_linked_to(holder, remote="fake://shared:1")
+        opened, row = await self._dial(node, target, "fake://shared:1")
+        assert opened == []
+        assert row["outcome"] == "wrong node"
+
+    async def test_a_second_link_to_the_same_node_is_still_dialled(self):
+        """Address steering dials a node it already reaches, on purpose."""
+        target = NodeID(b"\x22" * 20)
+        node = self._node_linked_to(target, dialled="fake://shared:1")
+        opened, _ = await self._dial(node, target, "fake://shared:1")
+        assert opened == ["fake://shared:1"]
+
+    async def test_a_link_still_proving_itself_holds_nothing(self):
+        """Only an identity proved against our own challenge strikes an address
+        off; an unauthenticated link has proved nothing yet."""
+        target = NodeID(b"\x22" * 20)
+        node = self._node_linked_to(NodeID(b"\x33" * 20), dialled="fake://shared:1")
+        node._peers[0].authenticated_id = None
+        opened, _ = await self._dial(node, target, "fake://shared:1")
+        assert opened == ["fake://shared:1"]
+
+    async def test_another_address_is_still_dialled(self):
+        target = NodeID(b"\x22" * 20)
+        node = self._node_linked_to(NodeID(b"\x33" * 20), dialled="fake://shared:1")
+        opened, _ = await self._dial(node, target, "fake://own:2")
+        assert opened == ["fake://own:2"]

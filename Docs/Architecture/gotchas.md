@@ -40,6 +40,29 @@ on a timer: a relayed join's links (`relay_only` on the joiner, the joiner's
 link on the relay) stay unauthenticated on purpose for as long as the join's
 session lives. Relayed virtual peers are exempt here for the same reason.
 
+### Two listeners accepting each other, without end
+The guard above ends a double accept once. Seen live (`BUGSVULNS.MD` 70): two
+UDP listeners kept ending one every round trip, ~70 a second for half an hour,
+130 000 link serials, until the route between them went away. Each new link was
+opened by a frame that carried no packet.
+
+One way a round starts again was found in the transport: the end that *receives*
+the FIN forgot the link entirely (`_peer_finished` did not `remember_closed`;
+only `close()` did). On a path that reorders — internet, wifi — a frame the far
+end sent just before its FIN can arrive after it, and with nothing remembered
+it is a new dial: a fresh transport with a fresh random cursor, whose first
+frames the far end, remembering its own close, takes for a new dial in turn.
+Both challenge, both end it, and the leftovers of that round start the next.
+Both ends now remember the link, whichever of them ended it.
+
+The live pair was not reproduced locally — two nodes with jitter and reordering
+converge after one link on the old code too — so the guard has a second half
+that does not depend on the cause: after a double accept, a link accepted from
+the **same address** is closed for `_DOUBLE_ACCEPT_HOLD` before this node sends
+a capability or a challenge on it. Our side then gives the far end nothing to
+accept. The key is the full address, so a normal dial (from a fresh source
+port) is not held, and a punched link is adopted, not accepted.
+
 ### Reading a trace that stops at `HANDSHAKE`
 `Trace.record("in", …)` runs in the receive loop **before** the handler, and
 `record("out", …)` after `transport.send()` returned. So:
@@ -141,6 +164,14 @@ counts; `_wait_for_peer_authenticated` gives up the moment another identity has
 answered instead of waiting out its timeout; and the same pair answering as the
 same node again doubles how long it is held (`WRONG_ADDRESS_TTL_MAX`). Every
 path that takes a link out of the list writes its line.
+
+That still cost a link. Re-tested live, the refusal fired as designed — and the
+far end had already answered the handshake, counted the new link as its own and
+closed its *older* link to us as redundant: a 220 s and a 528 s link lost, 2 ms
+and 33 ms beside the two `dial wrong node` lines (`BUGSVULNS.MD` 71). Refusing
+at the handshake is refusing after the far end has acted. An address one of our
+authenticated links to another node already runs to is now known to be that
+node's before any socket opens (`_address_held_by` in `_dial_uri`).
 
 ### The id that answers nobody, asked after for ever
 The same trace: one id was queried in every lookup round of the whole capture

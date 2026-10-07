@@ -128,3 +128,34 @@ showed while doing so changed two of the diagnoses above.
 | 7. `releases_overview` size | Not done. | — |
 | 8. Minor | All three fixed. | 69 |
 
+## Re-test on 0.4.62, after the deploy
+
+| What | Reading |
+|---|---|
+| Speed test to DTrump (TCP) | 32.9 MB/s one way, 0 loss, 19.3 ms idle / 25.1 ms loaded, window grown to 64 — was 6.7 MB/s with the fixed window |
+| UDP links to DTrump, JeffreyEpstein, The island | 0 spurious timeouts, `rto` 50 ms beside `srtt` 14–20 ms |
+| `transfer_kinds` for the MCP origin | `package`, `app`, `release` — was empty |
+| Mute accepted link (66) | ended at 60 s every time; DTrump's listener opens a new one every ~100 s |
+| Wrong-node dials (64) | refused at the handshake, three in eight minutes — but each cost the answering node's healthy link (**71, open**) |
+| Found | a storm of UDP links between our listener and The island's, ~70 a second (**70, open**) |
+
+The MCP tool list was read before the deploy, so `node_speedtest` did not
+offer `bundle` yet; the bundle measurement is still to be read live.
+
+## Over the internet, wifi, then Proton VPN (2026-10-07)
+
+| Check | Internet + wifi | Proton VPN |
+|---|---|---|
+| Idle round trip, DTrump | 26–28 ms, jitter 2–4 ms | 50–100 ms, jitter ~30 ms |
+| UDP timer | rto 50 ms, srtt 26 ms; 22 of 64 timeouts spurious | rto 183 ms, srtt 57 ms; 4 of 23 spurious |
+| Speed test, one link | TCP 2.1–2.2 MB/s (DTrump, JeffreyEpstein), window 10 | TCP 0.40 MB/s, 7.8 % of probes unechoed within 2 s |
+| Speed test, bundle | UDP+TCP 4.7 MB/s (DTrump) | UDP+TCP 0.42 MB/s |
+| Listener storm (70) | stopped with the network change; the VPN address no longer answers | — |
+| Wrong dial costing a link (71) | seen again: JeffreyEpstein's 606 s inbound link lost | — |
+| Sleep | — | 607 s slept, every link dropped with that reason, all back |
+
+Two readings needed care. A third DTrump test inside a minute reported 21 %
+loss: it was DTrump's echo ceiling, reached by the two tests before it
+(`BUGSVULNS.MD` 72), not the link. And over the VPN, TCP "loses" probes too:
+those are echoes later than `_SPEED_PROBE_TIMEOUT` behind a queue, which TCP
+delivers late rather than drops — the column is latency, not loss.
