@@ -1594,7 +1594,7 @@ re-derived by the page:
 The map draws `lossy` amber and `failing` red and dashed, and a second line
 beside the link for MLO: solid for `active`, dashed amber for `degraded`, dashed
 for `forming`, dotted for `seeking`, and plain grey — like `parallel` — for
-`apart`, whose label reads `MLO apart` and whose words give the gap.
+`apart`, whose label reads `MLO too far apart` and whose words give the gap.
 
 ### The contract this puts on apps
 
