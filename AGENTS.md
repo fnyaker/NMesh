@@ -405,6 +405,9 @@ scope. Add yours.
   merged, in a public repository. → Write an incident with placeholders from
   the start (see *Report every bug*); before a push, grep the diff for what
   the session's live tools showed.
+- **`git commit -a` in a tree holding someone's local files.** It took the
+  operator's `.claude/settings.local.json` into a pushed branch. → Stage by
+  path (`git add <files>`), never `-a`, and read `git status` before a commit.
 - **A commit made on a red suite.** `pytest -q | tail -1 && git commit …`:
   the pipe's status is `tail`'s, so `1 failed` printed and the commit and push
   went ahead. → Never chain a commit after a piped test run; run the tests,
