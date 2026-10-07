@@ -8,7 +8,6 @@ peer OBSERVED it come from (never an arbitrary one → no amplification), rather
 than waiting for a passive inbound connection.
 """
 import asyncio
-import random
 import struct
 
 import pytest
@@ -23,6 +22,7 @@ from src.packet import Packet
 from src.transport_manager import TransportManager
 from src.tcp_transport import TCPTransport, TCPServer
 from tests.conftest import make_node, FakeTransport
+from tests.integration import free_port
 
 
 def _tcp_mgr() -> TransportManager:
@@ -64,7 +64,7 @@ class TestIPv6Preference:
 
 class TestAutoNAT:
     async def test_dial_back_confirms_reachable(self):
-        base = random.randint(20000, 40000)
+        base = free_port()
         A, P = MeshNode(_tcp_mgr()), MeshNode(_tcp_mgr())
         await A.start([f"tcp://127.0.0.1:{base}"])
         await P.join(f"tcp://127.0.0.1:{base}", A.generate_invite())
