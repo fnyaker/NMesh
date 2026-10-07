@@ -385,7 +385,9 @@ not the same as being read.
   losing probes amber and a failing one red and dashed, and draws a second line
   beside a link for what multi-link operation is doing: solid when a bundle
   carries, dashed amber when a member is benched, dashed while the second link
-  is measured, dotted while one is being looked for. The legend says which is
+  is measured, dotted while one is being looked for, plain grey when two links
+  measure too far apart to bundle (`MLO apart`, and the gap in words: "two
+  links 42 ms apart, more than a bundle allows"). The legend says which is
   which, the label adds `MLO ×2` / `MLO seeking` and any declared traffic
   profile, and the links beside it say the same in words ("bundled on 2 links",
   "looking for a second link, next try in 8s"). The state is decided by the

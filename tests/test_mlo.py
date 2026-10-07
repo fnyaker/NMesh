@@ -1587,6 +1587,31 @@ class TestTheMapIsToldWhatTheWayToANodeIsDoing:
         node._update_bundles()
         assert self._state(node, first)["mlo"] == "degraded"
 
+    def test_two_measured_links_too_far_apart_say_so(self):
+        """Not "measuring": both links are measured, and the bundle refused
+        them for the skew — the map must say which, and by how much."""
+        node = _node()
+        _second_medium(node)
+        _ready(node, "fake", "fake2")
+        node.note_awake("test")
+        first = _link(node, uri="fake://a:1", mean_ms=76.0, probes=50)
+        _link(node, uri="fake2://b:2", mean_ms=118.0, probes=50)
+        node._update_bundles()
+        state = self._state(node, first)
+        assert state["mlo"] == "apart" and state["apart_ms"] == 42.0
+        assert node.mlo_status()["bundles"][0]["apart_ms"] == 42.0
+
+    def test_a_link_not_yet_measured_is_still_forming(self):
+        node = _node()
+        _second_medium(node)
+        _ready(node, "fake", "fake2")
+        node.note_awake("test")
+        first = _link(node, uri="fake://a:1", mean_ms=76.0, probes=50)
+        _link(node, uri="fake2://b:2", mean_ms=118.0, probes=1)
+        node._update_bundles()
+        state = self._state(node, first)
+        assert state["mlo"] == "forming" and state["apart_ms"] is None
+
     def test_two_links_nobody_may_bundle_are_parallel(self):
         node = _node()
         first = _link(node, uri="fake://a:1", mean_ms=10.0, probes=50)
