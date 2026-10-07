@@ -12,6 +12,8 @@ reliability layer on top of asyncio datagram sockets:
 - A congestion window (slow start, then additive increase, halved on loss)
   and a hard flow-control window: a frame is never sent untracked
 - Reordering buffer (bounded)
+- Packets larger than a safe datagram split across frames, once the far end
+  says it puts them back together
 - Keepalive frames to maintain NAT mappings
 
 Because it speaks the same ``BaseTransport`` / ``BaseServer`` interface as TCP,
@@ -45,9 +47,11 @@ from ..ip_utils import split_host_port
 #   seq(4)        — sequence number of this frame (uint32, wraps at 2^32)
 #   ack(4)        — highest consecutive seq received from peer
 #   sack(4)       — bitmap: bit i set = seq (ack+1+i) received (selective ACK)
-#   flags(1)      — 0x01=ACK-only, 0x02=keepalive, 0x04=data, 0x08=fin
+#   flags(1)      — 0x01=ACK-only, 0x02=keepalive, 0x04=data, 0x08=fin,
+#                   0x10=more (this data frame is a segment, the packet goes
+#                   on in the next one), 0x20=segments (the sender reassembles)
 #   payload_len(2)— length of payload (0 for keepalive/ACK-only)
-#   payload(N)    — Packet.pack() bytes, or empty
+#   payload(N)    — Packet.pack() bytes, a segment of them, or empty
 #
 # Total header: 15 bytes. Max payload: 65535 (but Packet limits to 60000).
 # ---------------------------------------------------------------------------
@@ -60,8 +64,17 @@ FLAG_ACK_ONLY = 0x01
 FLAG_KEEPALIVE = 0x02
 FLAG_DATA = 0x04
 FLAG_FIN = 0x08
+FLAG_MORE = 0x10
+FLAG_SEGMENTS = 0x20
 
 _MAX_PAYLOAD = 60000
+# A packet larger than one datagram of `_SEGMENT` bytes is split across frames,
+# once the far end has said it reassembles (FLAG_SEGMENTS on any frame of its):
+# a datagram above the path MTU is fragmented by IP, and losing any fragment
+# loses the whole frame. 1 200 bytes fits every path IPv6 allows (1 280) under
+# its headers. An old peer never sets the flag and keeps getting whole packets.
+_SEGMENT = 1200
+_SEGMENT_PAYLOAD = _SEGMENT - len(_MAGIC) - _FRAME_SIZE
 _MAX_UNACKED = 256          # max unacknowledged frames in retransmit buffer
 _MAX_REORDER = 256          # max out-of-order frames buffered
 # A frame count is not a memory bound: a frame carries up to _MAX_PAYLOAD, so
@@ -221,9 +234,19 @@ class _ReliableLink:
         # random initial sequence is adopted rather than assumed to be zero.
         self._recv_next: int = 0          # next expected seq to deliver in-order
         self._recv_started: bool = False
-        self._reorder: dict[int, bytes] = {}  # seq → payload (out-of-order buffer)
+        # seq → (payload, FLAG_MORE set), the out-of-order buffer
+        self._reorder: dict[int, tuple[bytes, bool]] = {}
         self._reorder_bytes: int = 0      # what that buffer is actually holding
         self._sack: int = 0               # selective-ack bitmap, kept in step
+        # Segments of a packet delivered in order, waiting for its last one.
+        # Never more than one packet's worth: past that the far end is lying,
+        # and what it sends is dropped up to the end of that packet.
+        self._partial: list[bytes] = []
+        self._partial_bytes: int = 0
+        self._partial_spoilt: bool = False
+        # Whether the far end reassembles segments (`_SEGMENT`). Learnt from
+        # FLAG_SEGMENTS on a frame inside its window, and never unlearnt.
+        self.peer_reassembles: bool = False
 
         # ACK coalescing
         self._ack_pending: bool = False
@@ -265,16 +288,29 @@ class _ReliableLink:
         return (len(self._unacked) < _MAX_UNACKED
                 and self._inflight + size <= self._cwnd)
 
+    def segments(self, payload: bytes) -> list[bytes]:
+        """How ``payload`` goes on the wire: whole to a far end that does not
+        reassemble, in `_SEGMENT_PAYLOAD` pieces to one that does."""
+        if not self.peer_reassembles or len(payload) <= _SEGMENT_PAYLOAD:
+            return [payload]
+        return [payload[i:i + _SEGMENT_PAYLOAD]
+                for i in range(0, len(payload), _SEGMENT_PAYLOAD)]
+
     def build_frame(self, packet: Packet) -> bytes:
-        """Build a data frame for the given packet and track it for retransmit.
+        """Build a data frame for the given packet and track it for retransmit."""
+        return self.build_segment(packet.pack(), more=False)
+
+    def build_segment(self, payload: bytes, more: bool) -> bytes:
+        """Build a data frame and track it for retransmit; ``more`` says the
+        packet goes on in the next frame.
 
         Always tracked. The window is the send loop's to respect
         (`can_send`); this never drops a frame from the book to make room."""
-        payload = packet.pack()
         seq = self._send_seq
         self._send_seq = (self._send_seq + 1) & 0xFFFFFFFF
         ack, sack = self._build_ack()
-        header = _FRAME.pack(seq, ack, sack, FLAG_DATA, len(payload))
+        flags = FLAG_DATA | FLAG_SEGMENTS | (FLAG_MORE if more else 0)
+        header = _FRAME.pack(seq, ack, sack, flags, len(payload))
         frame = _MAGIC + header + payload
         now = time.monotonic()
         self._unacked[seq] = _Sent(frame, now + self._rto, now)
@@ -284,19 +320,22 @@ class _ReliableLink:
     def build_keepalive(self) -> bytes:
         """Build a keepalive frame (no payload, no retransmit tracking)."""
         ack, sack = self._build_ack()
-        header = _FRAME.pack(self._send_seq, ack, sack, FLAG_KEEPALIVE, 0)
+        header = _FRAME.pack(self._send_seq, ack, sack,
+                             FLAG_KEEPALIVE | FLAG_SEGMENTS, 0)
         return _MAGIC + header
 
     def build_ack_only(self) -> bytes:
         """Build a standalone ACK frame."""
         ack, sack = self._build_ack()
-        header = _FRAME.pack(self._send_seq, ack, sack, FLAG_ACK_ONLY, 0)
+        header = _FRAME.pack(self._send_seq, ack, sack,
+                             FLAG_ACK_ONLY | FLAG_SEGMENTS, 0)
         return _MAGIC + header
 
     def build_fin(self) -> bytes:
         """Build a FIN frame to signal graceful close."""
         ack, sack = self._build_ack()
-        header = _FRAME.pack(self._send_seq, ack, sack, FLAG_FIN, 0)
+        header = _FRAME.pack(self._send_seq, ack, sack,
+                             FLAG_FIN | FLAG_SEGMENTS, 0)
         return _MAGIC + header
 
     def _build_ack(self) -> tuple[int, int]:
@@ -342,11 +381,14 @@ class _ReliableLink:
         # the cumulative ack clears a *prefix*. Walking the whole window (and
         # copying its key list) on every incoming frame was O(window) per
         # datagram, for a window of up to `_MAX_UNACKED`.
-        for s in list(self._unacked.keys()):
+        cleared = []
+        for s in self._unacked:
             if ((ack - s) & 0xFFFFFFFF) >= _MAX_UNACKED:
                 break
+            cleared.append(s)
+        for s in cleared:
             acked += self._acknowledge(self._unacked.pop(s), now)
-            advanced += 1
+        advanced = len(cleared)
 
         # Selective ACK: bits indicate seqs received above the cumulative ack
         base = (ack + 1) & 0xFFFFFFFF
@@ -538,7 +580,8 @@ class _ReliableLink:
         Process an incoming frame. Returns list of deliverable payloads
         (in-order, possibly multiple if reordering gap was filled).
         Empty list if the frame is a duplicate, ACK-only, or out-of-order
-        pending.
+        pending. A frame carrying FLAG_MORE is a segment: what is delivered is
+        the packet it belongs to, once its last segment is in.
 
         Sequence comparison is modular (RFC 1982): a frame is "ahead" of the
         delivery cursor within half the 2^32 space, "behind" (a retransmit or
@@ -567,15 +610,18 @@ class _ReliableLink:
 
         dist = (seq - self._recv_next) & 0xFFFFFFFF
 
+        more = bool(flags & FLAG_MORE)
+
         # In-order: deliver immediately and flush any buffered successors
         if dist == 0:
             self._recv_next = (self._recv_next + 1) & 0xFFFFFFFF
-            delivered: list[bytes] = [payload]
+            delivered: list[bytes] = []
+            self._reassemble(payload, more, delivered)
             # Flush consecutive buffered frames
             while self._recv_next in self._reorder:
-                buffered = self._reorder.pop(self._recv_next)
+                buffered, buffered_more = self._reorder.pop(self._recv_next)
                 self._reorder_bytes -= len(buffered)
-                delivered.append(buffered)
+                self._reassemble(buffered, buffered_more, delivered)
                 self._recv_next = (self._recv_next + 1) & 0xFFFFFFFF
             self._recompute_sack()        # the cursor moved
             self._schedule_ack()
@@ -587,7 +633,7 @@ class _ReliableLink:
             if (seq not in self._reorder
                     and len(self._reorder) < UDPTransport.setting("max_reorder")
                     and self._reorder_bytes + len(payload) <= _MAX_REORDER_BYTES):
-                self._reorder[seq] = payload
+                self._reorder[seq] = (payload, more)
                 self._reorder_bytes += len(payload)
                 self.reordered += 1
                 offset = (seq - self._recv_next) & 0xFFFFFFFF
@@ -600,6 +646,40 @@ class _ReliableLink:
         # drop, and re-ACK the current window so a lossy sender can move on.
         self._schedule_ack()
         return []
+
+    def _reassemble(self, payload: bytes, more: bool,
+                    delivered: list[bytes]) -> None:
+        """Add one in-order frame to the packet being rebuilt; a frame without
+        FLAG_MORE ends it. A packet growing past what one can be is dropped
+        whole, up to its last segment, and the frames after it are unaffected."""
+        if self._partial_spoilt or (
+                self._partial_bytes + len(payload) > HEADER_SIZE + _MAX_PAYLOAD):
+            self._partial_spoilt = more
+            self._partial.clear()
+            self._partial_bytes = 0
+            return
+        if not more and not self._partial:
+            delivered.append(payload)
+            return
+        self._partial.append(payload)
+        self._partial_bytes += len(payload)
+        if not more:
+            delivered.append(b"".join(self._partial))
+            self._partial.clear()
+            self._partial_bytes = 0
+
+    def note_segments(self, seq: int, flags: int) -> None:
+        """Learn that the far end reassembles, from a frame it could have sent.
+
+        The header is not authenticated, so this is believed on the evidence a
+        FIN is (`accepts_fin`): a spoofed bit would have us segment to a node
+        that delivers each piece as a packet, and the link would carry nothing.
+        Before the first frame there is no window yet, and that frame is the
+        one the cursor is adopted from anyway."""
+        if (flags & FLAG_SEGMENTS and not self.peer_reassembles
+                and (not self._recv_started
+                     or ((seq - self._recv_next) & 0xFFFFFFFF) < _MAX_UNACKED)):
+            self.peer_reassembles = True
 
     def accepts_fin(self, seq: int) -> bool:
         """Is a FIN carrying ``seq`` one the peer could have sent?
@@ -882,6 +962,7 @@ class UDPTransport(BaseTransport):
         # Process ACK info, and resend at once what it shows was lost.
         for frame in self._link.process_ack(ack, sack):
             self._send_raw(frame)
+        self._link.note_segments(seq, flags)
 
         # The far end has closed its side. Believed only inside the window
         # (`accepts_fin`), and acted on at once: a FIN used to be counted as a
@@ -1002,22 +1083,26 @@ class UDPTransport(BaseTransport):
                 continue
             if packet is None:
                 break
-            # Wait for the window rather than overrun it. Woken by the ACK that
-            # makes room; the timeout only re-reads `_closed`.
-            size = len(_MAGIC) + _FRAME_SIZE + HEADER_SIZE + len(packet.payload)
-            while not self._closed and not self._link.can_send(size):
-                self._link._room.clear()
-                if self._link.can_send(size):
-                    break
-                try:
-                    async with asyncio.timeout(0.5):
-                        await self._link._room.wait()
-                except TimeoutError:
-                    pass
-            if self._closed:
+            pieces = self._link.segments(packet.pack())
+            for index, piece in enumerate(pieces):
+                if not await self._wait_for_room(len(_MAGIC) + _FRAME_SIZE + len(piece)):
+                    return
+                self._send_raw(self._link.build_segment(
+                    piece, more=index < len(pieces) - 1))
+
+    async def _wait_for_room(self, size: int) -> bool:
+        """Wait for the window rather than overrun it; False once closed.
+        Woken by the ACK that makes room; the timeout only re-reads `_closed`."""
+        while not self._closed and not self._link.can_send(size):
+            self._link._room.clear()
+            if self._link.can_send(size):
                 break
-            frame = self._link.build_frame(packet)
-            self._send_raw(frame)
+            try:
+                async with asyncio.timeout(0.5):
+                    await self._link._room.wait()
+            except TimeoutError:
+                pass
+        return not self._closed
 
     async def _rtx_loop(self) -> None:
         """Background task: retransmit unacknowledged frames past their RTO."""
@@ -1325,7 +1410,7 @@ class UDPServer(BaseServer):
             return bool(flags & FLAG_FIN)
         if not flags & FLAG_FIN and now - answered_at >= _FIN_REPLY_GAP:
             self._closed_links[addr] = (until, send_seq, ack, recv_next, now)
-            fin = _MAGIC + _FRAME.pack(send_seq, ack, 0, FLAG_FIN, 0)
+            fin = _MAGIC + _FRAME.pack(send_seq, ack, 0, FLAG_FIN | FLAG_SEGMENTS, 0)
             try:
                 if self._sock is not None:
                     self._sock.sendto(fin, addr)

@@ -159,3 +159,17 @@ loss: it was DTrump's echo ceiling, reached by the two tests before it
 (`BUGSVULNS.MD` 72), not the link. And over the VPN, TCP "loses" probes too:
 those are echoes later than `_SPEED_PROBE_TIMEOUT` behind a queue, which TCP
 delivers late rather than drops — the column is latency, not loss.
+
+## On 0.4.63, still through Proton VPN (2026-10-07)
+
+- The internet connection itself, measured from the node's machine against
+  Cloudflare: 0.97 MB/s down, 0.69 MB/s up, 220–250 ms to connect.
+- Speed tests to DTrump: TCP 0.42 MB/s, nothing lost; UDP 0.24 then 0.06 MB/s,
+  with 12 % and 36 % of probes unechoed within two seconds. The budget of 72
+  let the third test run, rightly: the first two had sent 408 probes.
+- The cause, measured on the path: 16 kB pings lost 62 %, 1.1 kB pings 6 %. A
+  16 kB probe was a dozen IP fragments. Fixed in 0.4.64 by splitting packets
+  across 1 200-byte frames (BUGSVULNS 63); it engages once both ends run it.
+- The UDP link's own figures at rest: 404 retransmit timeouts in 575 s, 239 of
+  them found spurious by F-RTO, the timer at 55 ms beside probe round trips up
+  to 288 ms. Cheap at rest (a resent keepalive-sized frame); left as observed.
