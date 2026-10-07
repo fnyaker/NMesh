@@ -361,6 +361,11 @@ scope. Add yours.
   process, the event loop's clock included: every `sleep` and `wait_for` froze
   and the test hung to its timeout. → Move the state's timestamp instead (age
   the entry), or patch a name the loop does not read.
+- **A quota outcome predicted from what was reserved, not what was spent.**
+  Live, the third speed test in a minute was announced as "must be refused"; it
+  ran, correctly — the budget gives back what a test did not send, and the two
+  before had sent 408 probes, not 1 030. → Before predicting a limit's verdict,
+  add up what the code counts, not what it could have counted.
 - **An empty log answer read as "nothing happened".** After a restart the log
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not

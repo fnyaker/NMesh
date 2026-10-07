@@ -1871,6 +1871,31 @@ event loop is busy for a moment), and a model of the path showed it cost
 20–45 % of the throughput on a genuinely lossy one, for 2–3 % on a jittery
 one. Those idle timeouts are cheap; the collapse was the censored estimator.
 
+## A packet that was a dozen fragments
+
+A speed test through a VPN carried 0.06–0.24 MB/s over UDP and reported up to
+36 % of its probes unechoed, where TCP to the same node, on the same path, a
+minute apart, carried 0.42 MB/s and lost nothing. The UDP layer sent one
+datagram per mesh packet, so a 16 kB probe left as a dozen IP fragments, and
+IP delivers a datagram only if every fragment arrives. The path measured it
+directly: 16 kB pings lost 62 %, 1.1 kB pings lost 6 % — one fragment's loss,
+compounded twelve times. TCP segments at the MSS and never meets it.
+
+The fix splits a packet across frames of at most `_SEGMENT` bytes
+(`transports.md`, UDP), each tracked and resent on its own, so a loss costs one
+1.2 kB frame instead of a 16 kB one. It changes what a frame may contain, so it
+is negotiated per link and an old node keeps whole packets.
+
+The price is per datagram, in Python: loopback falls from ~176 MB/s to
+~21 MB/s with 16 kB packets. A UDP link mostly exists to cross a NAT on the
+internet, where that ceiling is far away, and the LAN has TCP, preferred by
+default. A medium that is fast on loopback and loses a third of its frames on
+the path it exists for has been measured on the wrong path.
+
+While profiling it: `process_ack` still copied the whole window's key list on
+every ACK, under a comment saying that copy had been removed. It walks the
+prefix it clears, now.
+
 ## A machine that slept, and links that did not know
 
 A laptop resumed after 6 872 s asleep. The node's two UDP links looked a second
