@@ -40,7 +40,7 @@ async def _joined_pair(addr: str):
 
 class TestIdleChatter:
     async def test_two_idle_nodes_stay_quiet(self):
-        host, guest = await _joined_pair("127.0.0.1:19341")
+        host, guest = await _joined_pair("127.0.0.1:19506")
         try:
             await asyncio.sleep(2)          # let the join settle
             host.trace.start(seconds=40, events=20000, names=MESSAGE_NAMES)
@@ -69,7 +69,7 @@ class TestIdleChatter:
 
         Measured over a window covering at least one maintenance cycle, or the
         test would also pass on the buggy code."""
-        host, guest = await _joined_pair("127.0.0.1:19342")
+        host, guest = await _joined_pair("127.0.0.1:19507")
         try:
             await asyncio.sleep(2)
             wakes = []

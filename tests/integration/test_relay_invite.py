@@ -73,7 +73,7 @@ class TestRelayedInvitation:
             await R.stop()
 
     async def test_join_falls_back_to_next_relay(self):
-        base = free_port()
+        base = free_port(2)
         R, A, B = MeshNode(_mgr()), MeshNode(_mgr()), MeshNode(_mgr())
         await R.start([f"tcp://127.0.0.1:{base}"])
         await A.join(f"tcp://127.0.0.1:{base}", R.generate_invite())
@@ -154,7 +154,7 @@ class TestTicketThroughARelay:
     async def test_the_same_ticket_prefers_the_direct_route(self):
         """Direct first, because a relayed link is the thing a direct one exists
         to stand in for — and trying it costs one connection."""
-        base = free_port()
+        base = free_port(2)
         R, A, B = MeshNode(_mgr()), MeshNode(_mgr()), MeshNode(_mgr())
         await R.start([f"tcp://127.0.0.1:{base}"])
         await A.start([f"tcp://127.0.0.1:{base + 1}"])
