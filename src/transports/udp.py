@@ -240,10 +240,11 @@ class _ReliableLink:
         # F-RTO (RFC 5682). A timeout resends the oldest frame alone, then the
         # next two ACKs say whether anything was lost: 1 waits for the first
         # one that moves the cursor, 2 for the second. `_undo` holds what the
-        # window and threshold were before the timeout cut them, for the case
-        # where it answered no loss at all.
+        # window and threshold were before the last cut, and whether a timeout
+        # or a fast retransmit made it, for the case where it answered no loss
+        # at all.
         self._frto: int = 0
-        self._undo: tuple[float, float] | None = None
+        self._undo: tuple[float, float, bool] | None = None
 
         # Receive side. Set from the first frame that arrives, so the peer's
         # random initial sequence is adopted rather than assumed to be zero.
@@ -278,6 +279,8 @@ class _ReliableLink:
         self.timeouts: int = 0
         # Timeouts F-RTO found spurious: the originals were only late.
         self.spurious: int = 0
+        # The same for fast retransmits: a SACK hole the original then filled.
+        self.spurious_fast: int = 0
 
     # -- send side --------------------------------------------------------
 
@@ -416,7 +419,7 @@ class _ReliableLink:
 
         if self._late_original:
             self._late_original = False
-            self._needless_timeout()
+            self._needless_cut()
         elif self._frto:
             self._frto_step(advanced, sack, now)
         if acked:
@@ -447,15 +450,18 @@ class _ReliableLink:
             self._frto = 2
             return
         if self._frto == 2:
-            self._needless_timeout()
+            self._needless_cut()
             return
         self._frto = 0
         self._undo = None
 
-    def _needless_timeout(self) -> None:
-        """The originals were only late: count it and undo the cut, once."""
-        if self._frto or self._undo is not None:
+    def _needless_cut(self) -> None:
+        """The originals were only late: count it against what cut the
+        window, and undo the cut, once."""
+        if self._frto or (self._undo is not None and self._undo[2]):
             self.spurious += 1
+        elif self._undo is not None:
+            self.spurious_fast += 1
         if self._undo is not None:
             self._cwnd = max(self._cwnd, self._undo[0])
             self._ssthresh = max(self._ssthresh, self._undo[1])
@@ -544,7 +550,7 @@ class _ReliableLink:
         the window to its floor, as TCP does."""
         if self._before_recover(seq):
             return                    # sent before the last reduction
-        self._undo = (self._cwnd, self._ssthresh)
+        self._undo = (self._cwnd, self._ssthresh, timeout)
         self._ssthresh = max(self._cwnd / 2, float(_CWND_MIN))
         self._cwnd = float(_CWND_MIN) if timeout else self._ssthresh
         self._recover = self._send_seq
@@ -935,6 +941,7 @@ class UDPTransport(BaseTransport):
             "keepalive misses": link._keepalive_misses,
             "timeouts": link.timeouts,
             "spurious timeouts": link.spurious,
+            "spurious fast retransmits": link.spurious_fast,
             "undecodable": self.undecodable,
             "segments": link.peer_reassembles,
             "profile": ", ".join(sorted(self._profile)) or "default",
