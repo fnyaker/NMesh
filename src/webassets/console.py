@@ -2088,7 +2088,7 @@ function mloWords(node){
   if(state.mlo === "seeking" && state.retry_in)
     return MLO_WORDS.seeking + ", next try in " + fmtDuration(state.retry_in);
   if(state.mlo === "apart" && state.apart_ms != null)
-    return "two links " + state.apart_ms + " ms apart, more than a bundle allows";
+    return "two links " + state.apart_ms + " ms apart, too far to bundle";
   return MLO_WORDS[state.mlo] || state.mlo;
 }
 
@@ -2097,7 +2097,7 @@ function edgeLabelText(node){
   const loss = state.loss == null ? quality.loss : state.loss;
   const mlo = {active: "MLO ×" + (state.carrying || 2), degraded: "MLO, 1 benched",
                forming: "MLO measuring", seeking: "MLO seeking",
-               apart: "MLO apart"}[state.mlo];
+               apart: "MLO too far apart"}[state.mlo];
   return (node.transport || "?") +
     (node.rtt_ms == null ? "" : " · " + node.rtt_ms + " ms") +
     (loss ? " · " + Math.round(loss * 100) + "% loss" : "") +
@@ -2782,7 +2782,7 @@ function groupValues(group, out){
   out[key + ":mlo"] = {html: mlo && mlo !== "parallel"
     ? badge({active: "MLO bundled", degraded: "MLO, 1 benched",
              forming: "MLO measuring", seeking: "MLO seeking",
-             apart: "MLO apart"}[mlo] || mlo,
+             apart: "MLO too far apart"}[mlo] || mlo,
             {active: "ok", degraded: "warn"}[mlo] || "")
     : ""};
   return out;

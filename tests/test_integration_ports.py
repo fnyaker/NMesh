@@ -83,3 +83,22 @@ def test_no_port_is_claimed_by_two_tests():
         "xdist is a race that surfaces as a session timeout somewhere else:\n"
         + "\n".join(f"  {port}: {', '.join(who)}"
                     for port, who in sorted(shared.items())))
+
+
+def test_no_test_picks_a_port_at_random():
+    """`random.randint(20000, 40000)` reaches into the kernel's ephemeral range,
+    where a port may already be another socket's — and `MeshNode.start`
+    swallows the failed bind, so the test fails later on "connection refused".
+    Two unit tests did it, and failed about one run in twelve."""
+    tests = pathlib.Path(__file__).resolve().parent
+    found = []
+    for path in sorted(tests.rglob("*.py")):
+        for call in ast.walk(ast.parse(path.read_text())):
+            name = getattr(getattr(call, "func", None), "attr", None) or \
+                getattr(getattr(call, "func", None), "id", None)
+            if (isinstance(call, ast.Call) and name in ("randint", "randrange")
+                    and call.args and isinstance(call.args[0], ast.Constant)
+                    and isinstance(call.args[0].value, int)
+                    and call.args[0].value >= 1024):
+                found.append(f"{path.relative_to(tests)}:{call.lineno}")
+    assert not found, "use tests.integration.free_port(): " + ", ".join(found)

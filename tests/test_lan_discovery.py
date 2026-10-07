@@ -21,6 +21,7 @@ from src.transport_manager import TransportManager
 from src.udp_transport import UDPTransport, UDPServer
 from src.tcp_transport import TCPTransport, TCPServer
 from tests.conftest import make_manager
+from tests.integration import free_port
 
 # These tests broadcast/answer on the fixed DISCOVERY_PORT, so two running at
 # once (on different xdist workers) would hear each other's beacons. Pin them
@@ -134,8 +135,8 @@ class TestNodeIntegration:
         # block with NO relays → joiner discovers R on the LAN and joins through it
         base_mgr = _ip_mgr
         R, A, B = MeshNode(base_mgr()), MeshNode(base_mgr()), MeshNode(base_mgr())
-        import random, base64, json
-        port = random.randint(20000, 40000)
+        import base64, json
+        port = free_port()
         await R.start([f"tcp://127.0.0.1:{port}"])
         await A.join(f"tcp://127.0.0.1:{port}", R.generate_invite())
         await asyncio.wait_for(A.wait_for_session(10), 15)

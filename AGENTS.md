@@ -387,6 +387,21 @@ scope. Add yours.
   a check that it finds anything at all). Caught only because the unit count
   went *down* by one after adding a test. → Before writing a file, check it
   does not exist (`git ls-files`, or `Read`); a shell redirect never asks.
+- **A cause named from one network.** A 40 ms TCP-over-UDP probe gap was put
+  on the relays' answering ("the time is spent on the relays") from
+  measurements taken on one path, through a VPN. Off the VPN the gap was gone on
+  every link; the relays had never been the cause. → Before naming where time
+  goes, vary the path: a second network, or loopback, is what separates the
+  code from the road.
+- **A commit made on a red suite.** `pytest -q | tail -1 && git commit …`:
+  the pipe's status is `tail`'s, so `1 failed` printed and the commit and push
+  went ahead. → Never chain a commit after a piped test run; run the tests,
+  read the line, then commit (or use `set -o pipefail`).
+- **The rule read, its other breakers not looked for.** The `free_port`
+  docstring says random ports collide; the agent read it while fixing two
+  integration tests, and did not grep for `randint` — two unit tests still
+  did it, one of them the cause of a red CI on `main` the day before. → When a
+  comment names a bad pattern, grep the whole tree for it before moving on.
 - **An empty log answer read as "nothing happened".** After a restart the log
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not

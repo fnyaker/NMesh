@@ -2544,7 +2544,11 @@ times out waiting for a session (or, for the ticket, falls back to the relay),
 most runs, and never serially. `tests/test_integration_ports.py` read only the
 `127.0.0.1:NNNN` form and the fleet port went to `_linked_pair` as a bare
 number; it now claims a bare 19xxx call argument as well. `free_port(n)`
-reserves the block a test actually uses.
+reserves the block a test actually uses. Two unit tests
+(`test_lan_discovery`, `test_ipv6_autonat`) still picked a port with
+`random.randint(20000, 40000)`, inside the kernel's ephemeral range, and failed
+about one run in twelve with "connection refused"; they use `free_port()` now,
+and the same guard file refuses a random port pick anywhere under `tests/`.
 
 ## Neighbourhood maintenance
 
