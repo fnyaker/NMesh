@@ -150,7 +150,7 @@ like the regression.
 | 60 | **medium** | A console holding `govern` reached every operation an app declared, those it kept at home included |
 | 61 | **high** | A UDP timeout resent the whole window, so nothing could be timed and the timer climbed to its ceiling on a path that was only slower |
 | 62 | **medium** | A machine that slept kept links its peers had dropped, black-holing traffic for a minute and a half |
-| 63 | **medium** | *Open* — one UDP frame per mesh packet: anything above the MTU is fragmented by IP, and one lost fragment loses the frame |
+| 63 | **medium** | One UDP frame per mesh packet: anything above the MTU was fragmented by IP, and one lost fragment lost the frame |
 | 64 | **medium** | An address two nodes share cost a handshake and a whole redundant link every ten minutes |
 | 65 | **low** | A link closed by a dial's clean-up, a forget or a failed join left no line in the log |
 | 66 | **low** | An accepted UDP link that never sent a packet was held for ever |
@@ -160,6 +160,7 @@ like the regression.
 | 70 | **medium** | Two UDP listeners accepted each other's challenge as a new link, about seventy times a second, without end |
 | 71 | **medium** | A dial refused as the wrong node still cost the node that answered its healthy link |
 | 72 | **low** | A speed test run past the far end's echo ceiling read the ceiling as loss |
+| 73 | **low** | *Open* — the MLO second link was not opened within 30 s once, in a full serial integration run; never reproduced |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -3060,7 +3061,16 @@ read timeouts more than a minute after the wake.
 
 ---
 
-## 63 — medium — One UDP frame per mesh packet, fragmented by IP (open)
+## 63 — medium — One UDP frame per mesh packet, fragmented by IP
+
+> **Status — fixed.** A packet above `_SEGMENT_PAYLOAD` is split across frames
+> of at most `_SEGMENT` (1 200) bytes, negotiated per link (`FLAG_SEGMENTS`);
+> an old peer keeps whole packets. Tests:
+> `tests/test_udp_transport.py::TestAPacketIsSplitUnderTheDatagramSize`.
+> Confirmed live before the fix, through Proton VPN to DTrump: 16 kB pings lost
+> 62 %, 1.1 kB pings 6 %; speed tests over UDP carried 0.06–0.24 MB/s and
+> reported 12–36 % of probes unechoed, where TCP on the same path carried
+> 0.42 MB/s and lost none. Both ends must run the fix for it to engage.
 
 **Where** — `src/transports/udp.py`: a frame carries one whole packet, up to
 `_MAX_PAYLOAD` (60 000 bytes).
@@ -3278,4 +3288,25 @@ transport stalling under wifi.
 each test reserves the most it could send, gives back what it did not, and a
 test that could pass the ceiling is refused before a probe leaves, with
 `retry_after` in seconds.
+
+---
+
+## 73 — low — The MLO second link was not opened in time, once (open)
+
+**Where** — `tests/integration/test_mlo_pair.py::TestTheSecondLinkOpensItself::test_a_pair_that_starts_with_one_link_ends_up_bundled`,
+the `_wait` for a second link (line 215).
+
+**What happens** — in one full serial integration run (`pytest tests/integration
+-n0`, 168 s where a quiet run takes 131 s, on a machine also running a live
+node), the guest never opened its UDP link to the host within 30 s. Nothing in
+the output says why: the test asserts on a count, not on the dial's outcome.
+
+**Not reproduced** — the full run again, the file three times, and the test
+eight times with every core busy, on the branch and on `main`'s transport: all
+passed. It was seen on the branch that splits UDP packets (63), and nothing
+found ties it to that change: the dial goes to `udp://127.0.0.1:19468`, the one
+address the host announces.
+
+**Next step** — make the test print `guest.mlo_status()` and the host's address
+book on failure, so the next occurrence says which dial failed and how.
 

@@ -12,11 +12,12 @@ import pytest
 
 from src.udp_transport import (
     UDPTransport, UDPServer, _ReliableLink, _FRAME, _MAGIC,
-    FLAG_DATA, FLAG_ACK_ONLY, FLAG_KEEPALIVE, FLAG_FIN,
+    FLAG_DATA, FLAG_ACK_ONLY, FLAG_KEEPALIVE, FLAG_FIN, FLAG_MORE, FLAG_SEGMENTS,
+    _SEGMENT, _SEGMENT_PAYLOAD, _MAX_PAYLOAD,
     _MAX_UNACKED, _MAX_REORDER, _MAX_REORDER_BYTES,
     _MAX_DECODED_BYTES, _MAX_SEND_QUEUE, _MAX_PEERS_UDP,
 )
-from src.packet import Packet
+from src.packet import HEADER_SIZE, Packet
 
 ADDRESS = "127.0.0.1:19877"
 
@@ -109,7 +110,7 @@ class TestReliableLink:
         for i in range(_MAX_REORDER):
             link.process_incoming(1_000 + i, FLAG_DATA, big)
         assert link._reorder_bytes <= _MAX_REORDER_BYTES
-        assert sum(len(v) for v in link._reorder.values()) == link._reorder_bytes
+        assert sum(len(v) for v, _more in link._reorder.values()) == link._reorder_bytes
 
     def test_reorder_bytes_released_when_the_gap_fills(self):
         link = _opened_link()
@@ -904,3 +905,155 @@ class TestTheTwoHalvesAgreeOnTheSack:
             received = await asyncio.wait_for(srv.receive(), timeout=5.0)
             assert received.pack() == packet.pack()
         assert dropped
+
+
+# ---------------------------------------------------------------------------
+# A packet larger than a datagram should be is split, and put back together
+# ---------------------------------------------------------------------------
+# One frame per packet made a 16 kB speed-test probe a dozen IP fragments, and
+# losing any of them lost the frame: through a VPN, 16 kB pings lost 62 % where
+# 1.1 kB pings lost 6 % (BUGSVULNS 63).
+
+def _flags(frame: bytes) -> int:
+    return _FRAME.unpack_from(frame, len(_MAGIC))[3]
+
+
+class TestAPacketIsSplitUnderTheDatagramSize:
+    @staticmethod
+    def _pair():
+        sender, receiver = _ReliableLink(), _ReliableLink()
+        receiver.process_incoming(sender._send_seq, FLAG_KEEPALIVE, b"")
+        sender.peer_reassembles = True
+        return sender, receiver
+
+    @staticmethod
+    def _frames(sender, packet):
+        pieces = sender.segments(packet.pack())
+        return [sender.build_segment(piece, more=i < len(pieces) - 1)
+                for i, piece in enumerate(pieces)]
+
+    @staticmethod
+    def _deliver(receiver, frame):
+        seq, _ack, _sack, flags, _length = _FRAME.unpack_from(frame, len(_MAGIC))
+        return receiver.process_incoming(
+            seq, flags, frame[len(_MAGIC) + _FRAME.size:])
+
+    def test_every_frame_fits_the_datagram_size(self):
+        sender, _receiver = self._pair()
+        frames = self._frames(sender, make_packet(b"x" * 16_000))
+        assert len(frames) > 1
+        assert all(len(frame) <= _SEGMENT for frame in frames)
+        assert [bool(_flags(f) & FLAG_MORE) for f in frames] == \
+            [True] * (len(frames) - 1) + [False]
+
+    def test_a_far_end_that_never_said_it_reassembles_gets_whole_packets(self):
+        """An old node delivers each frame as a packet: a segment would be an
+        undecodable packet there, and the link would carry nothing."""
+        sender, _receiver = self._pair()
+        sender.peer_reassembles = False
+        frames = self._frames(sender, make_packet(b"x" * 16_000))
+        assert len(frames) == 1
+        assert not _flags(frames[0]) & FLAG_MORE
+
+    def test_a_small_packet_is_one_frame(self):
+        sender, _receiver = self._pair()
+        frames = self._frames(sender, make_packet(b"x" * 100))
+        assert len(frames) == 1 and not _flags(frames[0]) & FLAG_MORE
+
+    def test_the_segments_make_the_packet_again(self):
+        sender, receiver = self._pair()
+        packet = make_packet(bytes(range(256)) * 60)
+        delivered = []
+        for frame in self._frames(sender, packet):
+            delivered.extend(self._deliver(receiver, frame))
+        assert delivered == [packet.pack()]
+
+    def test_segments_out_of_order_still_make_the_packet(self):
+        sender, receiver = self._pair()
+        packet = make_packet(bytes(range(256)) * 60)
+        frames = self._frames(sender, packet)
+        for frame in reversed(frames[1:]):
+            assert self._deliver(receiver, frame) == []
+        assert self._deliver(receiver, frames[0]) == [packet.pack()]
+
+    def test_a_lost_segment_is_resent_and_the_packets_arrive_in_order(self):
+        sender, receiver = self._pair()
+        packets = [make_packet(bytes([i]) * 5_000) for i in range(6)]
+        frames = [f for p in packets for f in self._frames(sender, p)]
+        delivered = []
+        for i, frame in enumerate(frames):
+            if i != 2:
+                delivered.extend(self._deliver(receiver, frame))
+        for frame in sender.process_ack(*receiver._build_ack()):
+            delivered.extend(self._deliver(receiver, frame))
+        _expire_all(sender)
+        for frame in sender.get_retransmit_frames():
+            delivered.extend(self._deliver(receiver, frame))
+        assert delivered == [p.pack() for p in packets]
+
+    def test_a_packet_that_never_ends_is_dropped_and_the_next_one_arrives(self):
+        """A far end can flag every frame as one more segment. What it builds is
+        bounded by one packet, and the frames after the lie are untouched."""
+        _sender, receiver = self._pair()
+        seq = receiver._recv_next
+        chunk = b"z" * 1000
+        for _ in range((HEADER_SIZE + _MAX_PAYLOAD) // 1000 + 5):
+            assert receiver.process_incoming(seq, FLAG_DATA | FLAG_MORE, chunk) == []
+            assert receiver._partial_bytes <= HEADER_SIZE + _MAX_PAYLOAD
+            seq = (seq + 1) & 0xFFFFFFFF
+        assert receiver.process_incoming(seq, FLAG_DATA, b"end") == []
+        assert receiver._partial_bytes == 0
+        seq = (seq + 1) & 0xFFFFFFFF
+        assert receiver.process_incoming(seq, FLAG_DATA, b"next") == [b"next"]
+
+    def test_every_frame_says_this_side_reassembles(self):
+        link = _ReliableLink()
+        for frame in (link.build_keepalive(), link.build_ack_only(),
+                      link.build_fin(), link.build_frame(make_packet())):
+            assert _flags(frame) & FLAG_SEGMENTS
+
+    def test_the_far_end_is_believed_only_inside_its_window(self):
+        """The header is not authenticated: a spoofed bit would have this side
+        segment to a node that cannot put the pieces back."""
+        link = _opened_link()
+        link.note_segments(0x4000_0000, FLAG_KEEPALIVE | FLAG_SEGMENTS)
+        assert not link.peer_reassembles
+        link.note_segments(link._recv_next, FLAG_KEEPALIVE)
+        assert not link.peer_reassembles
+        link.note_segments(link._recv_next, FLAG_KEEPALIVE | FLAG_SEGMENTS)
+        assert link.peer_reassembles
+
+    async def test_over_loopback_both_ends_segment_and_nothing_is_lost(self, udp_pair):
+        _server, srv, client = udp_pair
+        assert srv is not None
+        sizes: list[int] = []
+        real_send = client._send_raw
+
+        def record(frame):
+            sizes.append(len(frame))
+            real_send(frame)
+
+        client._send_raw = record
+        assert client._link.peer_reassembles and srv._link.peer_reassembles
+        packets = [make_packet(bytes([i]) * 16_000) for i in range(20)]
+        for packet in packets:
+            await client.send(packet)
+        for packet in packets:
+            got = await asyncio.wait_for(srv.receive(), 10)
+            assert got.payload == packet.payload
+        assert sizes and max(sizes) <= _SEGMENT
+
+    async def test_an_old_far_end_still_gets_whole_packets(self, udp_pair):
+        """Mixed versions: frames from a node that predates segments carry no
+        FLAG_SEGMENTS, so nothing is ever split towards it."""
+        _server, srv, client = udp_pair
+        assert srv is not None
+        client._link.peer_reassembles = False
+        real_note = client._link.note_segments
+        client._link.note_segments = lambda seq, flags: real_note(
+            seq, flags & ~FLAG_SEGMENTS)
+        packet = make_packet(b"w" * 16_000)
+        await client.send(packet)
+        got = await asyncio.wait_for(srv.receive(), 10)
+        assert got.payload == packet.payload
+        assert not client._link.peer_reassembles
