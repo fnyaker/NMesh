@@ -3517,7 +3517,7 @@ nothing — the E2E retry recovers — so this is not offered as the cause.
 **Where** — `src/transports/udp.py`: `_needless_cut` (was `_needless_timeout`),
 `_loss`.
 
-**What happens** — seen live on 0.4.71: the UDP link to The island read
+**What happens** — seen live on 0.4.71: the UDP link to one relay read
 `timeouts: 0`, `spurious timeouts: 1`. `_undo` is armed by every window cut,
 the fast retransmit of a SACK hole included, and the late-original check undid
 it and counted a spurious *timeout* whatever had made the cut. The undo was
