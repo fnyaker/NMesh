@@ -26,6 +26,9 @@ catalogue the server reads is **filtered by what the MCP app was granted**: an
 operation it may not call is not listed at all. Grant `readstate` and a model can
 look at everything and change nothing; add `control.diagnostics` and it can start
 the trace; add `control.appweb` and the chat and fleet page routes appear.
+A `web_*` tool takes a `query` string, and a POST one a `body` object too; the
+server forwards `body` to `web.request` only when it is an object, because the
+declared argument is an optional mapping and a `null` there is refused.
 
 Two things are machinery rather than tools: listing (`control.*`) and jobs
 (`jobs.*`). An operation that runs as a job — an install, a lookup across the
