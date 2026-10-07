@@ -436,3 +436,67 @@ class TestABundleIsMeasuredAsOne:
             await node.stop()
         assert answer == {"ok": False,
                           "error": "no bundle of two direct links to that node"}
+
+
+class TestTheAskingSideKnowsTheFarEndsCeiling:
+    """The far end stops echoing at `_SPEED_MAX_PER_WINDOW`, silently. Seen
+    live: a third test to one node inside a minute had 21 % of its probes go
+    unanswered and said so as loss, on a link that had lost nothing."""
+
+    async def _tests(self, count: int, *, age: float = 0.0):
+        node = await _node()
+        link = _Echoing(node)
+        node._peers.append(link)
+        target = link.authenticated_id.raw.hex()
+        answers = []
+        try:
+            for _ in range(count):
+                answers.append(await node.console_speedtest(target))
+                if age:
+                    # Age the window rather than patch the clock: the event
+                    # loop reads the same `time.monotonic`.
+                    key = link.authenticated_id.raw
+                    spent, started = node._speed_spent[key]
+                    node._speed_spent[key] = (spent, started - age)
+            return link, answers
+        finally:
+            node._peers.remove(link)
+            await node.stop()
+
+    async def test_a_test_that_would_pass_it_is_refused_and_says_when(self):
+        link, (first, second, third) = await self._tests(3)
+        assert first["ok"] is True and second["ok"] is True, (first, second)
+        assert third["ok"] is False
+        assert 0 < third["retry_after"] <= 62
+        assert str(_SPEED_MAX_PER_WINDOW) in third["error"]
+        assert link.seen == first["probes"] + second["probes"], \
+            "the refused test sent probes"
+
+    async def test_after_the_window_it_runs_again(self):
+        _, answers = await self._tests(3, age=62.0)
+        assert all(answer["ok"] for answer in answers), answers
+
+    async def test_a_short_test_gives_back_what_it_did_not_send(self):
+        """A test reserves the most it could send; one cut short by its clock
+        must not hold the far end's budget it never used."""
+        node = await _node()
+        target = NodeID.generate()
+        try:
+            reserved = _SPEED_MAX_BYTES // _SPEED_CHUNK + _SPEED_IDLE_PROBES
+            assert node._speed_spend(target, reserved) == 0
+            assert node._speed_spend(target, 20 - reserved) == 0
+            assert node._speed_spend(target, reserved) == 0
+            assert node._speed_spend(target, reserved) == 0
+            assert node._speed_spend(target, reserved) > 0
+        finally:
+            await node.stop()
+
+    async def test_the_count_is_bounded(self):
+        from src.node import _MAX_PEERS
+        node = await _node()
+        try:
+            for _ in range(_MAX_PEERS + 10):
+                node._speed_spend(NodeID.generate(), 1)
+            assert len(node._speed_spent) <= _MAX_PEERS
+        finally:
+            await node.stop()

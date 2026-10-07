@@ -224,6 +224,32 @@ class TestAClosedLinkIsNotReopenedByItsOwnFrames:
         assert opened == [] and server._transports == {}
         assert server._sock.sent == []
 
+    async def test_a_frame_overtaken_by_the_far_ends_fin_opens_nothing(self):
+        """Over a path that reorders, a frame sent just before the far end's FIN
+        can arrive after it. The side the FIN ended has to know the link too,
+        or that frame is a new dial: a fresh transport with a fresh random
+        cursor, which the far end — remembering its own close — then takes for
+        a new dial of its own. Two listeners did that to each other seventy
+        times a second (BUGSVULNS 70)."""
+        server, transport, opened = self._server_with_closed_link()
+        server._dispatch_datagram(_frame(501, FLAG_FIN), ("10.0.0.5", 4000))
+        assert transport.is_closed()
+        server._dispatch_datagram(_frame(500, FLAG_DATA, b"late"),
+                                  ("10.0.0.5", 4000))
+        server._dispatch_datagram(_frame(501, FLAG_ACK_ONLY),
+                                  ("10.0.0.5", 4000))
+        await asyncio.sleep(0)
+        assert opened == []
+        assert ("10.0.0.5", 4000) not in server._transports
+
+    async def test_a_new_dial_after_the_far_end_closed_is_still_accepted(self):
+        server, transport, opened = self._server_with_closed_link()
+        server._dispatch_datagram(_frame(501, FLAG_FIN), ("10.0.0.5", 4000))
+        server._dispatch_datagram(_frame(0x7000_0000, FLAG_KEEPALIVE),
+                                  ("10.0.0.5", 4000))
+        await asyncio.sleep(0)
+        assert len(opened) == 1
+
     async def test_the_memory_is_bounded(self):
         server = UDPServer()
         server._sock = _Capture()

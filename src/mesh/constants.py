@@ -234,6 +234,11 @@ _MAX_UNAUTH_PEERS      = 32
 # Generous: a relayed join crosses the mesh, and a slow medium is the normal
 # case here, not the exception.
 _HANDSHAKE_DEADLINE    = 60.0
+# How long a link accepted from an address whose last link both ends accepted
+# is ended unanswered, and how many such addresses are held. Keyed on the full
+# address: a far end dialling us normally does so from a fresh source port.
+_DOUBLE_ACCEPT_HOLD    = 5.0
+_DOUBLE_ACCEPT_TRACKED = 256
 _MAX_MALFORMED         = 32     # bad frames from one peer before we cut it (node rejection)
 _MAX_HANDSHAKE_ATTEMPTS = 8     # handshakes one link may make us verify
 _MAX_PENDING_PER_TARGET = 128   # buffered payloads awaiting an E2E session, per target
@@ -896,6 +901,8 @@ __all__ = [
     "_FIND_NODE_SCAN",
     "_FOUND_NODE_MAX_BYTES",
     "_GOSSIP_FANOUT",
+    "_DOUBLE_ACCEPT_HOLD",
+    "_DOUBLE_ACCEPT_TRACKED",
     "_HANDSHAKE_DEADLINE",
     "_HEADER_BYTES",
     "_HEX_PKG",

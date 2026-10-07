@@ -834,6 +834,11 @@ will dial (`_end_double_accept`, `gotchas.md` "Both ends accepted the link").
 Ending it costs a FIN; answering it with a handshake would be a ~21 kB reply to
 one datagram from any source address, so this node never takes the dialler's
 part on a link it accepted.
+For `_DOUBLE_ACCEPT_HOLD` afterwards, a link accepted from the very same address
+is closed before this node says anything on it — bounded to
+`_DOUBLE_ACCEPT_TRACKED` addresses. A far end dialling normally does so from a
+fresh source port, and a punched link is adopted rather than accepted, so
+neither waits on the hold.
 
 A link this node accepted that has delivered **not one packet** by
 `_HANDSHAKE_DEADLINE` is ended on every keepalive sweep, pressure or not

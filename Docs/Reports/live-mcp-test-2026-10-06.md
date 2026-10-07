@@ -141,3 +141,21 @@ showed while doing so changed two of the diagnoses above.
 
 The MCP tool list was read before the deploy, so `node_speedtest` did not
 offer `bundle` yet; the bundle measurement is still to be read live.
+
+## Over the internet, wifi, then Proton VPN (2026-10-07)
+
+| Check | Internet + wifi | Proton VPN |
+|---|---|---|
+| Idle round trip, DTrump | 26–28 ms, jitter 2–4 ms | 50–100 ms, jitter ~30 ms |
+| UDP timer | rto 50 ms, srtt 26 ms; 22 of 64 timeouts spurious | rto 183 ms, srtt 57 ms; 4 of 23 spurious |
+| Speed test, one link | TCP 2.1–2.2 MB/s (DTrump, JeffreyEpstein), window 10 | TCP 0.40 MB/s, 7.8 % of probes unechoed within 2 s |
+| Speed test, bundle | UDP+TCP 4.7 MB/s (DTrump) | UDP+TCP 0.42 MB/s |
+| Listener storm (70) | stopped with the network change; the VPN address no longer answers | — |
+| Wrong dial costing a link (71) | seen again: JeffreyEpstein's 606 s inbound link lost | — |
+| Sleep | — | 607 s slept, every link dropped with that reason, all back |
+
+Two readings needed care. A third DTrump test inside a minute reported 21 %
+loss: it was DTrump's echo ceiling, reached by the two tests before it
+(`BUGSVULNS.MD` 72), not the link. And over the VPN, TCP "loses" probes too:
+those are echoes later than `_SPEED_PROBE_TIMEOUT` behind a queue, which TCP
+delivers late rather than drops — the column is latency, not loss.
