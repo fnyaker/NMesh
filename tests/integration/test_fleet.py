@@ -108,7 +108,7 @@ async def _linked_pair(port: int):
 
 class TestEnrolmentOverRealMesh:
     async def test_full_flow_enrol_then_status(self):
-        operator, agent = await _linked_pair(19310)
+        operator, agent = await _linked_pair(19500)
         try:
             await operator.app.request_enrolment(agent.id, caps=["status"],
                                                  label="my laptop")
@@ -265,7 +265,7 @@ class TestRemoteConsoleOverRealMesh:
     async def test_a_console_call_crosses_the_mesh_and_comes_back(self):
         """A response larger than one frame: the splitting and the reassembly go
         over a real link, not a transport stub."""
-        operator, agent = await _linked_pair(19340)
+        operator, agent = await _linked_pair(19502)
         console = StubConsole()
         agent.app._local_console = console
         try:
@@ -288,7 +288,7 @@ class TestRemoteConsoleOverRealMesh:
             await agent.close()
 
     async def test_without_the_grant_the_call_is_refused(self):
-        operator, agent = await _linked_pair(19341)
+        operator, agent = await _linked_pair(19503)
         console = StubConsole()
         agent.app._local_console = console
         try:
@@ -466,7 +466,7 @@ class TestFilesOverRealMesh:
     async def test_a_file_goes_up_and_comes_back_whole(self, tmp_path):
         """Bigger than one slice in both directions: what is proved is the
         chunking, not that a small string survives a round trip."""
-        operator, agent = await _linked_pair(19350)
+        operator, agent = await _linked_pair(19504)
         bridge = FleetBridge(operator.app)
         bridge.start(asyncio.get_running_loop())
         try:
@@ -496,7 +496,7 @@ class TestFilesOverRealMesh:
             await agent.close()
 
     async def test_without_the_shell_right_nothing_is_listed(self, tmp_path):
-        operator, agent = await _linked_pair(19351)
+        operator, agent = await _linked_pair(19505)
         bridge = FleetBridge(operator.app)
         bridge.start(asyncio.get_running_loop())
         try:
@@ -677,7 +677,7 @@ class TestRemoteScan:
         return operator, agent
 
     async def test_remote_scan_result_reaches_the_console_bridge(self):
-        operator, agent = await self._enrolled(19330, ["scan"])
+        operator, agent = await self._enrolled(19501, ["scan"])
         bridge = FleetBridge(operator.app)
         bridge.start(asyncio.get_running_loop())
         server, port = await self._ssh_listener()

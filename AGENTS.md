@@ -381,6 +381,12 @@ scope. Add yours.
   dial and refused it only towards the gone. → Before removing what a path
   does on the side, find what depends on it happening: grep its effect, and
   run the integration suite before calling it done.
+- **An existing file overwritten unread.** To guard integration ports, an agent
+  wrote `tests/test_integration_ports.py` with `cat >` — and the file already
+  existed, holding the same rule in a stricter form (attributed per test, with
+  a check that it finds anything at all). Caught only because the unit count
+  went *down* by one after adding a test. → Before writing a file, check it
+  does not exist (`git ls-files`, or `Read`); a shell redirect never asks.
 - **An empty log answer read as "nothing happened".** After a restart the log
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not
@@ -426,6 +432,24 @@ Consequences for debugging:
 Only 3 files carry `@pytest.mark.xdist_group` (needed for LAN-broadcast tests to
 share a worker). The fixed-port tests are **not** grouped, which is the root of
 the flakiness. A real fix would group them by port or serialise integration in CI.
+
+Two of the named failures turned out to be **collisions written in the tests**,
+not load, and both failed most runs under `-n auto` (3/4 and 3/6) while passing
+every serial run:
+
+- `test_fleet` and `test_idle_chatter` both listened on TCP 19341 (and
+  `test_fleet` shared 19340 and 19350 with `test_udp`).
+  `tests/test_integration_ports.py` already refused a shared
+  `127.0.0.1:NNNN`, and missed these because the port went to a helper as a
+  bare number; it now claims those too.
+- `test_relay_invite` reserved one port with `free_port()` and listened on
+  `base + 1`, which nothing reserved. A test that uses `base + n` asks for
+  `free_port(n + 1)`.
+
+So before blaming load, run the integration suite under `-n auto` four to six
+times and look at *which* test fails: one name failing most runs is a bug, and
+names changing run to run is load. `test_spool_transport`'s one CI failure
+(BUGSVULNS 81) is still unexplained.
 
 ### Verifying a fix actually guards something
 

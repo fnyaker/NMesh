@@ -412,10 +412,13 @@ class McpApp:
             if reply.get("ok"):
                 reply = {"ok": True, "result": (reply.get("result") or {}).get("result")}
         else:
-            reply = self._ask("web.request", {
-                "app": how["app"], "method": how["method"], "path": how["path"],
-                "query": str(arguments.get("query") or ""),
-                "body": arguments.get("body") if isinstance(arguments.get("body"), dict) else None})
+            request = {"app": how["app"], "method": how["method"], "path": how["path"],
+                       "query": str(arguments.get("query") or "")}
+            # Absent, never null: `body` is an optional mapping, and a null is
+            # a value the declaration refuses.
+            if isinstance(arguments.get("body"), dict):
+                request["body"] = arguments["body"]
+            reply = self._ask("web.request", request)
         if self._log is not None:
             self._log(f"tool {name}: {'ok' if reply.get('ok') else reply.get('code', 'refused')}")
         return _result(reply)
