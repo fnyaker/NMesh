@@ -3508,3 +3508,21 @@ record from its own `asyncio.to_thread` call, so two sends in flight on one link
 can reach the file in either order. A link is expected to keep order (TCP and
 the UDP layer do). The delayed-write runs above reorder records and still lost
 nothing — the E2E retry recovers — so this is not offered as the cause.
+
+## 82 — low — A needless fast retransmit was counted as a spurious timeout
+
+> **Status — fixed.** Tests:
+> `tests/test_traffic_profiles.py::TestALateOriginalIsTimed::test_a_needless_fast_retransmit_is_not_a_timeout`.
+
+**Where** — `src/transports/udp.py`: `_needless_cut` (was `_needless_timeout`),
+`_loss`.
+
+**What happens** — seen live on 0.4.71: the UDP link to node C read
+`timeouts: 0`, `spurious timeouts: 1`. `_undo` is armed by every window cut,
+the fast retransmit of a SACK hole included, and the late-original check undid
+it and counted a spurious *timeout* whatever had made the cut. The undo was
+right; the count named the wrong event, and a reader of the stats was told a
+timer fired that never did.
+
+**Fixed** — `_undo` records whether a timeout made the cut; a needless fast
+retransmit counts in `spurious fast retransmits`, a new stat beside the other.
