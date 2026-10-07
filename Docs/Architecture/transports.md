@@ -662,9 +662,11 @@ UDP is connectionless and unreliable → a **reliability layer**:
   - **a late original is timed**: an ACK for a resent frame that arrives sooner
     after the resend than half the shortest round trip the link has made
     (`_min_rtt`) cannot answer the resend, so it answers the original. It is
-    timed, the timeout counts as spurious, and the window cut is undone
-    (Allman & Paxson, 1999). F-RTO needs a second frame in flight to decide,
-    and an idle link rarely has one;
+    timed, the cut that resend paid for is undone, and it is counted against
+    what made it: `spurious timeouts` for a timeout, `spurious fast
+    retransmits` for a SACK hole the original then filled (Allman & Paxson,
+    1999). F-RTO needs a second frame in flight to decide, and an idle link
+    rarely has one;
   - a **congestion window** in bytes (`_CWND_*`): slow start from 64 kB, one
     `_CWND_STEP` per round trip past the threshold, **halved once per loss
     event** — a loss among frames sent before the last reduction is the same

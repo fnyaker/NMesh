@@ -184,6 +184,23 @@ class TestALateOriginalIsTimed:
         assert link.spurious == 1
         assert link._cwnd >= cwnd                          # the cut is undone
 
+    def test_a_needless_fast_retransmit_is_not_a_timeout(self, clock):
+        """A SACK hole resent fast and then filled by its late original is
+        undone like a spurious timeout — and counted as what it was. Counted as
+        a timeout, a link with no timeout at all read "1 spurious timeout"."""
+        link = _ReliableLink()
+        for _ in range(20):
+            _measured(link, clock, 0.030)
+        frames = [link.build_frame(_packet()) for _ in range(5)]
+        seqs = [struct.unpack_from("!I", frame, 4)[0] for frame in frames]
+        clock.t += 0.010
+        resent = link.process_ack((seqs[0] - 1) & 0xFFFFFFFF, 0b1110)
+        assert frames[0] in resent
+        clock.t += 0.002            # < half the 10 ms the SACKed frames took
+        link.process_ack(seqs[3], 0)
+        assert link.timeouts == 0 and link.spurious == 0
+        assert link.spurious_fast == 1
+
     def test_an_answer_that_could_be_the_resends_is_not_timed(self, clock):
         link, cwnd, srtt = self._late(clock, 0.020)       # >= 30 ms / 2
         assert link._srtt == srtt
