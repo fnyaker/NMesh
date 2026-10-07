@@ -18,6 +18,11 @@ above them in their own file.
 So the rule is checked rather than remembered, and it is checked in the **fast**
 suite: a guard that only runs when you already ran the thing it guards is a
 guard you find out about from CI.
+
+A port handed to a helper as a bare number — `_linked_pair(19341)` — is claimed
+too. Reading only the `127.0.0.1:` form missed exactly that: `test_fleet` and
+`test_idle_chatter` both listened on 19341, and `test_fleet` failed most runs
+under xdist with a session timeout.
 """
 from __future__ import annotations
 
@@ -31,6 +36,9 @@ INTEGRATION = pathlib.Path(__file__).resolve().parent / "integration"
 # a port built at runtime is somebody's own business, and this file has no way
 # to reason about it.
 _ADDRESS = re.compile(r"127\.0\.0\.1:(\d{4,5})")
+# The range these tests write their fixed ports in. A bare number is claimed only
+# as a call argument inside it — an event count or a timeout is not a port.
+_PORT_RANGE = range(19000, 20000)
 
 
 def _owners() -> dict[str, set[str]]:
@@ -42,14 +50,22 @@ def _owners() -> dict[str, set[str]]:
             (node.lineno, node.end_lineno, node.name)
             for node in ast.walk(ast.parse(text))
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
-        for number, line in enumerate(text.splitlines(), 1):
-            for port in _ADDRESS.findall(line):
-                # A helper shared by a whole module (`_pair`, a fixture) is
-                # attributed to itself, and several tests calling it is not a
-                # collision — they pass the port in.
-                owner = next((name for start, end, name in functions
-                              if start <= number <= end), "<module>")
-                found[port].add(f"{path.name}::{owner}")
+        claims = [(number, port)
+                  for number, line in enumerate(text.splitlines(), 1)
+                  for port in _ADDRESS.findall(line)]
+        claims += [(arg.lineno, str(arg.value))
+                   for call in ast.walk(ast.parse(text))
+                   if isinstance(call, ast.Call)
+                   for arg in call.args
+                   if isinstance(arg, ast.Constant) and type(arg.value) is int
+                   and arg.value in _PORT_RANGE]
+        for number, port in claims:
+            # A helper shared by a whole module (`_pair`, a fixture) is
+            # attributed to itself, and several tests calling it is not a
+            # collision — they pass the port in.
+            owner = next((name for start, end, name in functions
+                          if start <= number <= end), "<module>")
+            found[port].add(f"{path.name}::{owner}")
     return found
 
 

@@ -2535,6 +2535,17 @@ the list looked right wherever anybody looked. Bounded lists now go through
 turn. → When a list is cut, check what the cut keeps, not only what the full
 list holds.
 
+## Integration tests that shared a port
+
+Two integration failures read as load for months and were not: `test_fleet` and
+`test_idle_chatter` both listened on TCP 19341, and `test_relay_invite` listened
+on `base + 1` after reserving only `base`. Under xdist the loser of the bind
+times out waiting for a session (or, for the ticket, falls back to the relay),
+most runs, and never serially. `tests/test_integration_ports.py` read only the
+`127.0.0.1:NNNN` form and the fleet port went to `_linked_pair` as a bare
+number; it now claims a bare 19xxx call argument as well. `free_port(n)`
+reserves the block a test actually uses.
+
 ## Neighbourhood maintenance
 
 - **Two dialers, one address.** `_pending_connections` stops two

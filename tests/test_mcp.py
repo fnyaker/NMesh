@@ -155,6 +155,41 @@ class TestToolsComeFromTheCatalogue:
         assert len(build_tools(many, [], [])) == mcp.MAX_TOOLS
 
 
+class TestAPageRouteIsCalledAsDeclared:
+    """What the bridge sends to `web.request` must bind against the module's
+    own declaration — a GET has no body, and a null one was refused."""
+
+    @staticmethod
+    def _answer(params):
+        from src.control.modules.web import WebModule
+        from src.control.params import ControlError, bind
+        declared = next(op for op in WebModule.OPERATIONS
+                        if op["name"] == "request")["params"]
+        try:
+            return {"ok": True, "result": {"bound": bind(declared, params)}}
+        except ControlError as exc:
+            return {"ok": False, "code": exc.code, "error": exc.message}
+
+    async def _call(self, name, arguments):
+        app = await _running(_replies(**{"web.request": self._answer}))
+        try:
+            result = await asyncio.to_thread(app.call_tool, name, arguments)
+        finally:
+            await app.stop()
+        sent = [params for op, params in app._client.asked if op == "web.request"]
+        return result, sent
+
+    async def test_a_get_without_a_body_binds(self):
+        result, sent = await self._call("web_chat_get_messages", {})
+        assert result["isError"] is False, result
+        assert "body" not in sent[0]
+
+    async def test_a_post_carries_its_body(self):
+        result, sent = await self._call("web_chat_post_send", {"body": {"text": "hi"}})
+        assert result["isError"] is False, result
+        assert sent[0]["body"] == {"text": "hi"}
+
+
 class TestTheProtocol:
     async def test_initialize_agrees_on_a_version(self):
         app = McpApp(FakeClient(_replies()))
