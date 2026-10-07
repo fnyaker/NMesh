@@ -600,6 +600,10 @@ class MeshNode:
         self._bundles: OrderedDict[NodeID, mlo.Bundle] = OrderedDict()
         # What apps said their traffic to a node needs (`set_traffic_profile`).
         self._traffic = _traffic.TrafficProfiles()
+        # Routed identity -> (the first hop it is reached through, since when).
+        # See `_route_lead`.
+        self._route_hold: float = _ROUTE_HOLD_DEFAULT
+        self._route_leads: OrderedDict[NodeID, tuple[NodeID, float]] = OrderedDict()
         # Identities one link short of a bundle, and how the last ask for that
         # second link went. Filled by `_update_bundles` (which is the one place
         # that decides who could be bundled), spent by `_mlo_dial_loop`.
@@ -2548,7 +2552,7 @@ class MeshNode:
             # three numbers off each and `_member_peer` turns whichever it
             # picked back into a link to send down.
             paths: dict[NodeID, list] = {}
-            for target in self._paths.targets():
+            for target in self._paths.targets() if self._route_hold <= 0 else ():
                 usable = [path for path in self._paths.live(target)
                           if self._link_to(path.via) is not None]
                 if usable:
@@ -3889,7 +3893,13 @@ class MeshNode:
             for r in results:
                 if isinstance(r, list):
                     for entry in r:
-                        if entry.node_id != self._id:
+                        # An id we have stopped asking (`is_silent`) is not
+                        # asked again because a peer still names it: peers
+                        # name a node long after it has gone.
+                        known = self._routing.get(entry.node_id)
+                        if (entry.node_id != self._id
+                                and (known is None
+                                     or not self._routing.is_silent(known))):
                             shortlist.add(entry.node_id)
             sorted_ids = sorted(shortlist, key=lambda n: target.distance(n))[:k]
             shortlist = set(sorted_ids)
@@ -4061,11 +4071,78 @@ class MeshNode:
         if not self._paths.has(target):
             return []
         out: list[_Peer] = []
+        lead = self._route_lead(target)
+        if lead is not None:
+            peer = self._link_to(lead, exclude=exclude)
+            if peer is not None:
+                out.append(peer)
         for path in self._paths.live(target):
             peer = self._link_to(path.via, exclude=exclude)
             if peer is not None and peer not in out:
                 out.append(peer)
         return out
+
+    def set_route_hold(self, seconds: float) -> float:
+        """How long a routed identity keeps its first hop; 0 spreads it over
+        every measured path. See `_route_lead`."""
+        value = float(seconds)
+        if not 0 <= value <= _ROUTE_HOLD_MAX:
+            raise ValueError(f"between 0 and {int(_ROUTE_HOLD_MAX)} seconds")
+        self._route_hold = value
+        self._route_leads.clear()
+        self._update_bundles()
+        return self._route_hold
+
+    def _route_lead(self, target: NodeID, now: float | None = None) -> NodeID | None:
+        """The first hop a routed identity is sent through, held for a while.
+
+        Spread over every relay that measures well, a conversation changes way
+        with every packet. Held, one hop carries it for `_route_hold` seconds, then
+        it moves to another healthy one if there is one — a relay that keeps a
+        conversation for ever is a relay that sees all of it. A hop that stops
+        delivering (dead, or losing more than a link may) is left at once,
+        whatever the hold says. ``None`` while nothing is measured, or with the
+        hold at zero, where the bundle spreads the traffic instead."""
+        if self._route_hold <= 0:
+            return None
+        live = [path for path in self._paths.live(target)
+                if self._link_to(path.via) is not None]
+        if not live:
+            self._route_leads.pop(target, None)
+            return None
+        stamp = time.monotonic() if now is None else now
+        healthy = [path for path in live
+                   if (path.loss() or 0.0) <= _LOSS_RESCUE_SHARE]
+        held = self._route_leads.get(target)
+        if held is not None:
+            via, since = held
+            current = next((path for path in healthy if path.via == via), None)
+            if current is not None:
+                if stamp - since < self._route_hold:
+                    return via
+                others = [path for path in healthy if path.via != via]
+                if not others:
+                    self._route_leads[target] = (via, stamp)
+                    return via
+                return self._lead_through(target, others[0].via, stamp, "rotated")
+        pick = (healthy or live)[0]
+        return self._lead_through(target, pick.via, stamp,
+                                  "failover" if held is not None else "chosen")
+
+    def _lead_through(self, target: NodeID, via: NodeID, now: float,
+                      why: str) -> NodeID:
+        self._route_leads.pop(target, None)
+        self._route_leads[target] = (via, now)
+        while len(self._route_leads) > _ROUTE_LEADS_TRACKED:
+            self._route_leads.popitem(last=False)
+        if why != "chosen":
+            self._activity.note("route", f"route to {target.raw.hex()[:16]} "
+                                f"now through {via.raw.hex()[:16]} ({why})")
+        if self.logs.enabled:
+            self.log("route held", source="peers", topic="route",
+                     node=self._short_id(target), via=self._short_id(via),
+                     why=why, hold_s=round(self._route_hold))
+        return via
 
     async def _probe_path(self, path) -> bool:
         """One ECHO to the target, forced down this path's first hop.
@@ -4398,12 +4475,21 @@ class MeshNode:
             # Relayed path — try to upgrade to a direct link in the
             # background (direct connect, then UDP hole punch)…
             if peer.authenticated_id != target:
-                self._maybe_upgrade_path(target)
-                # …and, whether or not that ever works, start measuring the
-                # ways through the mesh to it. An upgrade is an optimisation
-                # and may be impossible; a second *routed* path is what keeps
-                # this id reachable when this first hop stops delivering.
-                self._note_path_interest(target)
+                # Not towards a node we know to be gone (`is_silent`): every
+                # lookup that still names one would buy a dial on each of its
+                # addresses and a punch. Any other routed packet asks — a
+                # lookup answered through a relay is how two nodes that only
+                # share that relay come to hold a link of their own.
+                known = self._routing.get(target)
+                if known is None or not self._routing.is_silent(known):
+                    self._maybe_upgrade_path(target)
+                # …and for a conversation, whether or not that ever works,
+                # start measuring the ways through the mesh to it. An upgrade
+                # is an optimisation and may be impossible; a second *routed*
+                # path is what keeps this id reachable when this first hop
+                # stops delivering.
+                if packet.type in _CONVERSATION_TYPES:
+                    self._note_path_interest(target)
             return peer
         if not blocking:
             self._defer_route(packet)
@@ -5520,12 +5606,21 @@ class MeshNode:
             via, seen_at = hint
             if now - seen_at > _ROUTE_HINT_TTL or via not in direct_ids:
                 continue
+            # The hop we send through when we hold one, not the one the last
+            # packet from there arrived by: that is the far end's choice, and
+            # drawn as ours it made the map change route with every packet.
+            held = self._route_leads.get(target)
+            evidence = "locally-observed-first-hop"
+            if held is not None and held[0] in direct_ids:
+                via, evidence = held[0], "held-first-hop"
             routed.append({
                 "id": target.raw.hex(),
                 "pseudo": self.pseudo_of(target),
                 "via": via.raw.hex(),
                 "seen_ago": max(0.0, now - seen_at),
-                "evidence": "locally-observed-first-hop",
+                "held_for": (round(now - held[1]) if held is not None
+                             and evidence == "held-first-hop" else None),
+                "evidence": evidence,
                 "path_visibility": "first-hop-only",
             })
         return {"direct": direct, "routed": routed}

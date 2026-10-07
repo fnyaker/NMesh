@@ -475,9 +475,11 @@ class TestHybridBundles:
         assert node._member_peer(peer, exclude=peer) is None
 
     def test_an_identity_reached_only_through_the_mesh_can_be_bundled(self):
-        """MRLO. Two measured routed paths and no direct link at all."""
+        """MRLO. Two measured routed paths and no direct link at all — when the
+        operator asked for traffic to be spread over relays (a hold of zero)."""
         node = _node()
         self._enable(node)
+        node.set_route_hold(0)
         _link(node, VIA_A, uri="fake://a:1")
         _link(node, VIA_B, uri="fake://b:1")
         node._paths.note_interest(TARGET)
@@ -507,6 +509,163 @@ class TestHybridBundles:
         _answer(node._paths.ensure(TARGET, VIA_A), 10)
         node._update_bundles()
         assert TARGET not in node._mlo_short
+
+
+class TestARoutedNodeKeepsItsRelay:
+    """`_route_lead`: one relay carries a conversation for `route_hold_minutes`,
+    then another healthy one does; a relay that stops delivering is left at
+    once. Spreading over every relay changed the route with every packet."""
+
+    def _two_ways(self, node):
+        _link(node, VIA_A, uri="fake://a:1")
+        _link(node, VIA_B, uri="fake://b:1")
+        node._paths.note_interest(TARGET)
+        a = _answer(node._paths.ensure(TARGET, VIA_A), 10, rtt=0.020)
+        b = _answer(node._paths.ensure(TARGET, VIA_B), 10, rtt=0.030)
+        return a, b
+
+    def _heads(self, node, n=8):
+        return {node._measured_first_hops(TARGET)[0].authenticated_id
+                for _ in range(n)}
+
+    def test_the_traffic_takes_one_relay(self):
+        node = _node()
+        HMLO = TestHybridBundles()
+        HMLO._enable(node)
+        self._two_ways(node)
+        node._update_bundles()
+        assert TARGET not in node._bundles             # not spread
+        assert self._heads(node) == {VIA_A}            # the better one
+
+    def test_it_moves_to_another_healthy_relay_when_the_hold_runs_out(self):
+        node = _node()
+        self._two_ways(node)
+        assert node._route_lead(TARGET) == VIA_A
+        via, since = node._route_leads[TARGET]
+        node._route_leads[TARGET] = (via, since - node._route_hold - 1)
+        assert node._route_lead(TARGET) == VIA_B
+        assert self._heads(node) == {VIA_B}
+
+    def test_with_nowhere_else_to_go_it_stays(self):
+        node = _node()
+        _link(node, VIA_A)
+        node._paths.note_interest(TARGET)
+        _answer(node._paths.ensure(TARGET, VIA_A), 10)
+        assert node._route_lead(TARGET) == VIA_A
+        via, since = node._route_leads[TARGET]
+        node._route_leads[TARGET] = (via, since - node._route_hold - 1)
+        assert node._route_lead(TARGET) == VIA_A
+        assert time.monotonic() - node._route_leads[TARGET][1] < 1   # renewed
+
+    def test_a_relay_that_stops_delivering_is_left_at_once(self):
+        node = _node()
+        a, _b = self._two_ways(node)
+        assert node._route_lead(TARGET) == VIA_A
+        _silence(a)
+        assert node._route_lead(TARGET) == VIA_B
+
+    def test_a_losing_relay_is_left_too(self):
+        node = _node()
+        a, _b = self._two_ways(node)
+        assert node._route_lead(TARGET) == VIA_A
+        for index in range(9):
+            a.sent(("lost", index), 0.0)
+        a.quality.expire(1000.0, 1.0)
+        _answer(a, 1)                       # still answering, so not dead
+        assert not a.dead() and a.loss() > 0.2
+        assert node._route_lead(TARGET) == VIA_B
+
+    def test_a_hold_of_zero_spreads_instead(self):
+        node = _node()
+        TestHybridBundles()._enable(node)
+        self._two_ways(node)
+        node.set_route_hold(0)
+        assert node._route_lead(TARGET) is None
+        assert node._bundles[TARGET].active
+
+    def test_the_hold_is_bounded(self):
+        node = _node()
+        for bad in (-1, 10 ** 9):
+            with pytest.raises(ValueError):
+                node.set_route_hold(bad)
+
+    def test_the_map_draws_the_relay_we_hold_not_the_last_one_heard(self):
+        node = _node()
+        self._two_ways(node)
+        node._e2e_sessions[TARGET] = object()
+        node._route_hints[TARGET] = (VIA_B, time.monotonic())   # heard via B
+        node._route_lead(TARGET)                                # we send via A
+        routed_rows = node._console_topology(time.monotonic())["routed"]
+        assert routed_rows[0]["via"] == VIA_A.raw.hex()
+        assert routed_rows[0]["evidence"] == "held-first-hop"
+
+    def test_the_book_of_held_relays_is_bounded(self):
+        from src.node import _ROUTE_LEADS_TRACKED
+        node = _node()
+        for index in range(_ROUTE_LEADS_TRACKED * 2):
+            node._lead_through(NodeID(index.to_bytes(20, "big")), VIA_A,
+                               time.monotonic(), "chosen")
+        assert len(node._route_leads) <= _ROUTE_LEADS_TRACKED
+
+
+class TestWhatARoutedPacketBuys:
+    """A lookup routed to a node to ask it about somebody else bought measured
+    paths to it, and a dial and a punch even towards a node long gone. It still
+    buys the dial towards a node that is there: that is how two nodes that only
+    share a relay come to hold a link (`test_idle_chatter`)."""
+
+    async def _route(self, node, kind):
+        from src.packet import Packet
+        upgraded, interest = [], []
+        node._maybe_upgrade_path = upgraded.append
+        node._note_path_interest = interest.append
+        await node._route_outbound(Packet.create(kind, node.id.raw, TARGET.raw, b"x"))
+        return upgraded, interest
+
+    async def test_a_lookup_buys_a_dial_and_no_measured_paths(self):
+        from src.mesh.messages import FIND_NODE
+        node = _node()
+        _link(node, VIA_A)
+        assert await self._route(node, FIND_NODE) == ([TARGET], [])
+
+    async def test_nothing_is_bought_towards_a_node_known_gone(self):
+        from src.mesh.messages import DATA
+        from src.routing import SILENT_AFTER
+        node = _node()
+        _link(node, VIA_A)
+        node._routing.add(TARGET, ["fake://t:1"])
+        for _ in range(SILENT_AFTER):
+            node._routing.note_unanswered(TARGET)
+        upgraded, _interest = await self._route(node, DATA)
+        assert upgraded == []
+
+    async def test_data_buys_both(self):
+        from src.mesh.messages import DATA
+        node = _node()
+        _link(node, VIA_A)
+        assert await self._route(node, DATA) == ([TARGET], [TARGET])
+
+
+class TestALookupDoesNotAskTheSilentAgain:
+    async def test_an_id_a_peer_still_names_is_not_asked_once_silent(self):
+        from src.routing import SILENT_AFTER, NodeEntry
+        node = _node()
+        _link(node, VIA_A)
+        gone = NodeID(b"\x12" * 20)
+        node._routing.add(gone, ["fake://gone:1"])
+        for _ in range(SILENT_AFTER):
+            node._routing.note_unanswered(gone)
+        asked = []
+
+        async def query(node_id, target, timeout=5.0):
+            asked.append(node_id)
+            if node_id == VIA_A:
+                return [NodeEntry(gone, ["fake://gone:1"])]
+            return []
+
+        node._kad_query_node = query
+        await node.kad_lookup(TARGET)
+        assert gone not in asked
 
 
 class _StubBundle:
