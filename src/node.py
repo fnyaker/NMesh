@@ -45,7 +45,7 @@ from .features import MAX_RECORD as _FEATURES_MAX
 from .transports.manager import TransportManager
 from .metrics import NodeMetrics, Counters, LinkQuality
 from .dht import ContentStore
-from .ip_utils import (local_ip_addresses, expand_listen_uri,
+from .ip_utils import (local_ip_addresses, expand_listen_uri, announcement_order,
                        split_host_port, is_global_ip)
 from .net_monitor import NetMonitor
 from .app_package import (
@@ -651,6 +651,7 @@ class MeshNode:
         # there for why the key is the whole of the input and not a flag.
         self._advertised_key: tuple | None = None
         self._advertised: list[str] = []
+        self._announced: dict = {}
         self._announce_tasks: set = set()
         self._observed_udp_addr: tuple[str, int] | None = None  # from keepalive STUN
         # STUN transaction id -> (server ip, expiry). Requests we sent and are
@@ -1071,6 +1072,16 @@ class MeshNode:
             self._advertised_key, self._advertised = key, out
         return list(self._advertised)
 
+    def announced_uris(self, limit: int = _MAX_ADDRESSES) -> list[str]:
+        """What a bounded announcement of our addresses carries: `advertised_uris`
+        cut to ``limit`` by `announcement_order`, so every medium keeps a share."""
+        advertised = self.advertised_uris()
+        key = (self._advertised_key, limit)
+        if self._announced.get("key") != key:
+            self._announced = {"key": key,
+                               "uris": announcement_order(advertised, limit)}
+        return list(self._announced["uris"])
+
     async def join(self, address: str, code: str) -> '_Peer':
         transport = await self._connect_for_join(address)
         peer = self._new_peer(transport, is_client_side=True)
@@ -1334,7 +1345,7 @@ class MeshNode:
         same way (`_handle_ping` merges an empty list and keeps the recency).
         So there is nothing here to negotiate and nothing to be older than."""
         now = time.monotonic()
-        current = tuple(self.advertised_uris())
+        current = tuple(self.announced_uris())
         if (current != peer.addrs_sent
                 or now - peer.addrs_sent_at >= _ADDR_GOSSIP_INTERVAL):
             payload = _encode_addresses(list(current))
@@ -1370,7 +1381,7 @@ class MeshNode:
         """Push our advertised address set to the most-recently-seen peers when
         it changes (targeted Kademlia-style gossip). A PING already carries
         advertised_uris. Skips an unchanged set (no storm); never raises."""
-        current = tuple(self.advertised_uris())
+        current = tuple(self.announced_uris())
         if current == self._last_announced:
             return
         self._last_announced = current
@@ -6927,7 +6938,7 @@ class MeshNode:
         """Step 1 (joiner): a base64 block listing the endpoints we can be
         reached at. Hand it to the node you want to join."""
         return _encode_conn_block("req",
-                                  uris=self.advertised_uris()[:_JOIN_BLOCK_MAX_URIS])
+                                  uris=self.announced_uris(_JOIN_BLOCK_MAX_URIS))
 
     def console_connect_accept(self, block: str) -> str:
         """Step 2 (host): ingest the joiner's request, open NAT holes toward
@@ -6938,7 +6949,7 @@ class MeshNode:
         self._open_holes_from_uris(peer_uris, _CONN_HOLE_SUSTAIN)
         code = self._invite.generate_code()
         return _encode_conn_block("inv", code=code,
-                                  uris=self.advertised_uris()[:_JOIN_BLOCK_MAX_URIS])
+                                  uris=self.announced_uris(_JOIN_BLOCK_MAX_URIS))
 
     def console_connect_complete(self, block: str) -> dict:
         """Step 3 (joiner): ingest the host's invite, open NAT holes toward its
@@ -7287,7 +7298,7 @@ class MeshNode:
         every URI we advertise. The receiving node tries them all."""
         code = self._invite.generate_code()
         payload = {"v": 1, "code": code,
-                   "uris": self.advertised_uris()[:_JOIN_BLOCK_MAX_URIS]}
+                   "uris": self.announced_uris(_JOIN_BLOCK_MAX_URIS)}
         return base64.b64encode(
             json.dumps(payload, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
@@ -8414,7 +8425,7 @@ class MeshNode:
         # subject *is* the entry's node id, so a relay cannot forge this.
         candidates = [(e.node_id, e.addresses, e.dsa_pub)
                       for e in self._routing.get_closest(target, _FIND_NODE_SCAN)]
-        candidates.append((self._id, self.advertised_uris(),
+        candidates.append((self._id, self.announced_uris(),
                            self._identity.dsa_public_key))
         candidates.sort(key=lambda c: target.distance(c[0]))
         for node_id, addresses, dsa_pub in candidates:

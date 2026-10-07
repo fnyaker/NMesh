@@ -3423,3 +3423,27 @@ dedupes `_ensure_route_to` per node, but the address-retry loop dials through
 
 **Fixed** — `_dial_uri` keeps one dial per `(node, address)` in flight; a second
 caller waits on its outcome under its own timeout. Probe dials are exempt.
+
+## 78 — medium — A node with many interfaces announced no UDP address
+
+> **Status — fixed.** Tests: `tests/test_address_announcement.py`.
+
+**Where** — `src/node.py`: `ping`, `_announce_addresses`, the FOUND_NODE self
+entry, `console_connect_request`, `console_connect_accept`,
+`console_invite_block`; `src/ip_utils.py`: `announcement_order`.
+
+**What happens** — seen live on 0.4.67: LAPEEEEEEEE advertised 32 URIs (tun0,
+a ULA, Tailscale, twelve Docker bridges, libvirt, each on TCP 9000 then UDP
+9001). A PING carries eight and took the first eight: all TCP, four of them
+`172.x` bridges. Join blocks took the first sixteen: TCP only, so the host of a
+join had no UDP endpoint to punch towards. Peers learned our UDP addresses only
+from what they observed of an inbound link.
+
+**Fixed** — the bounded lists go through `announced_uris()`: media take turns,
+public before private within a medium, host order otherwise. The console keeps
+the full list.
+
+**Still open** — the order inside a medium cannot tell a Docker bridge from a
+LAN: both are RFC 1918. The default-route addresses come first
+(`local_ip_addresses`), which is what keeps the useful ones in on this host; a
+host whose LAN is not on a default route would still spend slots on bridges.

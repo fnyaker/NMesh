@@ -673,7 +673,18 @@ B↔C is Wi-Fi…").
   Sorted alone, a host on `192.168.x` with Docker advertised eleven `172.x`
   bridges ahead of the one address its neighbours could reach, and
   `_lan_relay_addrs()`, which keeps eight, dropped that one entirely.
-- The **PING carries `advertised_uris`**; `_handle_ping` does
+- **What leaves is cut, and cut by medium.** A PING or a FOUND_NODE entry
+  holds eight addresses (`_MAX_ADDRESSES`) and a join block sixteen
+  (`_JOIN_BLOCK_MAX_URIS`), while `advertised_uris()` expands every wildcard
+  listener over every interface, one listener after another. `announced_uris()`
+  (`ip_utils.announcement_order`) is what those bounded lists carry: the
+  media take turns, in listener order, and within one medium a globally
+  routable address or a configured name goes before a private one, the host's
+  own order kept otherwise. Cut by position instead, a host with container
+  bridges announced eight TCP addresses and no UDP one at all, and its join
+  blocks named no endpoint to punch towards (`gotchas.md`, *Eight addresses,
+  all TCP*). The console still shows the full `advertised_uris()`.
+- The **PING carries `announced_uris`**; `_handle_ping` does
   `_routing.add(src, valid_uris, dsa_pub)` (a merge) and answers PONG.
   `_validate_uri` filters before adding ("reject by default").
 - PINGs are sent: at `bootstrap()`, by the **keepalive loop** (~20 s,
@@ -688,9 +699,9 @@ B↔C is Wi-Fi…").
 When the announced set changes, we announce it **immediately** to recent peers
 rather than waiting for the periodic keepalive:
 
-- `_announce_addresses(reason)`: recomputes `advertised_uris()`, **skips if
+- `_announce_addresses(reason)`: recomputes `announced_uris()`, **skips if
   unchanged** (`_last_announced` → no storm), otherwise sends a PING (which
-  already carries `advertised_uris`) to the **≤ `_ANNOUNCE_FANOUT` = 5**
+  already carries `announced_uris`) to the **≤ `_ANNOUNCE_FANOUT` = 5**
   authenticated peers sorted by descending `last_seen`
   (`_recent_authed_peers`). Targeted Kademlia gossip: little traffic, fast
   convergence. It never raises.
