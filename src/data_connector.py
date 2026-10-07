@@ -150,6 +150,11 @@ _PERMS_QUERY = 0x18   # body = empty — what does this app hold right now?
 _CONTROL = 0x19       # body = one control-plane request frame (JSON)
 _MOD_HOOK = 0x1A      # body = JSON {op, mode} or {op, remove: true}
 _RETURN = 0x1B        # body = JSON {call, ok, result | params | error}
+# What this app's traffic to one node needs, for a while (`src/mesh/traffic.py`).
+_PROFILE = 0x1C       # body = target(20) ‖ profile(1) ‖ ttl_s(2)
+_PROFILE_OK = 0x97    # body = ok(1)
+_PROFILE_NAMES = {0: None, 1: "realtime", 2: "bulk"}
+_PROFILE_CODES = {None: 0, "realtime": 1, "bulk": 2}
 _LOG_LINES = 0x8F     # body = JSON {lines, matched, returned, seq, lost?}
 _LOG_LINE = 0x90      # body = JSON one line, pushed to a watching client
 _LINKS_VIEW = 0x92    # body = JSON {links: [...]}, or {refused: true}
@@ -180,7 +185,7 @@ _ID_PEEK = re.compile(rb'"id"\s*:\s*"([^"\\]{0,64})"')
 # an app with one gets what it asked for. Reading the node's own data needs a
 # grant whatever the manifest says.
 _FRAME_PERMISSION = {
-    _SEND: "network",
+    _SEND: "network", _PROFILE: "network",
     _STORE_GET: "storage", _STORE_PUT: "storage", _STORE_DEL: "storage",
     _STORE_LIST: "storage",
     _APP_DHT_PUT: "dht", _APP_DHT_GET: "dht",
@@ -196,6 +201,7 @@ _REFUSED_ANSWER = {
     _APP_DHT_PUT: (_APP_DHT_KEY, b""), _APP_DHT_GET: (_APP_DHT_VALUE, b"\x00"),
     _PSEUDO_MINE: (_PSEUDO_MINE_RESP, b""), _PSEUDO_LOOKUP: (_PSEUDO_RESULTS, b"[]"),
     _PSEUDO_OF: (_PSEUDO_NAMES, b"{}"),
+    _PROFILE: (_PROFILE_OK, b"\x00"),
     _AUTH_ASSERT: (_AUTH_ASSERTION, b""), _AUTH_VERIFY: (_AUTH_PRINCIPAL, b"null"),
 }
 # The two grants that came before permissions, for a connector built with the
@@ -563,6 +569,10 @@ class DataConnector:
                         await self._node.send_data(target, _frame(app_id, body[20:]))
                     except Exception:
                         pass  # bad target / self-send — ignore, keep serving
+                elif ftype == _PROFILE:
+                    await _write_frame(writer, _PROFILE_OK,
+                                       b"\x01" if self._declare_profile(app_id, body)
+                                       else b"\x00")
                 elif ftype == _WHOAMI:
                     await _write_frame(writer, _WHOAMI_RESP, self._node.id.raw)
                 elif ftype in (_STORE_GET, _STORE_PUT, _STORE_DEL, _STORE_LIST):
@@ -609,7 +619,9 @@ class DataConnector:
         finally:
             if writer not in self._outbox:
                 self._pending = max(0, self._pending - 1)
-            self._clients.pop(writer, None)
+            gone = self._clients.pop(writer, None)
+            if gone is not None and gone not in self._clients.values():
+                self._forget_profiles(gone)
             self._identified.discard(writer)
             self._apis.pop(writer, None)
             self._control_inflight.pop(writer, None)
@@ -655,6 +667,29 @@ class DataConnector:
             self._unattended.discard(writer)
         else:
             self._unattended.add(writer)
+
+    def _declare_profile(self, app_id: bytes, body: bytes) -> bool:
+        """``PROFILE``: what this app's traffic to one node needs. Malformed,
+        unknown or refused all answer no; nothing else happens."""
+        if len(body) != 23 or body[20] not in _PROFILE_NAMES:
+            return False
+        declare = getattr(self._node, "set_traffic_profile", None)
+        if declare is None:
+            return False
+        try:
+            return bool(declare(app_id, NodeID(body[:20]), _PROFILE_NAMES[body[20]],
+                                float(int.from_bytes(body[21:23], "big"))))
+        except Exception:
+            return False
+
+    def _forget_profiles(self, app_id: bytes) -> None:
+        """The last client of an app went: so does what it declared."""
+        forget = getattr(self._node, "forget_traffic_profiles", None)
+        if forget is not None:
+            try:
+                forget(app_id)
+            except Exception:
+                pass
 
     async def _handle_store(self, writer: asyncio.StreamWriter, app_id: bytes,
                             ftype: int, body: bytes) -> None:
@@ -1823,6 +1858,22 @@ class ConnectorClient:
                     waiters.remove(future)
                 if not future.done():
                     future.cancel()
+
+    async def set_profile(self, target, profile: str | None,
+                          ttl: float = 60.0) -> bool:
+        """Say what this app's traffic to ``target`` needs for ``ttl`` seconds
+        (at most 600): ``"realtime"``, ``"bulk"``, or ``None`` to take it back.
+        Declare it again before it runs out to keep it."""
+        raw = getattr(target, "raw", target)
+        if not isinstance(raw, (bytes, bytearray)) or len(raw) != 20:
+            raise ValueError("target must be a 20-byte node id")
+        if profile not in _PROFILE_CODES:
+            raise ValueError(f"unknown profile {profile!r}")
+        seconds = max(0, min(int(ttl), 0xFFFF))
+        resp = await self._roundtrip(
+            _PROFILE, bytes(raw) + bytes([_PROFILE_CODES[profile]])
+            + seconds.to_bytes(2, "big"), _PROFILE_OK)
+        return bool(resp) and resp[0] == 1
 
     async def store_put(self, key: str, value: bytes) -> bool:
         kb = key.encode("utf-8")
