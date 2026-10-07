@@ -1586,14 +1586,15 @@ re-derived by the page:
 | field | values |
 |---|---|
 | `quality` | `clean`, `lossy` (≥ `_LINK_LOSSY_SHARE` of recent probes lost, or jitter past `_LINK_JITTER_MS`), `failing` (the sweep's own `_link_is_failing`) |
-| `mlo` | `null`, `seeking` (one link, a second one asked for; `retry_in` seconds after a failed ask), `forming` (two links or more, the bundle measuring them), `active` (the bundle carries on every member), `degraded` (a member benched), `parallel` (several links, none bundleable) |
+| `mlo` | `null`, `seeking` (one link, a second one asked for; `retry_in` seconds after a failed ask), `forming` (two links or more, the bundle still measuring them), `apart` (two measured links further apart than `mlo_skew_ms`; `apart_ms` says by how much), `active` (the bundle carries on every member), `degraded` (a member benched), `parallel` (several links, none bundleable) |
 | `loss` | the recent share lost, the figure every label on the map reads |
 | `links`, `carrying` | how many links there are, and how many carry |
 | `profile` | the traffic profiles declared for that node |
 
 The map draws `lossy` amber and `failing` red and dashed, and a second line
 beside the link for MLO: solid for `active`, dashed amber for `degraded`, dashed
-for `forming`, dotted for `seeking`.
+for `forming`, dotted for `seeking`, and plain grey — like `parallel` — for
+`apart`, whose label reads `MLO apart` and whose words give the gap.
 
 ### The contract this puts on apps
 

@@ -3447,3 +3447,25 @@ the full list.
 LAN: both are RFC 1918. The default-route addresses come first
 (`local_ip_addresses`), which is what keeps the useful ones in on this host; a
 host whose LAN is not on a default route would still spend slots on bridges.
+
+## 79 — low — The map said "measuring" for links it had refused to bundle
+
+> **Status — fixed.** Tests: `tests/test_mlo.py::TestTheMapIsToldWhatTheWayToANodeIsDoing`
+> (`apart`, `still_forming`).
+
+**Where** — `src/node.py`: `_link_state`; `src/mlo.py`: `Bundle.update`.
+
+**What happens** — seen live on 0.4.68: to relay A and relay B, TCP
+probes measured 112–118 ms and UDP 76–78 ms after the VPN exit changed; 40 ms is
+past `mlo_skew_ms` (30), so `Bundle.update` rightly refused the pair. The map
+drew them as `forming` — "second link up, measuring" — for as long as it lasted,
+which reads as a bundle about to happen.
+
+**Fixed** — a bundle remembers the gap that refused it (`Bundle.apart_ms`);
+the map state is `apart` with `apart_ms`, and `mlo_status` carries it.
+
+**Still open** — why a TCP probe measures ~40 ms above the UDP one on the same
+path while the kernel's own TCP RTT reads 64–76 ms (below the probe's 102–118):
+the extra time is spent above the socket, in a queue on one end or the other.
+Not reproduced locally yet. Before the VPN exit moved it was 10 ms (33 vs 23),
+under the skew, so the bundle formed.

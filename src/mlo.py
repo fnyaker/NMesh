@@ -295,7 +295,8 @@ class Bundle:
     chose. Everything else — which key is next, how far apart the members are,
     what that costs in reordering — is read off that choice."""
 
-    __slots__ = ("_settings", "_keys", "_benched", "_skew_ms", "_turn")
+    __slots__ = ("_settings", "_keys", "_benched", "_skew_ms", "_apart_ms",
+                 "_turn")
 
     def __init__(self, settings: MLOSettings | None = None) -> None:
         self._settings = settings or MLOSettings()
@@ -307,6 +308,7 @@ class Bundle:
         # so the only order it can offer is the one they arrived in.
         self._benched: dict = {}
         self._skew_ms: float = 0.0
+        self._apart_ms: float | None = None
         self._turn = 0
 
     # -- what it decided --------------------------------------------------
@@ -324,6 +326,13 @@ class Bundle:
     def skew_ms(self) -> float:
         """How far apart the members measure, in milliseconds."""
         return self._skew_ms
+
+    @property
+    def apart_ms(self) -> float | None:
+        """How far apart the two fastest usable links measured when that gap is
+        what kept them from bundling; ``None`` otherwise — bundled, or still
+        short of a second measured link, which is a different answer."""
+        return self._apart_ms
 
     @property
     def reorder_ms(self) -> float:
@@ -379,7 +388,10 @@ class Bundle:
             chosen.append(candidate)
         if len(chosen) < 2:
             self._keys, self._skew_ms = (), 0.0
+            self._apart_ms = (eligible[1].mean_ms - eligible[0].mean_ms
+                              if len(eligible) >= 2 else None)
             return self._keys
+        self._apart_ms = None
         leader = chosen[0].mean_ms
         self._skew_ms = sum(candidate.mean_ms - leader
                             for candidate in chosen[1:]) / (len(chosen) - 1)
@@ -409,5 +421,7 @@ class Bundle:
             "members": len(self._keys),
             "benched": len(self._benched),
             "skew_ms": round(self._skew_ms, 2),
+            "apart_ms": (None if self._apart_ms is None
+                         else round(self._apart_ms, 2)),
             "reorder_ms": round(self.reorder_ms, 2),
         }
