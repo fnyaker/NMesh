@@ -1966,6 +1966,30 @@ And one that is not a cascade: the map's edge labels sat two thirds out, where
 they ran into the names of the nodes at their ends; with few links they sit
 halfway, on a wider ring.
 
+## Routes that changed with every packet, and dials to nodes that had gone
+
+Watching a live node, routed nodes kept "changing route" on the map, and the
+activity feed gave up on the same three nodes through both relays every few
+minutes. Three separate things:
+
+- **The map drew the last ingress**, `_route_hints`: the relay the far end's
+  last packet came by. Two relays and a far end spreading its replies over
+  both is a map that flips every refresh, whatever this node sends through.
+  It now draws the relay held (`_route_lead`).
+- **The traffic really did change relay every packet**: two measured routed
+  paths formed a bundle (MRLO) and were striped. A relay held for
+  `route_hold_minutes` replaces that by default; zero brings striping back.
+- **Lookups bought dials.** `_route_outbound` asked for a direct link (dial
+  every address, then a punch) and opened measured paths for *any* routed
+  packet — and a Kademlia lookup addresses FIND_NODE to every node near its
+  target, including nodes that went away hours ago, because peers still name
+  them in their answers. 22 of 24 punch attempts on the live node had failed.
+  A lookup does not ask an id it already knows to be silent now, no dial goes
+  towards one, and only a conversation (`_CONVERSATION_TYPES`) buys measured
+  paths. The first version of the fix let only conversations dial at all, and
+  `test_idle_chatter` failed every time: the dial a lookup buys is how two
+  nodes that share only a relay become neighbours.
+
 ## A machine that slept, and links that did not know
 
 A laptop resumed after 6 872 s asleep. The node's two UDP links looked a second
