@@ -75,6 +75,9 @@ class _Peer:
         # so the log says when it crossed and when it came back, not every
         # twenty seconds in between.
         self.failing: bool = False
+        # What the traffic this link carries asks of it, as last told to the
+        # medium (`MeshNode._apply_traffic_profiles`).
+        self.traffic_profile: frozenset = frozenset()
         self.session: SessionKey | None = None
         self.pending_kem_secret: bytes | None = None
         self.join_code: str | None = None

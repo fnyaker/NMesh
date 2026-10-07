@@ -101,6 +101,8 @@ Length-prefixed frames (`uint32` big-endian) covering `type(1) | body`.
 | ←    | `MOD_ACK` (0x95)     | JSON `{ok, error?, hooks}`  | the `MOD_HOOK` answer |
 | ←    | `CALL` (0x96)        | JSON `{call, kind, op, mode?, params, result?}` | the node asks this app: a hook to answer (`kind: "mod"`), or one of its declared operations (`kind: "api"`) |
 | →    | `RETURN` (0x1B)      | JSON `{call, ok, result \| params \| error}` | the answer to a `CALL` — only from the client that was asked |
+| →    | `PROFILE` (0x1C)     | `target(20) + profile(1) + ttl_s(2)` | what this app's traffic to one node needs: 0 none (take it back), 1 realtime, 2 bulk — needs `network` |
+| ←    | `PROFILE_OK` (0x97)  | `ok(1)`                     | the `PROFILE` answer: 0 if malformed, unknown or refused (a full table) |
 
 The first frame **must** be `AUTH` (with the app_id). After that the app sends
 `SEND` frames and receives `RECV` frames from its section as they come. On the
@@ -365,6 +367,30 @@ pseudo is shown in the node's console and used by every app on it, so choosing
 it belongs to whoever runs the node, not to an app holding a connector token.
 Renaming goes through the console. Details:
 [`Docs/Pseudos/guide`](../Pseudos/guide).
+
+## Saying what your traffic needs (`PROFILE`)
+
+A call and a file transfer want opposite things from a link, and the node
+cannot tell them apart. An app that knows says so, per target and for a while:
+
+```python
+await client.set_profile(target, "realtime", ttl=60)   # a call starts
+...
+await client.set_profile(target, None)                  # it ends
+```
+
+| profile | what the node does for traffic to that target |
+|---|---|
+| `realtime` | resends a lost frame sooner over UDP, and sends down the best link of a bundle alone (no reordering from striping) |
+| `bulk` | asks TCP for the `bbr` congestion control where the kernel allows it, and keeps UDP's short resend timer |
+
+It is a hint: nothing about delivery is promised either way, and an app that
+says nothing gets what it always got. A declaration lasts `ttl` seconds (60 by
+default, at most 600) — declare it again to keep it — and goes when the last
+client of the app disconnects. It only affects this node's sending, so a call
+is declared on both ends. At most 64 targets per app; a full table answers no.
+See [`../Architecture/transports.md`](../Architecture/transports.md),
+"Traffic profiles".
 
 ## What an app is promised about delivery
 

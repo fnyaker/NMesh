@@ -24,6 +24,15 @@ _HIGH_WATER = 64 * 1024
 # that calls it lost, on a link that has lost nothing. Bounded here, the backlog
 # waits in the node's own buffer, where `send` sees it and pushes back.
 _UNSENT_KB = 128
+# The congestion control a link carrying bulk traffic asks for. A loss-based
+# controller (CUBIC, the usual default) reads every loss as congestion and
+# halves, so on a long wifi or VPN path that drops a little at random one
+# connection never fills the pipe — which is why a multi-stream speed test
+# beats a single stream there. BBR paces to the bottleneck it measures. Asked
+# for, never required: the kernel may not have it, or may not let an
+# unprivileged process choose it (`net.ipv4.tcp_allowed_congestion_control`),
+# and the link then keeps what it had.
+_BULK_CONGESTION = b"bbr"
 
 
 # The head of Linux's `struct tcp_info`: eight bytes, then twenty-four u32 up to
@@ -138,6 +147,10 @@ class TCPTransport(BaseTransport):
         # Why this link ended. See `BaseTransport.end_reason`.
         self._end_reason: str = ""
         self._busy_noted_at: float = -_SEND_WAIT
+        # What the traffic asks of this link (`set_profile`), and the congestion
+        # control the socket had before bulk traffic changed it.
+        self._profile: frozenset = frozenset()
+        self._congestion_before: bytes | None = None
 
     @classmethod
     def _from_accepted(cls, reader: asyncio.StreamReader,
@@ -309,6 +322,33 @@ class TCPTransport(BaseTransport):
 
         return {"local": name("sockname"), "remote": name("peername")}
 
+    def set_profile(self, profile: frozenset) -> None:
+        """Bulk traffic asks for `_BULK_CONGESTION`; without it the socket goes
+        back to the congestion control it had."""
+        self._profile = frozenset(profile)
+        socket_object = self._writer.get_extra_info("socket") if self._writer else None
+        import socket as _socket
+        option = getattr(_socket, "TCP_CONGESTION", None)
+        if socket_object is None or option is None:
+            return
+        try:
+            current = socket_object.getsockopt(
+                _socket.IPPROTO_TCP, option, 16).split(b"\0", 1)[0]
+            if "bulk" in self._profile:
+                if current != _BULK_CONGESTION:
+                    socket_object.setsockopt(_socket.IPPROTO_TCP, option,
+                                             _BULK_CONGESTION)
+                    self._congestion_before = current
+            elif self._congestion_before is not None:
+                socket_object.setsockopt(_socket.IPPROTO_TCP, option,
+                                         self._congestion_before)
+                self._congestion_before = None
+        except OSError as exc:
+            if self._congestion_before is None and "bulk" in self._profile:
+                self.note("bulk congestion control refused by the kernel",
+                          "info", wanted=_BULK_CONGESTION.decode(),
+                          error=str(exc)[:80])
+
     def stats(self) -> dict:
         """What the kernel is holding for us. The write buffer is the useful
         one: a number that stays high means this peer is not draining, which no
@@ -328,7 +368,16 @@ class TCPTransport(BaseTransport):
                     _socket.IPPROTO_TCP, _socket.TCP_NODELAY))
             except Exception:
                 pass
+            option = getattr(_socket, "TCP_CONGESTION", None)
+            if option is not None:
+                try:
+                    detail["congestion"] = socket_object.getsockopt(
+                        _socket.IPPROTO_TCP, option, 16).split(
+                            b"\0", 1)[0].decode("ascii", "replace")
+                except Exception:
+                    pass
             detail.update(_kernel_view(socket_object))
+        detail["profile"] = ", ".join(sorted(self._profile)) or "default"
         return detail
 
     async def close(self) -> None:

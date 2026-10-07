@@ -1896,6 +1896,76 @@ While profiling it: `process_ack` still copied the whole window's key list on
 every ACK, under a comment saying that copy had been removed. It walks the
 prefix it clears, now.
 
+## A timer that fired on every stall
+
+An idle UDP link through a VPN logged 404 retransmit timeouts in 575 s, 239 of
+them found spurious, with the timer at 55 ms beside probe round trips up to
+288 ms. Two things kept it there:
+
+- **The late frames were the ones it could not time.** With one frame in
+  flight — an idle link carries one probe at a time — a frame slower than the
+  timer is resent, Karn's rule forbids timing it, and F-RTO needs a second
+  frame to decide anything. The estimate only ever saw answers faster than the
+  timer. An ACK that arrives sooner after the resend than half the shortest
+  round trip the link has made cannot be the resend's, so it is the original's:
+  it is timed now, the timeout counts as spurious and the window cut is undone
+  (Allman & Paxson, 1999).
+- **A stall overruns any short timer.** That helped less than expected (a model
+  of the path, with the real `_ReliableLink` on a simulated clock: 1.05 → 0.97
+  timeouts a second), because in a wifi or VPN stall the resend waits in the
+  same queue as the original and the ACK comes long after both. Nothing below
+  the stall's length avoids that timeout.
+
+So the floor is chosen by the traffic. The same model, five seeds of five
+minutes each:
+
+| floor | idle, stalling path: useless resends | lone lost frame recovered, p99 (2 % loss) | bulk at 3 % / 10 % loss |
+|---|---|---|---|
+| 50 ms | 11.1 % of frames | 78 ms | 2.42 / 1.47 MB/s |
+| 200 ms | 2.8 % | 237 ms | 2.47 / 1.16 MB/s |
+
+Realtime and bulk traffic keep 50 ms — a gap in a call, a fifth of the
+throughput on a lossy path — and everything else waits 200 ms
+(`transports.md`, Traffic profiles). The earlier rejection of a 200 ms floor
+for everybody was right about the lossy path, and is why this is per traffic
+and not a constant.
+
+## A first backoff of a minute
+
+An integration test waiting thirty seconds for the MLO second link failed once
+in a full run on a loaded machine, and never again in sixty runs of its file.
+Read rather than rerun: one failed second-link dial set a backoff of
+`_MLO_DIAL_MIN` = 60 s before the next, so any lost first handshake made the
+test fail, and in the field cost a lossy pair a minute of bundle, then two, then
+four. The backoff now starts at 10 s and still doubles to fifteen minutes, so a
+dead address still costs little. `test_a_first_dial_that_fails_is_tried_again`
+fails on the old constant and passes on the new one; the original test also
+waits a sweep plus that first backoff, and says what it was waiting on when it
+gives up.
+
+## Console layout: four rules that undid another
+
+A pass over the console with a headless browser, at desktop and phone width,
+found every misalignment came from one rule silently overriding another:
+
+- **`.brand span` matched the mark.** The rule meant the subtitle ("Console");
+  the logo tile is a `span` too, so its `display:grid` became `block` and the
+  letters fell out of the tile, on every page. Now `.brand span span`.
+- **A `td` set to `display:flex`** (the fold button beside the node name) is no
+  longer a table cell: it kept its own height, its border ended short of the
+  row's, and its text sat off its neighbours' line. The flex box is a `span`
+  inside the cell now.
+- **`text-align:left` on a button does nothing**: buttons here are flex boxes,
+  so the node name in the top bar stayed centred and clipped at both ends on a
+  phone ("Running s d1d24a…" — the tail of "Atlas"). It is a block now, which
+  also lets the ellipsis appear.
+- **`dialog.full` out-ranked the phone rule** for a bare `dialog`, so the
+  full-screen map kept its desktop margin and a strip of page beside it.
+
+And one that is not a cascade: the map's edge labels sat two thirds out, where
+they ran into the names of the nodes at their ends; with few links they sit
+halfway, on a wider ring.
+
 ## A machine that slept, and links that did not know
 
 A laptop resumed after 6 872 s asleep. The node's two UDP links looked a second

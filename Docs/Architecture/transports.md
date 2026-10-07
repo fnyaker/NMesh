@@ -603,6 +603,16 @@ over it.
   benched, and gets "rescued" by a new link that drops the transfer it was
   carrying. Bounded, the backlog waits in the node's own buffer, where `send`
   sees it and pushes back. Best effort; zero leaves the kernel's limit.
+- **Bulk traffic asks for BBR** (`set_profile`, `_BULK_CONGESTION`). A link
+  carrying traffic an app declared bulk sets `TCP_CONGESTION` to `bbr`, and
+  sets back what it had when the declaration goes. A loss-based controller
+  (CUBIC) halves on every loss, so one connection over a long wifi or VPN path
+  that drops a little at random never fills the pipe — which is why a
+  multi-stream speed test beats a single stream there. Asked for, never
+  required: a kernel without it, or one that will not let an unprivileged
+  process choose it (`net.ipv4.tcp_allowed_congestion_control`), leaves the
+  link as it was and the log says so. `stats()` shows `congestion` and
+  `profile`.
 - `stats()` adds the kernel's own view on Linux (`TCP_INFO`, `TIOCOUTQ`): its
   round-trip estimate, retransmissions, lost segments, window and queue —
   retransmissions climbing on a link whose probes look fine is a lossy path,
@@ -627,9 +637,24 @@ UDP is connectionless and unreliable → a **reliability layer**:
   with this layer and one without still talk. Four rules, each one a collapse it
   ended (`gotchas.md`, "A burst that collapsed the UDP transport"):
   - the retransmit timer is **measured** (RFC 6298: smoothed round trip plus
-    four deviations, floored at `_RTO_MIN`, `_RTO_INITIAL` before the first
-    sample, never timed off a resent frame) and **backs off once per timeout of
-    the oldest frame** — never once per frame lost;
+    four deviations, `_RTO_INITIAL` before the first sample, never timed off a
+    resent frame — except below) and **backs off once per timeout of the oldest
+    frame** — never once per frame lost. Its **floor depends on the traffic**
+    (`set_profile`): 50 ms (`_RTO_MIN`) for a link carrying traffic declared
+    realtime or bulk, 200 ms (`_RTO_FLOOR`) otherwise. A wifi or VPN path
+    stalls for a few hundred milliseconds now and then, and any timer shorter
+    than the stall resends frames that were only late; an idle link at a 50 ms
+    floor resent 12 % of its frames for nothing. Waiting longer costs the
+    recovery of a frame that really was lost (p99 78 → 237 ms on a 2 % lossy
+    path) and, on a very lossy one, throughput (−21 % at 10 % loss) — which is
+    why the traffic that cares keeps the short floor (`gotchas.md`, "A timer
+    that fired on every stall");
+  - **a late original is timed**: an ACK for a resent frame that arrives sooner
+    after the resend than half the shortest round trip the link has made
+    (`_min_rtt`) cannot answer the resend, so it answers the original. It is
+    timed, the timeout counts as spurious, and the window cut is undone
+    (Allman & Paxson, 1999). F-RTO needs a second frame in flight to decide,
+    and an idle link rarely has one;
   - a **congestion window** in bytes (`_CWND_*`): slow start from 64 kB, one
     `_CWND_STEP` per round trip past the threshold, **halved once per loss
     event** — a loss among frames sent before the last reduction is the same
@@ -1055,6 +1080,41 @@ then means the same thing at any cadence — which is the point, and neither hal
 alone gets there: the run alone cuts a fast-probed link for a hiccup, and the
 silence alone cuts a link on a very slow medium that nobody has probed yet.
 
+## Traffic profiles (`mesh/traffic.py`, `MeshNode.set_traffic_profile`)
+
+A call and a file want opposite things from a link, and the node cannot tell
+them apart: both are encrypted DATA to one peer. So an app **says** what its
+traffic to one node needs — `realtime` (a lost packet back fast, no
+reordering) or `bulk` (the most a long path carries) — for a while
+(`DEFAULT_TTL` 60 s, at most `MAX_TTL` 600 s, renewed by declaring again), over
+the data connector's `PROFILE` frame or `ConnectorClient.set_profile`.
+**Optional by design**: each mechanism costs something somebody else pays, so
+nothing changes for traffic nobody declared.
+
+| profile | UDP | TCP | MLO |
+|---|---|---|---|
+| none | timer floor 200 ms | as configured | striped |
+| `realtime` | timer floor 50 ms | as configured | best link alone |
+| `bulk` | timer floor 50 ms | `bbr` congestion control | striped |
+
+- **Which links.** A profile is declared for a *target*; the links told are all
+  the links to whichever node leads the way there — the target itself when we
+  hold a link to it, the first hop otherwise (`_apply_traffic_profiles`). Run
+  when a declaration changes, when a link comes up, and on the keepalive sweep,
+  which is where expiry and a changed route are noticed. A link is told only
+  when what it carries changed (`medium.set_profile`, `BaseTransport.set_profile`:
+  a hint any medium may ignore).
+- **Bounded, never evicting.** `MAX_PER_APP` targets per app, `MAX_TARGETS` in
+  all; a full table refuses rather than pushing another app's declaration out.
+  The last client of an app disconnecting takes its declarations with it.
+- **Local.** Nothing is sent to the peer: each side's sender is the one that
+  decides how it resends, so each side's app declares for its own direction —
+  a call is placed on both ends.
+- **Who declares.** `call` declares realtime while it streams; chat's file
+  transfer declares bulk while a file of more than one chunk goes; the speed
+  test declares bulk while it loads a link (`profile: "default"` measures the
+  link as undeclared traffic finds it).
+
 ## The keepalive accord (`mlo.accord`, `KA_PROPOSE` / `KA_REQUEST`)
 
 A cadence is a cost, and it is paid by **both** ends: the prober spends the
@@ -1417,7 +1477,10 @@ addresses **already known for that identity** (like the retry loop and the
 console's button — "type a host and the node connects to it" is a different
 feature with a different threat model), the far end must still prove it is that
 identity, one dial per pass, `_MLO_DIAL_FLOOR` between passes, an exponential
-backoff per identity from `_MLO_DIAL_MIN` to `_MLO_DIAL_MAX`, and both books
+backoff per identity from `_MLO_DIAL_MIN` (10 s) to `_MLO_DIAL_MAX` (15 min),
+doubling — a single lost handshake retries within a sweep, a dead address soon
+costs one dial a quarter hour (it started at a minute, and one lost handshake
+cost a minute of bundle, then two, then four: `BUGSVULNS.MD` 73) — and both books
 bounded at `_MLO_DIAL_TRACKED`. It asks for nothing at all while the node is
 asleep: the link it would open exists to be probed ten times a second.
 
@@ -1497,6 +1560,30 @@ each one on its own is enough to keep a node bundling for ever.
 
 An operator who wants a node bundling regardless of any of this says so:
 `mlo_always`.
+
+Realtime traffic is **not striped** (`_stripe`): striped packets arrive out of
+order, and whatever plays them in order waits for the slower link's, which a
+call hears as jitter. A target whose traffic an app declared realtime
+(`set_traffic_profile`) goes down the best link of its bundle alone; the bundle
+is still formed and measured, and every other target still spreads.
+
+### What the map says about a link
+
+`node.state` carries, on each direct node of `topology.direct`, a `state`
+decided by `_link_state` from the same places the node acts on — never
+re-derived by the page:
+
+| field | values |
+|---|---|
+| `quality` | `clean`, `lossy` (≥ `_LINK_LOSSY_SHARE` of recent probes lost, or jitter past `_LINK_JITTER_MS`), `failing` (the sweep's own `_link_is_failing`) |
+| `mlo` | `null`, `seeking` (one link, a second one asked for; `retry_in` seconds after a failed ask), `forming` (two links or more, the bundle measuring them), `active` (the bundle carries on every member), `degraded` (a member benched), `parallel` (several links, none bundleable) |
+| `loss` | the recent share lost, the figure every label on the map reads |
+| `links`, `carrying` | how many links there are, and how many carry |
+| `profile` | the traffic profiles declared for that node |
+
+The map draws `lossy` amber and `failing` red and dashed, and a second line
+beside the link for MLO: solid for `active`, dashed amber for `degraded`, dashed
+for `forming`, dotted for `seeking`.
 
 ### The contract this puts on apps
 

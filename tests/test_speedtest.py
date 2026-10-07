@@ -500,3 +500,37 @@ class TestTheAskingSideKnowsTheFarEndsCeiling:
             assert len(node._speed_spent) <= _MAX_PEERS
         finally:
             await node.stop()
+
+
+class TestItMeasuresTheLinkSetUpForThroughput:
+    """A speed test asks how much a link carries, which is what bulk traffic
+    gets out of it: it declares bulk while it runs, and takes it back."""
+
+    async def _measure(self, **kwargs):
+        node = await _node()
+        link = _Echoing(node)
+        seen = []
+        link.transport.set_profile = seen.append
+        node._peers.append(link)
+        try:
+            answer = await node.console_speedtest(
+                link.authenticated_id.raw.hex(), **kwargs)
+            return node, link, seen, answer
+        finally:
+            node._peers.remove(link)
+            await node.stop()
+
+    async def test_bulk_while_it_runs_and_nothing_after(self):
+        node, link, seen, answer = await self._measure()
+        assert answer["ok"] is True and answer["profile"] == "bulk"
+        assert seen == [frozenset({"bulk"}), frozenset()]
+        assert not node._traffic
+
+    async def test_default_measures_the_link_as_it_is(self):
+        node, link, seen, answer = await self._measure(profile="default")
+        assert answer["ok"] is True and answer["profile"] == "default"
+        assert seen == []
+
+    async def test_an_unknown_profile_is_refused(self):
+        node, link, seen, answer = await self._measure(profile="turbo")
+        assert answer["ok"] is False and seen == []
