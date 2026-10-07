@@ -2944,6 +2944,8 @@ class MeshNode:
                 "agreed_fast_ms": agreed.fast_ms if agreed else None,
                 "agreed_slow_ms": agreed.slow_ms if agreed else None,
                 "skew_ms": round(bundle.skew_ms, 2),
+                "apart_ms": (None if bundle.apart_ms is None
+                             else round(bundle.apart_ms, 2)),
                 "reorder_ms": round(bundle.reorder_ms, 2),
                 "members": members,
             })
@@ -5589,6 +5591,8 @@ class MeshNode:
         * ``seeking`` — one link, and a second one is being asked for
           (``retry_in`` seconds if the last ask failed);
         * ``forming`` — two links or more, the bundle still measuring them;
+        * ``apart`` — two measured links, further apart than the skew a bundle
+          allows (``apart_ms`` says by how much);
         * ``active`` — the bundle carries the traffic on every member;
         * ``degraded`` — a member is benched for losing, the rest carry;
         * ``parallel`` — several links, none of them bundleable."""
@@ -5603,11 +5607,16 @@ class MeshNode:
             quality = "clean"
         links = len(self._direct_links_to(node_id))
         bundle = self._bundles.get(node_id)
-        mlo_state, retry_in = None, None
+        mlo_state, retry_in, apart_ms = None, None, None
         if bundle is not None and (bundle.active or bundle.benched()):
             mlo_state = "degraded" if bundle.benched() else "active"
         elif links >= 2:
-            mlo_state = "forming" if bundle is not None else "parallel"
+            if bundle is None:
+                mlo_state = "parallel"
+            elif bundle.apart_ms is not None:
+                mlo_state, apart_ms = "apart", round(bundle.apart_ms, 1)
+            else:
+                mlo_state = "forming"
         elif node_id in self._mlo_short or node_id in self._mlo_dial_log:
             mlo_state = "seeking"
             until = self._mlo_dial_log.get(node_id, (0, 0.0))[1]
@@ -5616,6 +5625,7 @@ class MeshNode:
         return {"quality": quality,
                 "loss": None if recent is None else round(recent, 3),
                 "links": links, "mlo": mlo_state, "retry_in": retry_in,
+                "apart_ms": apart_ms,
                 "carrying": len(bundle.keys) if bundle is not None and bundle.keys else 1,
                 "profile": sorted(self._traffic.of(node_id.raw))}
 
