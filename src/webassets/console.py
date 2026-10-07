@@ -1387,7 +1387,7 @@ CONSOLE_PAGE_CSS = """
 .mesh-graph .edge.twin.forming{stroke:var(--accent);stroke-dasharray:4 4;opacity:.7}
 .mesh-graph .edge.twin.seeking{stroke:var(--text-faint);stroke-dasharray:1 4;
   stroke-linecap:round}
-.mesh-graph .edge.twin.parallel{stroke:var(--border-strong)}
+.mesh-graph .edge.twin.parallel,.mesh-graph .edge.twin.apart{stroke:var(--border-strong)}
 #map-svg .edge.twin{vector-effect:non-scaling-stroke}
 .map-link .mlo.ok{color:var(--ok)}
 .map-link .mlo.warn{color:var(--warn)}
@@ -2076,6 +2076,7 @@ function edgeHealth(node){
 const MLO_WORDS = {
   seeking: "looking for a second link",
   forming: "second link up, measuring",
+  apart: "two links, too far apart to bundle",
   active: "bundled",
   degraded: "bundled, a link benched for losing",
   parallel: "several links, not bundled",
@@ -2086,6 +2087,8 @@ function mloWords(node){
   if(state.mlo === "active") return "bundled on " + state.carrying + " links";
   if(state.mlo === "seeking" && state.retry_in)
     return MLO_WORDS.seeking + ", next try in " + fmtDuration(state.retry_in);
+  if(state.mlo === "apart" && state.apart_ms != null)
+    return "two links " + state.apart_ms + " ms apart, more than a bundle allows";
   return MLO_WORDS[state.mlo] || state.mlo;
 }
 
@@ -2093,7 +2096,8 @@ function edgeLabelText(node){
   const quality = node.quality || {}, state = node.state || {};
   const loss = state.loss == null ? quality.loss : state.loss;
   const mlo = {active: "MLO ×" + (state.carrying || 2), degraded: "MLO, 1 benched",
-               forming: "MLO measuring", seeking: "MLO seeking"}[state.mlo];
+               forming: "MLO measuring", seeking: "MLO seeking",
+               apart: "MLO apart"}[state.mlo];
   return (node.transport || "?") +
     (node.rtt_ms == null ? "" : " · " + node.rtt_ms + " ms") +
     (loss ? " · " + Math.round(loss * 100) + "% loss" : "") +
@@ -2777,7 +2781,8 @@ function groupValues(group, out){
   const mlo = ((drawn || {}).state || {}).mlo;
   out[key + ":mlo"] = {html: mlo && mlo !== "parallel"
     ? badge({active: "MLO bundled", degraded: "MLO, 1 benched",
-             forming: "MLO measuring", seeking: "MLO seeking"}[mlo] || mlo,
+             forming: "MLO measuring", seeking: "MLO seeking",
+             apart: "MLO apart"}[mlo] || mlo,
             {active: "ok", degraded: "warn"}[mlo] || "")
     : ""};
   return out;
