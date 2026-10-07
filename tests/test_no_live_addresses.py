@@ -16,7 +16,6 @@ pattern to check — `AGENTS.md` says so where incidents are written.
 import ipaddress
 import pathlib
 import re
-import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 _LITERAL = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
@@ -30,11 +29,21 @@ _TEXT = (".py", ".md", ".MD", ".sh", ".txt", ".yml", ".yaml", ".toml", ".js",
          ".html", ".css", ".json", ".cfg", ".conf")
 
 
+# Walked rather than asked of git: CI runs the suite in a container where the
+# checkout belongs to another user, and git refuses to answer there.
+_SKIP = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules",
+         "build", "dist", ".claude", ".mypy_cache", ".ruff_cache"}
+
+
 def _tracked() -> list[pathlib.Path]:
-    out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
-                         text=True, check=True).stdout.split("\n")
-    return [ROOT / name for name in out
-            if name.endswith(_TEXT) or "." not in pathlib.Path(name).name]
+    found = []
+    for path in ROOT.rglob("*"):
+        if any(part in _SKIP or part.endswith(".egg-info")
+               for part in path.relative_to(ROOT).parts):
+            continue
+        if path.is_file() and (path.suffix in _TEXT or not path.suffix):
+            found.append(path)
+    return found
 
 
 def _real(literal: str) -> bool:
