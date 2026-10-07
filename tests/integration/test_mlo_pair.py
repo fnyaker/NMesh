@@ -212,8 +212,13 @@ class TestTheSecondLinkOpensItself:
             assert list(guest._mlo_short) == [host.id]
             guest._mlo_dial_wakeup.set()
 
-            assert await _wait(lambda: len(_links_to(guest, host.id)) >= 2), \
-                "the node never opened the second link itself"
+            # A sweep plus the first backoff: the first dial may be lost.
+            assert await _wait(lambda: len(_links_to(guest, host.id)) >= 2,
+                               timeout=45.0), (
+                "the node never opened the second link itself: "
+                f"dials {dict(guest._dial_log.get(host.id.hex(), {}))}, "
+                f"known {guest._known_addresses(host.id)}, "
+                f"short {list(guest._mlo_short)}, mlo {guest.mlo_status()}")
             assert {peer.remote_addr.split("://")[0]
                     for peer in _links_to(guest, host.id)} == {"tcp", "udp"}
 
@@ -224,6 +229,33 @@ class TestTheSecondLinkOpensItself:
             guest._update_bundles()
             bundle = guest._bundles.get(host.id)
             assert bundle is not None and bundle.active, guest.mlo_status()
+        finally:
+            await guest.stop()
+            await host.stop()
+
+    async def test_a_first_dial_that_fails_is_tried_again(self):
+        """One lost handshake used to cost a minute of backoff, and a pair that
+        lost its first try stayed unbundled for it (BUGSVULNS 73)."""
+        host, guest = await _one_linked_pair("127.0.0.1:19471", "127.0.0.1:19472")
+        real_dial, failed = guest._dial_uri, []
+
+        async def lose_the_first(node_id, uri, timeout=None):
+            if not failed:
+                failed.append(uri)
+                return None
+            return await real_dial(node_id, uri, timeout)
+
+        guest._dial_uri = lose_the_first
+        try:
+            assert await _wait(lambda: any(
+                uri.startswith("udp://")
+                for uri in guest._known_addresses(host.id)))
+            guest._update_bundles()
+            guest._mlo_dial_wakeup.set()
+            assert await _wait(lambda: len(_links_to(guest, host.id)) >= 2,
+                               timeout=45.0), dict(
+                guest._dial_log.get(host.id.hex(), {}))
+            assert failed
         finally:
             await guest.stop()
             await host.stop()

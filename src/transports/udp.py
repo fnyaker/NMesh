@@ -90,7 +90,15 @@ _MAX_SEND_QUEUE = 128       # max packets waiting to be framed and sent
 # raises then is `LinkBusy`, never `ConnectionError`: the link is full, not gone,
 # and the caller that read "gone" tore down a working link under load.
 _SEND_WAIT = 10.0
-_RTO_MIN = 0.050            # floor of the retransmit timeout, seconds
+# Floors of the retransmit timeout, seconds. A short timer recovers a lost
+# frame sooner and resends frames that were only late: a wifi or VPN path that
+# stalls for a few hundred milliseconds overruns any timer shorter than the
+# stall. Traffic declared realtime (a lost frame is a gap in a call) or bulk (a
+# timer waiting on a lossy path is throughput lost) keeps 50 ms; a link carrying
+# neither waits at least 200 ms and leaves most stalls alone (`gotchas.md`, "A
+# timer that fired on every stall").
+_RTO_MIN = 0.050
+_RTO_FLOOR = 0.200
 _RTO_INITIAL = 0.200        # before the first round trip has been measured
 _RTO_MAX = 2.0              # max retransmit timeout after backoff
 # The congestion window, in bytes of frames in flight. It starts small, doubles
@@ -157,7 +165,7 @@ class _Sent:
     """One frame in flight: what to resend, when, and whether its round trip
     can still be trusted as a measurement (Karn: never time a retransmit)."""
 
-    __slots__ = ("frame", "deadline", "sent_at", "resent", "fast")
+    __slots__ = ("frame", "deadline", "sent_at", "resent", "fast", "resent_at")
 
     def __init__(self, frame: bytes, deadline: float, sent_at: float) -> None:
         self.frame = frame
@@ -165,6 +173,7 @@ class _Sent:
         self.sent_at = sent_at
         self.resent = False
         self.fast = False
+        self.resent_at = 0.0
 
 
 def _grow_buffers(transport) -> None:
@@ -213,7 +222,13 @@ class _ReliableLink:
         # oldest frame and resets on the next clean measurement.
         self._srtt: float | None = None
         self._rttvar: float = 0.0
+        # The shortest round trip measured on this link: no answer to a resend
+        # can come back faster than half of it (`_acknowledge`).
+        self._min_rtt: float | None = None
+        # Set when an ACK proved a resend needless; read once per ACK.
+        self._late_original: bool = False
         self._rto_base: float = _RTO_INITIAL
+        self._rto_floor: float = _RTO_FLOOR
         self._backoff: int = 1
         self._rto: float = _RTO_INITIAL
         # Congestion control. `_recover` is the first sequence sent after the
@@ -399,7 +414,10 @@ class _ReliableLink:
                     if entry is not None:
                         acked += self._acknowledge(entry, now)
 
-        if self._frto:
+        if self._late_original:
+            self._late_original = False
+            self._needless_timeout()
+        elif self._frto:
             self._frto_step(advanced, sack, now)
         if acked:
             self._grow(acked)
@@ -429,10 +447,18 @@ class _ReliableLink:
             self._frto = 2
             return
         if self._frto == 2:
+            self._needless_timeout()
+            return
+        self._frto = 0
+        self._undo = None
+
+    def _needless_timeout(self) -> None:
+        """The originals were only late: count it and undo the cut, once."""
+        if self._frto or self._undo is not None:
             self.spurious += 1
-            if self._undo is not None:
-                self._cwnd = max(self._cwnd, self._undo[0])
-                self._ssthresh = max(self._ssthresh, self._undo[1])
+        if self._undo is not None:
+            self._cwnd = max(self._cwnd, self._undo[0])
+            self._ssthresh = max(self._ssthresh, self._undo[1])
         self._frto = 0
         self._undo = None
 
@@ -452,29 +478,54 @@ class _ReliableLink:
         return any(self._before_recover(seq) for seq in self._unacked)
 
     def _acknowledge(self, entry: _Sent, now: float) -> int:
-        """Retire one frame; time it if its round trip means anything."""
+        """Retire one frame; time it if its round trip means anything.
+
+        Karn's rule forbids timing a resent frame, since the ACK cannot say
+        which copy it answers — except when it arrives sooner after the resend
+        than half the shortest round trip this link has ever made: then it
+        answers the original, which was late, not lost (Allman & Paxson, 1999).
+        With one frame in flight — an idle link carrying its probes — the
+        frames slower than the timer are exactly the ones resent and F-RTO
+        needs a second frame to decide, so this is the only way such a link
+        learns how late its path gets."""
         self._inflight -= len(entry.frame)
         if not entry.resent:
             self._sample(now - entry.sent_at)
+        elif (self._min_rtt is not None
+                and now - entry.resent_at < self._min_rtt / 2):
+            self._sample(now - entry.sent_at)
+            self._late_original = True
         return len(entry.frame)
 
     def _sample(self, rtt: float) -> None:
-        """RFC 6298, with a floor of `_RTO_MIN` rather than a second: a mesh
-        link across a room must not wait a second to resend.
+        """RFC 6298, with a floor of `_RTO_FLOOR` (`_RTO_MIN` for declared
+        traffic) rather than a second: a mesh link across a room must not wait
+        a second to resend.
 
         The only thing that brings a backed-off timer back down. A window that
         merely emptied says nothing about the path, and resetting there would
         put the timer back on the estimate that had just fired too early."""
         rtt = max(0.0, rtt)
+        if self._min_rtt is None or rtt < self._min_rtt:
+            self._min_rtt = rtt
         if self._srtt is None:
             self._srtt, self._rttvar = rtt, rtt / 2
         else:
             self._rttvar = 0.75 * self._rttvar + 0.25 * abs(self._srtt - rtt)
             self._srtt = 0.875 * self._srtt + 0.125 * rtt
-        self._rto_base = min(_RTO_MAX, max(
-            _RTO_MIN, self._srtt + max(_RTX_CHECK, 4 * self._rttvar)))
         self._backoff = 1
-        self._rto = self._rto_base
+        self._set_timer()
+
+    def _set_timer(self) -> None:
+        self._rto_base = min(_RTO_MAX, max(
+            self._rto_floor, self._srtt + max(_RTX_CHECK, 4 * self._rttvar)))
+        self._rto = min(_RTO_MAX, self._rto_base * self._backoff)
+
+    def set_rto_floor(self, floor: float) -> None:
+        """The shortest the timer may run, applied now, not at the next ACK."""
+        self._rto_floor = floor
+        if self._srtt is not None:
+            self._set_timer()
 
     def _grow(self, acked: int) -> None:
         if self._cwnd < self._ssthresh:
@@ -512,6 +563,7 @@ class _ReliableLink:
             if entry is None or entry.fast:
                 continue
             entry.fast = entry.resent = True
+            entry.resent_at = now
             entry.deadline = now + self._rto
             self._loss(seq, timeout=False)
             frames.append(entry.frame)
@@ -555,6 +607,7 @@ class _ReliableLink:
                     for _, entry in expired:
                         entry.deadline = now + self._rto
                     first.resent = True
+                    first.resent_at = now
                     self.retransmits += 1
                     return [first.frame]
             # The resend itself was lost, or the frames held back by the
@@ -569,6 +622,7 @@ class _ReliableLink:
                 continue              # deferred to the next round, not lost
             budget -= len(entry.frame)
             entry.resent = True
+            entry.resent_at = now
             frames.append(entry.frame)
         self.retransmits += len(frames)
         return frames
@@ -809,6 +863,8 @@ class UDPTransport(BaseTransport):
         self._on_datagram = None
         # Delivered payloads that were not decodable packets. See _process_frame.
         self.undecodable: int = 0
+        # What the traffic on this link asks of it (`set_profile`).
+        self._profile: frozenset = frozenset()
         # Why this link ended, said by whatever ended it. A receive loop that
         # ends on a bare "closed" is a link dropped for a reason nobody can
         # read afterwards — and "the peer said goodbye", "the peer went silent
@@ -845,6 +901,11 @@ class UDPTransport(BaseTransport):
     def end_reason(self) -> str:
         return self._end_reason
 
+    def set_profile(self, profile: frozenset) -> None:
+        """Declared traffic gets the short timer floor; see `_RTO_FLOOR`."""
+        self._profile = frozenset(profile)
+        self._link.set_rto_floor(_RTO_MIN if self._profile else _RTO_FLOOR)
+
     def endpoints(self) -> dict:
         local = None
         if self._sock is not None:
@@ -875,6 +936,8 @@ class UDPTransport(BaseTransport):
             "timeouts": link.timeouts,
             "spurious timeouts": link.spurious,
             "undecodable": self.undecodable,
+            "segments": link.peer_reassembles,
+            "profile": ", ".join(sorted(self._profile)) or "default",
         }
 
     @classmethod

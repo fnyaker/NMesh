@@ -104,6 +104,9 @@ _CHUNK = struct.Struct("!II")
 _FRAME = struct.Struct("!IIQ")
 
 FILE_CHUNK_SIZE = 48_000
+# A file of several chunks is declared bulk traffic while it goes, renewed this
+# often so a long transfer never outlives its declaration.
+_PROFILE_RENEW_CHUNKS = 256
 _MAX_FILE = 256 * 1024 * 1024
 # Derived from the chunk the sender actually uses, not from a round number: at
 # 1024 the ceiling was 48x what any real file needs, and since nothing bounded a
@@ -386,10 +389,30 @@ class ChatApp:
                  + _OFFER.pack(tid, len(pieces), len(data), digest, len(name_b))
                  + name_b)
         await self._client.send(target, offer)
-        for i, piece in enumerate(pieces):
-            await self._client.send(
-                target, bytes([_FILE_CHUNK]) + _CHUNK.pack(tid, i) + piece)
+        bulk = len(pieces) > 1
+        try:
+            for i, piece in enumerate(pieces):
+                if bulk and i % _PROFILE_RENEW_CHUNKS == 0:
+                    await self.declare_traffic(target, "bulk")
+                await self._client.send(
+                    target, bytes([_FILE_CHUNK]) + _CHUNK.pack(tid, i) + piece)
+        finally:
+            if bulk:
+                await self.declare_traffic(target, None)
         return mid
+
+    async def declare_traffic(self, target: NodeID, profile: str | None,
+                              ttl: float = 60.0) -> bool:
+        """Tell the node what this traffic to ``target`` needs (`set_profile`
+        on the connector). A client that cannot say it, or a node that
+        refuses, changes nothing: the traffic goes as it always did."""
+        declare = getattr(self._client, "set_profile", None)
+        if declare is None:
+            return False
+        try:
+            return bool(await declare(target, profile, ttl))
+        except Exception:
+            return False
 
     async def send_frame(self, target: NodeID, stream_id: int, seq: int,
                          payload: bytes) -> None:

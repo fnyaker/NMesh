@@ -355,7 +355,11 @@ scope. Add yours.
 - **`pkill -f` with a pattern the shell running it also matched.** It killed
   its own command, so an edit queued after it in the same command never ran,
   and the next test run tested the old file. → Kill by PID, or never put work
-  after a `pkill` in one command.
+  after a `pkill` in one command. **And the PID must not come from `pgrep -f`
+  either**: the same agent later ran `for p in $(pgrep -f devmesh.py); do kill
+  $p; done`, the loop's own shell matched, and it killed itself the same way.
+  Take the PID the background task reported, or match with `ps … | grep
+  "[d]evmesh"`, whose pattern does not match its own text.
 - **A clock patched through a module that shares it.** `monkeypatch.setattr(
   node_mod.time, "monotonic", …)` replaces `time.monotonic` for the whole
   process, the event loop's clock included: every `sleep` and `wait_for` froze
@@ -366,6 +370,10 @@ scope. Add yours.
   ran, correctly — the budget gives back what a test did not send, and the two
   before had sent 408 probes, not 1 030. → Before predicting a limit's verdict,
   add up what the code counts, not what it could have counted.
+- **The F-RTO slip, once more.** A new test asserted the congestion window
+  *equal* to its value before a spurious timeout; the cut was undone and the
+  ACK then grew the window, as it must. Caught by the run, fixed to `>=`. →
+  The rule above it already said so: assert the property the test is named for.
 - **An empty log answer read as "nothing happened".** After a restart the log
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not

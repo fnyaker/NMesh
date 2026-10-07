@@ -32,7 +32,7 @@ from src.node import (MeshNode, _Peer, KA_PROPOSE, KA_REQUEST, PING, PONG,
                       _KA_TICK_FLOOR, _KA_TOKEN, _KA_WANTED,
                       _LINK_KEEPALIVE_INTERVAL,
                       _decode_addresses_at, _decode_ping_tail)
-from src.node import _MLO_DIAL_TRACKED
+from src.node import _MLO_DIAL_MAX, _MLO_DIAL_TRACKED
 from src.node_id import NodeID
 from src.packet import Packet
 from tests.conftest import FakeServer, FakeTransport, make_manager
@@ -1388,6 +1388,22 @@ class TestOpeningTheSecondLink:
         assert tried == ["fake2://b:2"]
         assert node._mlo_dial_log[TARGET][0] == 1
 
+    async def test_one_failed_dial_is_asked_again_soon(self):
+        """A first backoff of a minute turned one handshake lost on a loaded or
+        lossy path into a minute without a bundle, then two, then four — and
+        an integration test waiting thirty seconds for the second link failed
+        on exactly that (BUGSVULNS 73). Only a dead address should cost much."""
+        node = _node()
+        self._lonely(node)
+        _dials(node)
+        node._update_bundles()
+        await node._mlo_second_link_pass()
+        assert node._mlo_dial_log[TARGET][1] - time.monotonic() <= 15.0
+        for _ in range(10):
+            node._note_mlo_dial(TARGET, False)
+        assert (node._mlo_dial_log[TARGET][1] - time.monotonic()
+                == pytest.approx(_MLO_DIAL_MAX, abs=1.0))
+
     async def test_an_address_that_failed_goes_behind_the_others(self):
         """Always taking the first sent a live node back to one private address
         of a peer's, unreachable from here, at every backoff for as long as it
@@ -1518,3 +1534,81 @@ class TestAMemberSaysWhereItGoes:
             ["fake://a:1", "udp://9.9.9.9:9001"]
         assert dialled.remote_addr == "fake://a:1"
         await node.stop()
+
+
+class TestTheMapIsToldWhatTheWayToANodeIsDoing:
+    """`_link_state`: decided once, on the node, from what the node acts on —
+    so the drawing cannot say a pair is bundled while the node is not striping."""
+
+    def _state(self, node, peer):
+        return node._link_state(peer, time.monotonic())
+
+    def test_a_clean_single_link_says_nothing_about_mlo(self):
+        node = _node()
+        peer = _link(node, mean_ms=10.0, probes=50)
+        state = self._state(node, peer)
+        assert state["quality"] == "clean" and state["mlo"] is None
+        assert state["links"] == 1
+
+    def test_one_link_short_of_a_bundle_is_seeking(self):
+        node = _node()
+        TestOpeningTheSecondLink()._lonely(node)
+        node._update_bundles()
+        peer = node._direct_links_to(TARGET)[0]
+        assert self._state(node, peer)["mlo"] == "seeking"
+
+    async def test_after_a_failed_ask_it_says_when_it_tries_again(self):
+        node = _node()
+        TestOpeningTheSecondLink()._lonely(node)
+        _dials(node)
+        node._update_bundles()
+        await node._mlo_second_link_pass()
+        state = self._state(node, node._direct_links_to(TARGET)[0])
+        assert state["mlo"] == "seeking" and 0 < state["retry_in"] <= 10
+
+    def test_a_carrying_bundle_is_active(self):
+        node = _node()
+        _second_medium(node)
+        _ready(node, "fake", "fake2")
+        node.note_awake("test")
+        first = _link(node, uri="fake://a:1", mean_ms=10.0, probes=50)
+        _link(node, uri="fake2://b:2", mean_ms=11.0, probes=50)
+        node._update_bundles()
+        state = self._state(node, first)
+        assert state["mlo"] == "active" and state["carrying"] == 2
+
+    def test_a_benched_member_is_degraded(self):
+        node = _node()
+        _second_medium(node)
+        _ready(node, "fake", "fake2")
+        node.note_awake("test")
+        first = _link(node, uri="fake://a:1", mean_ms=10.0, probes=50)
+        _link(node, uri="fake2://b:2", mean_ms=11.0, probes=50, drop=0.5)
+        node._update_bundles()
+        assert self._state(node, first)["mlo"] == "degraded"
+
+    def test_two_links_nobody_may_bundle_are_parallel(self):
+        node = _node()
+        first = _link(node, uri="fake://a:1", mean_ms=10.0, probes=50)
+        _link(node, uri="fake://b:2", mean_ms=11.0, probes=50)
+        node._update_bundles()
+        assert self._state(node, first)["mlo"] == "parallel"
+
+    def test_losing_some_is_lossy_and_losing_much_is_failing(self):
+        node = _node()
+        some = _link(node, mean_ms=10.0, probes=50, drop=0.06)
+        much = _link(node, OTHER, uri="fake://c:3", mean_ms=10.0, probes=50, drop=0.5)
+        assert self._state(node, some)["quality"] == "lossy"
+        assert self._state(node, much)["quality"] == "failing"
+
+    def test_the_declared_profile_is_shown(self):
+        node = _node()
+        peer = _link(node, mean_ms=10.0, probes=50)
+        node.set_traffic_profile(b"A" * 8, TARGET, "realtime", 30)
+        assert self._state(node, peer)["profile"] == ["realtime"]
+
+    def test_the_topology_carries_it(self):
+        node = _node()
+        _link(node, mean_ms=10.0, probes=50)
+        direct = node._console_topology(time.monotonic())["direct"]
+        assert direct[0]["state"]["quality"] == "clean"
