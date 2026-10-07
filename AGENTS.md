@@ -374,6 +374,13 @@ scope. Add yours.
   *equal* to its value before a spurious timeout; the cut was undone and the
   ACK then grew the window, as it must. Caught by the run, fixed to `>=`. →
   The rule above it already said so: assert the property the test is named for.
+- **A side effect cut without asking who lived on it.** To stop lookups
+  dialling nodes long gone, an agent made only conversations buy a direct
+  dial — and the dial a lookup bought was how two nodes sharing only a relay
+  became neighbours; `test_idle_chatter` failed every time. The fix kept the
+  dial and refused it only towards the gone. → Before removing what a path
+  does on the side, find what depends on it happening: grep its effect, and
+  run the integration suite before calling it done.
 - **An empty log answer read as "nothing happened".** After a restart the log
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not

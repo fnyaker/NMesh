@@ -32,6 +32,7 @@ FIELDS = (
     "dynamic_address",
     "update_check_minutes",
     "update_when_active",
+    "route_hold_minutes",
 )
 
 LOWEST = 1
@@ -50,38 +51,45 @@ HIGHEST = 10
 PROFILES = {
     1: ("Minimal", "Spends as little as it can. Connections are checked about "
         "once a minute, two connections to one node are never combined, and "
-        "updates are looked for once a day, only while the node is in use.",
-        (2000, 5000, 60000, 120000, False, False, 1440, True)),
+        "updates are looked for once a day, only while the node is in use. "
+        "A node reached through a relay keeps it for an hour.",
+        (2000, 5000, 60000, 120000, False, False, 1440, True, 60)),
     2: ("Frugal", "Connections checked every 45 seconds or so, never "
-        "combined. Updates twice a day, only while the node is in use.",
-        (1500, 5000, 45000, 90000, False, False, 720, True)),
+        "combined. Updates twice a day, only while the node is in use. A "
+        "relay is kept for an hour.",
+        (1500, 5000, 45000, 90000, False, False, 720, True, 60)),
     3: ("Saving", "Connections checked every half minute at rest. Two "
         "connections to one node may be combined, tested twice a second at "
-        "most. Updates every four hours while in use.",
-        (500, 3000, 30000, 60000, False, False, 240, True)),
+        "most. Updates every four hours while in use. A relay is kept "
+        "for half an hour.",
+        (500, 3000, 30000, 60000, False, False, 240, True, 30)),
     4: ("Light", "Connections checked every 25 seconds at rest. Hourly "
-        "updates while in use.",
-        (250, 2000, 25000, 40000, False, False, 60, True)),
+        "updates while in use. A relay is kept for half an hour.",
+        (250, 2000, 25000, 40000, False, False, 60, True, 30)),
     5: ("Moderate", "A little quieter than the defaults at rest. Updates "
-        "every half hour.",
-        (200, 1000, 20000, 30000, False, False, 30, False)),
+        "every half hour. A relay is kept for a quarter of an hour.",
+        (200, 1000, 20000, 30000, False, False, 30, False, 15)),
     6: ("Balanced", "The defaults. Connections checked every 15 to 20 "
         "seconds at rest, extra work only while somebody is using the node, "
-        "updates every five minutes.",
-        (100, 1000, 15000, 20000, False, False, 5, False)),
+        "updates every five minutes. A node reached through a relay "
+        "moves to another one every ten minutes.",
+        (100, 1000, 15000, 20000, False, False, 5, False, 10)),
     7: ("Responsive", "Connections checked every ten seconds, and a live "
         "connection moves to a faster address of the same node when one "
         "measures better.",
-        (100, 1000, 10000, 15000, False, True, 5, False)),
+        (100, 1000, 10000, 15000, False, True, 5, False, 10)),
     8: ("Fast", "Two connections to one node stay combined even when nobody "
-        "is using this one, so the second is ready the moment traffic starts.",
-        (100, 500, 8000, 12000, True, True, 5, False)),
+        "is using this one, so the second is ready the moment traffic starts. "
+        "Relays change every five minutes.",
+        (100, 500, 8000, 12000, True, True, 5, False, 5)),
     9: ("Faster", "Connections checked every five seconds at rest, up to "
-        "twenty times a second while combined. Updates every two minutes.",
-        (50, 500, 5000, 10000, True, True, 2, False)),
+        "twenty times a second while combined. Updates every two minutes. "
+        "Relays change every two minutes.",
+        (50, 500, 5000, 10000, True, True, 2, False, 2)),
     10: ("Maximum", "Notices trouble and recovers as fast as it can, "
-         "whatever it costs. For a machine on mains with bandwidth to spare.",
-         (50, 300, 3000, 6000, True, True, 1, False)),
+         "whatever it costs, and spreads what goes through relays over all "
+         "of them at once. For a machine on mains with bandwidth to spare.",
+         (50, 300, 3000, 6000, True, True, 1, False, 0)),
 }
 
 

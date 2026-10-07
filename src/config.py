@@ -233,6 +233,15 @@ def _as_check_minutes(raw: str) -> int:
     return value
 
 
+def _as_route_hold(raw: str) -> int:
+    """Minutes a routed node keeps the relay it is reached through. 0 spreads
+    its traffic over every relay that measures well instead."""
+    value = int(str(raw).strip())
+    if not 0 <= value <= 1440:
+        raise ValueError("between 0 and 1440 minutes (a day)")
+    return value
+
+
 def _as_branch(raw: str) -> str:
     """A branch to follow instead of the published releases. Empty = releases.
 
@@ -292,6 +301,14 @@ SETTINGS = {
     # probe ten times a second is cheap on that medium. What is decided here is
     # everything that is not the medium's business: when the node is awake
     # enough to bundle at all, and the two numbers a bundle is judged on.
+    # How often a node reached through a relay moves to another one. Moving is
+    # what keeps any one relay from seeing a whole conversation; moving every
+    # packet is what made the map, and the relays, see a different route each
+    # time. A relay that stops delivering is left at once whatever this says.
+    "route_hold_minutes": (_as_route_hold, 10, True,
+                        "Minutes a node reached through a relay keeps that "
+                        "relay before moving to another healthy one (0 = "
+                        "spread its traffic over every relay at once)"),
     "mlo_always":      (_as_bool, False, True,
                         "Keep multi-link operation running even when nothing "
                         "is using this node (otherwise it wakes with the "
@@ -429,7 +446,7 @@ SETTINGS = {
 # `tests/test_config_live.py` holds the two lists in step.
 LIVE = frozenset({
     "punch_keepalive", "lan_discovery", "transport_balance", "dynamic_address",
-    "mlo_always", "mlo_skew_ms", "mlo_drop_percent",
+    "mlo_always", "mlo_skew_ms", "mlo_drop_percent", "route_hold_minutes",
     "keepalive_fast_min_ms", "keepalive_fast_max_ms",
     "keepalive_slow_min_ms", "keepalive_slow_max_ms",
     "pseudo", "no_abuse_gossip", "release_quorum", "release_auto_publish",

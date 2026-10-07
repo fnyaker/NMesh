@@ -525,6 +525,18 @@ _ROUTE_HINT_TTL           = 120.0
 # prober below. Named because two callers share it, and a literal in one of
 # them is a bound the other can silently exceed.
 _PENDING_ECHO_MAX         = 128
+# How long a routed identity keeps the first hop it is reached through before
+# the node may move it to another healthy one, in seconds (`route_hold_minutes`
+# in the configuration). Long enough that a relay sees a conversation rather
+# than every other packet of it; a hop that stops delivering is left at once,
+# whatever this says. Zero spreads the traffic over every measured path (MRLO).
+_ROUTE_HOLD_DEFAULT       = 600.0
+_ROUTE_HOLD_MAX           = 86400.0
+_ROUTE_LEADS_TRACKED      = 256
+# What a routed packet has to be for it to buy measured paths to its
+# destination — three probes per relay, every few seconds: a conversation. A
+# lookup addressed to a node only to ask it about somebody else is not one.
+_CONVERSATION_TYPES       = frozenset({DATA, E2E_HANDSHAKE, E2E_HANDSHAKE_ACK})
 _PATH_PROBE_INTERVAL      = 10.0   # per path, at rest
 # …and the cadence of a path kept warm *behind a working direct link*. That is
 # the hybrid: one physical link and one routed path measured at the same time,
@@ -993,6 +1005,10 @@ __all__ = [
     "_PATH_IDLE_MAX",
     "_PATH_PROBES_PER_PASS",
     "_PATH_PROBE_INTERVAL",
+    "_ROUTE_HOLD_DEFAULT",
+    "_ROUTE_HOLD_MAX",
+    "_ROUTE_LEADS_TRACKED",
+    "_CONVERSATION_TYPES",
     "_PATH_PROBE_TIMEOUT",
     "_PATH_STANDBY_INTERVAL",
     "_PEER_STOP_TIMEOUT",
