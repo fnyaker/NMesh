@@ -346,6 +346,21 @@ scope. Add yours.
   Caught on the pre-commit reread. → Write the incident in `gotchas.md` and
   `BUGSVULNS.MD` *first*; then the code comment has somewhere to point and only
   the rule left to say.
+- **The same unreadable metric, read again.** A speed test's 21 % "lost"
+  probes over UDP were reported to the user as the UDP link stalling under
+  wifi. They were the far end's echo ceiling (`_SPEED_MAX_PER_WINDOW`), reached
+  by the two tests run just before, and dropped silently by design. → Before
+  calling a loss a link's, count what this session already asked of the far end
+  against every ceiling it keeps.
+- **`pkill -f` with a pattern the shell running it also matched.** It killed
+  its own command, so an edit queued after it in the same command never ran,
+  and the next test run tested the old file. → Kill by PID, or never put work
+  after a `pkill` in one command.
+- **A clock patched through a module that shares it.** `monkeypatch.setattr(
+  node_mod.time, "monotonic", …)` replaces `time.monotonic` for the whole
+  process, the event loop's clock included: every `sleep` and `wait_for` froze
+  and the test hung to its timeout. → Move the state's timestamp instead (age
+  the entry), or patch a name the loop does not read.
 - **An empty log answer read as "nothing happened".** After a restart the log
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not

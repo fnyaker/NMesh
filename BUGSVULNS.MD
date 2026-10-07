@@ -157,8 +157,9 @@ like the regression.
 | 67 | **low** | A log could not be filtered by time, nor followed past a million lines |
 | 68 | **medium** | The speed test's fixed window could not read the speed the charter names, nor measure a bundle |
 | 69 | **low** | Keepalive bounds swapped in silence; no transfer kind open to any app; the MLO second link stuck on its first candidate |
-| 70 | **medium** | *Open* — two UDP listeners accept each other's challenge as a new link, about seventy times a second, without end |
-| 71 | **medium** | *Open* — a dial refused as the wrong node still costs the node that answered its healthy link |
+| 70 | **medium** | Two UDP listeners accepted each other's challenge as a new link, about seventy times a second, without end |
+| 71 | **medium** | A dial refused as the wrong node still cost the node that answered its healthy link |
+| 72 | **low** | A speed test run past the far end's echo ceiling read the ceiling as loss |
 | 12 | **medium** | A corrupt identity file is silently replaced, then overwritten |
 | 13 | **medium** | The UDP reliability layer is unauthenticated — one spoofed datagram wedges a link |
 | 14 | **medium** | `_handle_reach_probe` dials back inside the receive loop (up to 6 s) |
@@ -3182,7 +3183,19 @@ adds could not be measured at all.
 
 ---
 
-## 70 — medium — Two UDP listeners accepting each other, without end (open)
+## 70 — medium — Two UDP listeners accepting each other, without end
+
+> **Status — fixed, not yet re-seen live.** Tests:
+> `tests/test_link_stability.py::TestAClosedLinkIsNotReopenedByItsOwnFrames::test_a_frame_overtaken_by_the_far_ends_fin_opens_nothing`,
+> `tests/test_node.py::TestTwoListenersAcceptingEachOther`. The live storm ran
+> half an hour (~130 000 link serials) and stopped when the route between the
+> two went away, not on anything the node did. One mechanism was found and
+> closed: the end that received the FIN forgot the link, so a frame overtaken
+> by that FIN opened a new one, whose fresh cursor the far end took for a new
+> dial in turn — both ends now remember. Because the live pair was not
+> reproduced, a second barrier does not depend on the cause: after a double
+> accept, a link accepted from the same address is closed unanswered for
+> `_DOUBLE_ACCEPT_HOLD` (`gotchas.md` "Two listeners accepting each other").
 
 **Where** — `src/node.py` (`_on_new_transport`, `_end_double_accept`),
 `src/transports/udp.py` (`UDPServer._dispatch_datagram`, `_answer_closed`).
@@ -3213,7 +3226,16 @@ way per round, a link serial burned per round, and the log ring filled with
 
 ---
 
-## 71 — medium — A dial refused as the wrong node still costs the far end's link (open)
+## 71 — medium — A dial refused as the wrong node still costs the far end's link
+
+> **Status — fixed.** Tests:
+> `tests/test_self_dial.py::TestAnAddressAnotherLinkAlreadyHolds`. `_dial_uri`
+> records `wrong node` without opening a socket when one of our authenticated
+> links to another node runs to that address (`_address_held_by`). Seen a
+> third time while fixing it, on a link we *accepted*: a dial to node C at
+> `udp://203.0.113.10:9001` — where relay A's listener reaches ours
+> from — was refused at the handshake, and relay A closed the 606 s link
+> 20 ms later. The accepted link's endpoint is what the check reads for it.
 
 **Where** — `src/node.py` (`_dial_uri`, `_handle_handshake_ack`); the far end's
 redundant-link reaper.
@@ -3234,4 +3256,26 @@ answered.
 **Fixing it** — an address one of our authenticated links was dialled to, or
 is connected from, belongs to that link's node, and is not one to dial for
 another node: skip it in the candidates rather than learn it from a handshake.
+
+---
+
+## 72 — low — A speed test run past the far end's echo ceiling read it as loss
+
+> **Status — fixed.** Tests:
+> `tests/test_speedtest.py::TestTheAskingSideKnowsTheFarEndsCeiling`.
+
+**Where** — `src/node.py` (`console_speedtest`, `_handle_speed_probe`).
+
+**What happens** — seen live on 0.4.62: three tests to relay B inside half a
+minute (512, 512 over a bundle, then one more). The answering side echoes at
+most `_SPEED_MAX_PER_WINDOW` (1200) probes per identity a minute and drops the
+rest **silently**, by design. The third test got 176 echoes, then nothing: it
+ran to its ten-second deadline and reported `ok`, 21 % of probes lost, on a
+link that had lost none — read at first, in this very session, as the UDP
+transport stalling under wifi.
+
+**Fixed** — the asking side keeps the same count per target (`_speed_spend`):
+each test reserves the most it could send, gives back what it did not, and a
+test that could pass the ceiling is refused before a probe leaves, with
+`retry_after` in seconds.
 

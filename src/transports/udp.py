@@ -946,7 +946,10 @@ class UDPTransport(BaseTransport):
         """The far end closed this link: end it here too, without answering.
 
         No FIN back — the far end has already forgotten us, and a reply would
-        only arrive at a socket that no longer has a link for it."""
+        only arrive at a socket that no longer has a link for it. The link is
+        still remembered: a frame the far end sent just before its FIN can
+        arrive after it, and taken for a new dial it opens a transport whose
+        fresh cursor the far end takes for a new dial in turn."""
         if self._closed:
             return
         self._end_reason = "the peer closed the link (FIN)"
@@ -954,6 +957,7 @@ class UDPTransport(BaseTransport):
         self._arrived.set()            # a parked receive() must not wait it out
         if self._server is not None and self._remote is not None:
             self._server.remove_transport(self._remote)
+            self._server.remember_closed(self._remote, self._link)
         self.note("the peer closed the link", "info", **self._link_figures())
 
     def _send_raw(self, frame: bytes) -> None:

@@ -170,7 +170,12 @@ Groupings (constants):
   counts per identity (so reconnecting sheds none of it), and a feature name of
   its own — `speed` — so a node on a metered connection declines this and
   nothing else. The side asking bounds itself twice over, in bytes and in
-  seconds, whichever ends first. It measures in two phases: a few probes one at
+  seconds, whichever ends first — and keeps the far end's count too
+  (`_speed_spend`): the answering side stops echoing at
+  `_SPEED_MAX_PER_WINDOW` a minute, silently, so a test run past it reads the
+  ceiling as loss on a link that lost nothing. A test that could pass it is
+  refused before a probe leaves, with `retry_after` in seconds; each test
+  reserves the most it could send and gives back what it did not. It measures in two phases: a few probes one at
   a time for the latency **at rest**, then a sliding window — a new probe
   leaves as each echo lands — for the rate and the latency **under load**. The
   window starts at `_SPEED_INFLIGHT` and opens by one per echo, up to
