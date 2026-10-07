@@ -620,9 +620,11 @@ over it.
 UDP is connectionless and unreliable → a **reliability layer**:
 - Frame: `NUDP` (4-byte magic) + seq(4) + ack(4) + sack(4) + flags(1) +
   payload_len(2) + payload. Cumulative ACK + SACK, retransmission with backoff
-  (`_RTO_*`), bounded reordering, keepalive (25 s), all bounded.
-- **The sender paces itself; the wire format did not change**, so a node with
-  this layer and one without still talk. Four rules, each one a collapse it
+  (`_RTO_*`), bounded reordering, keepalive (25 s), all bounded. Flags: `0x01`
+  ACK-only, `0x02` keepalive, `0x04` data, `0x08` FIN, `0x10` more (segment),
+  `0x20` segments (this side reassembles).
+- **The sender paces itself, with no change to the wire format**, so a node
+  with this layer and one without still talk. Four rules, each one a collapse it
   ended (`gotchas.md`, "A burst that collapsed the UDP transport"):
   - the retransmit timer is **measured** (RFC 6298: smoothed round trip plus
     four deviations, floored at `_RTO_MIN`, `_RTO_INITIAL` before the first
@@ -701,9 +703,31 @@ UDP is connectionless and unreliable → a **reliability layer**:
   killed when the phases lined up (route flapping). Measured on the monotonic
   clock, which stops while the machine sleeps: a node that slept past
   `_SLEEP_ENDS_LINKS` ends its links itself on waking (`node._check_slept`).
-- **One mesh packet is one datagram**, up to `_MAX_PAYLOAD` (60 000 bytes), so
-  anything above the path MTU is fragmented by IP, and losing one fragment
-  loses the frame. Open: `BUGSVULNS.MD` 63.
+- **A packet larger than `_SEGMENT_PAYLOAD` is split across frames** that each
+  fit a `_SEGMENT`-byte datagram (1 200: every path IPv6 allows, under its
+  headers), each one a sequence number of its own, tracked, acknowledged and
+  resent like any frame. Every frame but the last carries `FLAG_MORE`; the
+  receiver rebuilds the packet as frames reach its cursor (`_reassemble`), so
+  reordering and loss are the reliability layer's business as before. One
+  datagram per packet made a 16 kB packet a dozen IP fragments, and one lost
+  fragment lost the frame (`BUGSVULNS.MD` 63, `gotchas.md` "A packet that was a
+  dozen fragments").
+  - **Negotiated, per link.** Every frame this side sends carries
+    `FLAG_SEGMENTS`; it splits only towards a far end whose frames carry it
+    too (`note_segments`). A node predating it never sets the bit, ignores it,
+    and keeps getting whole packets. The bit is believed only on a frame inside
+    the far end's window, like a FIN — a spoofed one would have us split towards
+    a node that delivers each piece as a packet — and is never unlearnt.
+  - **Bounded.** What is being rebuilt never exceeds one packet
+    (`HEADER_SIZE + _MAX_PAYLOAD`). A far end flagging every frame `more` gets
+    that packet dropped up to its last segment; the frames after it are
+    untouched.
+  - **The cost is per datagram.** Over loopback, 16 kB packets cross at
+    ~21 MB/s split against ~176 MB/s whole: Python handles every datagram, and
+    its acknowledgement, one at a time. It buys a link that holds on a path
+    that drops fragments — through a VPN, 16 kB pings lost 62 % where 1.1 kB
+    pings lost 6 %. `_MAX_UNACKED` frames of 1 200 bytes also cap what is in
+    flight at ~300 kB, so a split link carries at most ~300 kB per round trip.
 - **A FIN ends the link** — on the side that receives it, at once
   (`_peer_finished`). It used to be counted as an *arrival*, like a keepalive:
   it refreshed the liveness it announced the end of. The side that missed a
