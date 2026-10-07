@@ -3,16 +3,7 @@
     "allow": [
       "Bash(python -m pytest tests/ -q)",
       "Bash(python -m pytest tests/test_cert.py::TestRoutingHandshakeChainRequired::test_no_invite_valid_chain_accepted -v)",
-      "Bash(python -m pytest tests/ -x -q)",
-      "mcp__nmesh__logs_status",
-      "mcp__nmesh__logs_set",
-      "Bash(git checkout *)",
-      "Bash(git pull *)",
-      "mcp__nmesh__node_state",
-      "mcp__nmesh__logs_query",
-      "mcp__nmesh__logs_sources",
-      "mcp__nmesh__trace_set",
-      "mcp__nmesh__trace_status"
+      "Bash(python -m pytest tests/ -x -q)"
     ]
   }
 }
