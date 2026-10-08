@@ -3566,3 +3566,19 @@ that was down meant chains grew again.
 **Fixed** — every membership a node holds is renewed by its own issuer, so the
 chain through the inviter stays a live fallback; compaction asks the root first
 and then each ancestor down the chain, backing off after a silent round.
+
+## 85 — medium — Lookups gave up early in a sparse mesh with offline nodes
+
+> **Status — fixed.** Tests: `tests/test_lookup_termination.py`.
+
+**Where** — `src/node.py`: `kad_lookup`; `_KAD_LOOKUP_MAX_ROUNDS`.
+
+**What happens** — a lookup stopped when the closest id it knew of did not
+change from one round to the next, which is what any round whose candidates
+were all offline does, and most callers allowed four rounds. In a simulated
+mesh of 50 000 ids with two per bucket and 30 % offline, four rounds found the
+target 30 % of the time. Routing on demand, the DHT and the directories all
+stand on lookups.
+
+**Fixed** — Kademlia's own end (the closest node that answered did not improve
+and nothing left to ask is closer), ten rounds at most: 96 % in the same mesh.

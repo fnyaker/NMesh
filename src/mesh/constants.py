@@ -274,7 +274,11 @@ _MAX_DATA_QUEUE         = 512
 _MAX_E2E_SESSIONS       = 512
 _ON_DEMAND_TIMEOUT     = 5.0    # transport open + handshake
 _KAD_LOOKUP_TIMEOUT    = 3.0    # per FIND_NODE round
-_KAD_LOOKUP_MAX_ROUNDS = 4
+# Rounds a lookup may take. It ends sooner on its own (`kad_lookup`); the bound
+# is for the hard case — a sparse table and offline nodes — where four rounds
+# found the target one time in three at 50 000 nodes and ten found it 96 times
+# in a hundred (`Docs/Architecture/scale.md`, point 1).
+_KAD_LOOKUP_MAX_ROUNDS = 10
 _AUTH_POLL_INTERVAL    = 0.05
 _QID_LEN               = 8     # query_id bytes appended to FIND_NODE / prefix of FOUND_NODE
 _PUBLIC_IP_TIMEOUT     = 8.0   # hard cap on the (threaded) public-IP HTTP probe

@@ -3393,7 +3393,8 @@ class MeshNode:
 
         if searching and self._authenticated_peers():
             try:
-                async with asyncio.timeout(_KAD_LOOKUP_TIMEOUT * 2):
+                async with asyncio.timeout(_KAD_LOOKUP_TIMEOUT
+                                           * _KAD_LOOKUP_MAX_ROUNDS):
                     await self.kad_lookup(self._id, k=20, alpha=3,
                                           max_rounds=_KAD_LOOKUP_MAX_ROUNDS)
             except (TimeoutError, Exception):
@@ -3893,7 +3894,8 @@ class MeshNode:
             if p.authenticated_id is not None and p.session is not None:
                 shortlist.add(p.authenticated_id)
         queried: set[NodeID] = set()
-        closest_seen: NodeID | None = None
+        answered: set[NodeID] = set()
+        best_answered: NodeID | None = None
         for _ in range(max_rounds):
             candidates = sorted(
                 (nid for nid in shortlist if nid not in queried),
@@ -3912,6 +3914,7 @@ class MeshNode:
             for node_id, result in zip(candidates, results):
                 if isinstance(result, list):
                     self._routing.note_answered(node_id)
+                    answered.add(node_id)
                 else:
                     self._routing.note_unanswered(node_id)
             self._note_answer_overlap(candidates, results)
@@ -3928,10 +3931,20 @@ class MeshNode:
                             shortlist.add(entry.node_id)
             sorted_ids = sorted(shortlist, key=lambda n: target.distance(n))[:k]
             shortlist = set(sorted_ids)
-            new_closest = sorted_ids[0] if sorted_ids else None
-            if new_closest == closest_seen:
+            # Kademlia's end, not "the closest name stopped changing": that one
+            # stops on the round whose candidates were all offline, which in a
+            # sparse table with churn is most rounds (`scale.md`, point 1).
+            # Stop when the closest node that *answered* did not improve and
+            # nothing left to ask is closer than it.
+            if target in answered:
                 break
-            closest_seen = new_closest
+            closest = (min(answered, key=lambda n: target.distance(n))
+                       if answered else None)
+            if closest is not None and closest == best_answered and all(
+                    target.distance(n) > target.distance(closest)
+                    for n in shortlist if n not in queried):
+                break
+            best_answered = closest
         return sorted(shortlist, key=lambda n: target.distance(n))
 
     def _note_answer_overlap(self, asked, results) -> None:

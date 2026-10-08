@@ -70,8 +70,12 @@ demand** rather than a blind XOR hop:
   IPv6 first) → if no address is reachable, `_punch_route_to` (a NAT hole punch
   coordinated by a relay, see `transports.md`).
 - `_kademlia_lookup(target)`: a bounded iterative `FIND_NODE`
-  (`_KAD_LOOKUP_TIMEOUT`, `_KAD_LOOKUP_MAX_ROUNDS`), aggregating `FOUND_NODE`
-  until it stabilises.
+  (`_KAD_LOOKUP_TIMEOUT`, `_KAD_LOOKUP_MAX_ROUNDS` = 10), aggregating
+  `FOUND_NODE`. `kad_lookup` ends on **Kademlia's own rule**: the target
+  answered, or the closest node that *answered* did not improve and nothing
+  left to ask is closer. It used to end when the closest *name* stopped
+  changing, which a round of offline candidates does — see
+  [`scale.md`](scale.md#1-membership-chains) for what that cost.
 
 ### Acquiring a route **never** blocks a receive loop
 
