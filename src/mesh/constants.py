@@ -121,7 +121,24 @@ _DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
                     # The keepalive accord is about *this link* and nothing
                     # else: a cadence is a property of the pair, so it can only
                     # ever be stated by the peer at the other end of it.
-                    KA_PROPOSE, KA_REQUEST}
+                    KA_PROPOSE, KA_REQUEST,
+                    # Re-stamped at each hop like a revocation: the record
+                    # inside is signed by the destination it speaks for.
+                    STOP_RELAY}
+# Stop-relay (`stop_relay.py`). How long a request asks to be honoured, how long
+# a relay is given to act on one before still being fed counts against it, the
+# rules a relay holds (in all, and for one destination), how many requests one
+# link may send per window, and the largest record read before any parse.
+_STOP_RELAY_TTL       = 900
+_STOP_RELAY_GRACE     = 10.0
+_STOP_RULES_MAX       = 4096
+_STOP_RULES_PER_DST   = 64
+_STOP_RELAY_RATE_WINDOW = 60.0
+_STOP_RELAY_RATE_MAX  = 32
+_STOP_RELAY_MAX       = 8192
+# What refusing one weighs against a relay: weak on its own (a relay restarting
+# mid-rule forgets it), and counted at most once per rule and link.
+_STOP_RELAY_REFUSAL_WEIGHT = 1.0
 _CATALOG_RATE_WINDOW = 10.0     # seconds
 _CATALOG_RATE_MAX    = 128      # announces one link may push at us per window
 _RELEASE_RATE_WINDOW = 10.0     # seconds
@@ -1156,6 +1173,14 @@ __all__ = [
     "_SPEED_WINDOW",
     "_STATE_WRITE_INTERVAL",
     "_STORE_RATE_MAX",
+    "_STOP_RELAY_TTL",
+    "_STOP_RELAY_GRACE",
+    "_STOP_RULES_MAX",
+    "_STOP_RULES_PER_DST",
+    "_STOP_RELAY_RATE_WINDOW",
+    "_STOP_RELAY_RATE_MAX",
+    "_STOP_RELAY_MAX",
+    "_STOP_RELAY_REFUSAL_WEIGHT",
     "_STORE_RATE_WINDOW",
     "_STUN_PENDING_MAX",
     "_STUN_PENDING_TTL",

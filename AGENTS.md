@@ -399,6 +399,11 @@ scope. Add yours.
   every link; the relays had never been the cause. → Before naming where time
   goes, vary the path: a second network, or loopback, is what separates the
   code from the road.
+- **A test that could not fail, again.** The stop-relay propagation test passed
+  with the propagation removed: the destination had dialled the far relay and
+  asked it directly. Caught by a targeted mutation. → Mutate each mechanism a
+  test is named for, one at a time, and pin the topology the test assumes
+  (here: no link from the destination to the far relay).
 - **A fix that quietly centralised a decentralised system.** Chain compaction
   made the root sign compacted members, and renewal only asked the issuer of
   the shortest chain — so every compacted member would have needed the root
