@@ -4,6 +4,7 @@ import time
 from collections import deque
 from .node_id import NodeID
 from .cert import Certificate
+from .lineage import Lineage
 from . import revocation
 
 
@@ -72,6 +73,10 @@ class CertStore:
         # a revocation nobody passes on protects only the node that heard it.
         self._revoked: dict[tuple[bytes, bytes], dict] = {}
         self._max_revocations = max_revocations
+        # The issuers each member we signed directly had been vouched through,
+        # so their revocation still reaches it (`lineage.py`). Empty everywhere
+        # but on a root that has shortened chains.
+        self.lineage = Lineage()
 
     def add_root(self, node_id: NodeID) -> None:
         self._roots.add(node_id.raw)
@@ -564,7 +569,8 @@ class CertStore:
         with open(tmp, 'w') as f:
             json.dump({"roots": roots, "certs": certs_json,
                        "revocations": [held["record"].hex()
-                                       for held in self._revoked.values()]}, f)
+                                       for held in self._revoked.values()],
+                       "lineage": self.lineage.to_json()}, f)
         os.replace(tmp, path)
 
     @classmethod
@@ -593,6 +599,7 @@ class CertStore:
                     store.revoke(bytes.fromhex(record_hex), verify_signature)
                 except ValueError:
                     pass
+            store.lineage = Lineage.from_json(data.get("lineage"))
             for subject_hex, cert_list in data.get("certs", {}).items():
                 for cert_data in cert_list:
                     try:

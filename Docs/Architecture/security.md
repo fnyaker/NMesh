@@ -149,6 +149,33 @@ a neighbour a year on) close it:
   peer, which from the inside looks exactly like a broken network, so the
   console says it across the top of every page and not only on that card.
 
+## Compaction: a chain that does not grow with the mesh (`lineage.py`)
+
+A member's certificate is signed by whoever invited it, so the chain grows one
+~7 kB certificate per generation of invitations, and past a few no handshake or
+routing answer can carry it ([`scale.md`](scale.md#1-membership-chains)). A
+member whose chain is longer than two asks its root to sign it directly: a
+`CERT_RENEW` whose payload is `_COMPACT_MAGIC` and the whole chain.
+
+- The root signs only a chain that `verify_chain` anchors on **itself**, whose
+  first certificate is the sender's own (`subject == src_id`), longer than two,
+  through no revoked issuer — one signature per subject per
+  `_CERT_RENEW_MIN_GAP`, like a renewal. It hands out nothing the chain did not
+  prove, and the certificate binds the member's id to its own key, so one sent
+  under somebody else's id buys nobody anything.
+- The member takes the answer (`CERT_RENEWED`) only from the root of its own
+  chain and within `_COMPACT_ANSWER` of asking; the shortest chain wins
+  `get_chain_to_root` from then on.
+- **Revocation still cascades.** The root records the issuers the chain ran
+  through (`CertStore.lineage`) before it signs; a full book refuses to sign
+  rather than forget anyone. When the root accepts a revocation it revokes its
+  own certificate for every member whose chain ran through the revoked one, and
+  for the revoked one too when the revocation came from one of the issuers its
+  chain ran through — an authority that issuer already held, since revoking its
+  own invitee took the whole branch out.
+- A relay too old to know of it carries it as the renewal it looks like; a root
+  too old reads a certificate that is not its own and drops it.
+
 ## Revocation: taking a membership back (`revocation.py`)
 
 Expiry is the slow way out of a network. It is far too slow for the case this

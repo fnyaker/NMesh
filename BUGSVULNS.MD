@@ -3526,3 +3526,24 @@ timer fired that never did.
 
 **Fixed** — `_undo` records whether a timeout made the cut; a needless fast
 retransmit counts in `spurious fast retransmits`, a new stat beside the other.
+
+## 83 — high — A mesh grown by invitations stopped working after a few generations
+
+> **Status — fixed** (chain compaction). Tests:
+> `tests/integration/test_chain_compaction.py`, `tests/test_lineage.py`.
+
+**Where** — `src/node.py`: `_handle_handshake` (the inviter signs the
+invitee's certificate), `_decode_chain` (`_ENTRY_CHAIN_MAX`), `_EntryPacker`
+(`_FOUND_NODE_MAX_BYTES`).
+
+**What happens** — every generation of invitations adds one 7 275-byte
+certificate to a member's chain. Reproduced with real nodes inviting one another
+in a line: the fourth generation (36 kB) no longer fits a routing answer, the
+sixth (51 kB, seven certificates) is refused by every handshake, and the seventh
+cannot join at all. Nothing on screen says why.
+
+**Fixed** — a member asks its root to sign it directly once its chain is longer
+than two; the root records the lineage and cascades revocations through it.
+Measured to the eighth generation: every member ends with two certificates.
+Smaller chains on the wire and the ceilings are still to come
+(`Docs/Architecture/scale.md`, point 1).

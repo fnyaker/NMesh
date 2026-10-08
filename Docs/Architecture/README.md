@@ -45,6 +45,7 @@ is therefore safe to accept from strangers.
 | `accusation.py` | A signed "I saw this node misbehave". Carries no authority on purpose — the receiver weighs it. |
 | `equivocation.py` | The one report that is **not** an opinion: two records signed by the same key that cannot both have been meant. Forging one needs the key it accuses, so the messenger's honesty is not in it. |
 | `invite.py` | Invitation codes (HMAC challenge/response, single use, lockout). The relayed half lives in `node.py`: an inviter leaves a **rendezvous** with a relay (`INVITE_OFFER`) so the heavy part of a relayed invitation — a post-quantum key and a signature — never has to fit in the string somebody scans. |
+| `lineage.py` | Who vouched for whom before a root signed a member directly: the issuers each compacted member's chain ran through, so their revocations still reach it. Bounded, refuses rather than evicts, persisted with the certificates. See [`scale.md`](scale.md#1-membership-chains). |
 | `routing.py` | Kademlia routing table (k-buckets keyed by id so a refresh is a `move_to_end` rather than a scan under dataclass equality, `last_seen`, and a `touch` that refreshes recency without the merge `add` does — most probes now carry no addresses at all), plus the two things it needed to stop chasing ghosts: addresses that answered as somebody else are **remembered**, not merely dropped, and an id that has never once answered a lookup stops being asked after, dialled, or named to others. |
 | `dht.py` | Content-addressed DHT store (`key = sha256(value)[:20]`). |
 | `pkg_dir.py` | **The package directory**: one signed sentence a node says about itself — *I hold this release and I serve it* — filed under the node id, under the release, and under the package name's prefixes. So "what does this machine offer?", "who can serve this release?" and "who offers something called this?" are one lookup with three keys, and **recommending is holding**: the records under a release are the machines that can hand it over. A second signature by the key that signed the release turns holding into publishing, and it names the node, so it cannot be lifted. Also the source digest that answers "do these publishers agree on the *code*?" without downloading anything. |
@@ -120,6 +121,9 @@ is therefore safe to accept from strangers.
    (`behaviour.py`), mostly still a catalogue. Chain-of-trust genealogy, signature correlation, protocol
    conformance, traffic shape, routing, gossip, the update chain — with the
    anti-rules that must never become signals, and why.
+11. **[scale.md](scale.md)** — what grows with the mesh and what must not: the
+   audit, point by point, of every cost a node pays more of as the mesh gets
+   bigger, starting with membership chains and their compaction.
 
 ## The four layers (bottom to top)
 
