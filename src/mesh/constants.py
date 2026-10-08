@@ -58,6 +58,19 @@ _CERT_HINT_MAX   = 32   # fingerprints a FIND_NODE may carry
 _HINTS_OK        = b"\x01"
 _HINT_PEERS_MAX  = 256  # nodes we remember as understanding fingerprints
 _ENTRY_CHAIN_MAX = 6    # certs in one entry's chain — longer is nonsense
+# Chain compaction. A `CERT_RENEW` whose payload starts with this carries a whole
+# chain to its root, asking the root to sign the member directly so the chain
+# stops growing one certificate per generation of invitations (`lineage.py`,
+# `Docs/Architecture/scale.md`). The magic tells it apart from a renewal, whose
+# payload is one certificate starting with a 20-byte subject id.
+_COMPACT_MAGIC    = b"NMC1"
+# Bytes of a compaction request, before any parse: a chain of `_ENTRY_CHAIN_MAX`
+# post-quantum certificates is ~44 kB.
+_COMPACT_MAX      = 58_000
+# How long after asking the root's answer is taken, and how often a member
+# whose chain is still long asks again.
+_COMPACT_ANSWER   = 600.0
+_COMPACT_RETRY    = 900.0
 _ENTRY_COUNT_MAX = 20   # Kademlia k; the receiver would drop a longer answer
 # Certificate renewal. A membership certificate lasts a year
 # (`CryptoIdentity.issue_cert`) and nothing renewed it: at T+365 days a node went
@@ -915,6 +928,10 @@ __all__ = [
     "_E2E_REKEY_MAX",
     "_E2E_REKEY_TTL",
     "_E2E_RETRY_INTERVAL",
+    "_COMPACT_ANSWER",
+    "_COMPACT_MAGIC",
+    "_COMPACT_MAX",
+    "_COMPACT_RETRY",
     "_ENTRY_CHAIN_MAX",
     "_ENTRY_COUNT_MAX",
     "_ENTRY_HEADER",

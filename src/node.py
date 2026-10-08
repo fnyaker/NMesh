@@ -351,6 +351,9 @@ class MeshNode:
         # subject rather than by link, so reconnecting buys no fresh allowance.
         self._cert_task: asyncio.Task | None = None
         self._renewals_served: dict[bytes, float] = {}
+        # When we last asked our root to sign us directly (`_compact_own_chain`):
+        # its answer is taken for `_COMPACT_ANSWER` after that, and never unasked.
+        self._compact_asked_at: float | None = None
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         # One dial per (node, address) at a time; a second caller waits on the
         # first one's outcome. Each entry lives for one dial, so the table is
@@ -12520,14 +12523,18 @@ Hints come first (the ``have`` byte on an announce, from an
             "a 6 h timer")
         await asyncio.sleep(_CERT_RENEW_FIRST)
         while self._running:
+            asked = False
             try:
                 await self._renew_own_membership()
+                asked = await self._compact_own_chain()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 pass          # a sweep that fails is retried at the next tick
             job.ran()
-            await asyncio.sleep(_CERT_RENEW_TICK)
+            # A chain still waiting to be shortened is asked about again soon:
+            # the root may simply have been offline.
+            await asyncio.sleep(_COMPACT_RETRY if asked else _CERT_RENEW_TICK)
 
     async def _renew_own_membership(self) -> bool:
         """Ask our issuer for a fresh certificate when ours is running out.
@@ -12557,6 +12564,115 @@ Hints come first (the ``have`` byte on an announce, from an
             Packet.create(CERT_RENEW, self._id.raw, mine.issuer_id.raw,
                           mine.serialize()))
         return True
+
+    async def _compact_own_chain(self) -> bool:
+        """Ask our root to sign us directly when our chain is longer than two.
+
+        Our certificate is signed by whoever invited us, theirs by whoever
+        invited them, and so on up to the root: one post-quantum certificate,
+        ~7 kB, per generation of invitations. Past a few generations a chain no
+        longer fits a routing answer, and past `_ENTRY_CHAIN_MAX` nobody accepts
+        it at all. The root re-signs a member whose chain verifies to it, so the
+        chain stays two long however the mesh grew (`lineage.py`).
+
+        Sent as a `CERT_RENEW` so a relay too old to know of it still carries
+        it; a root too old to serve it reads a certificate that is not its own
+        and drops it. Returns whether a request went out."""
+        chain = self._cert_store.get_chain_to_root(self._id)
+        if not chain or len(chain) <= 2 or chain[0].is_self_signed:
+            return False
+        payload = _COMPACT_MAGIC + _encode_chain(chain)
+        if len(payload) > _COMPACT_MAX:
+            return False
+        self._compact_asked_at = time.monotonic()
+        await self._route_outbound(
+            Packet.create(CERT_RENEW, self._id.raw, chain[-1].subject_id.raw,
+                          payload))
+        return True
+
+    async def _serve_chain_compaction(self, packet: Packet) -> None:
+        """A member below us asks to be signed by us directly.
+
+        Hands out nothing the chain did not already prove: it verifies to us,
+        through issuers none of which is revoked, so every one of them vouched
+        for the next and we vouched for the first. The certificate we sign binds
+        the member's id to its own key, which only the key's holder can use — a
+        request sent under somebody else's id buys them nothing.
+
+        What it does change is revocation: a chain signed by us runs through
+        nobody, so we remember who it ran through before (`lineage`) and pass
+        their revocations on (`_cascade_revocation`). A full book refuses: the
+        member keeps its long chain rather than becoming unrevocable."""
+        raw = packet.payload
+        if len(raw) > _COMPACT_MAX:
+            return
+        try:
+            chain = _decode_chain(raw[len(_COMPACT_MAGIC):])
+        except Exception:
+            return
+        if len(chain) <= 2:
+            return          # already signed by its root: nothing to shorten
+        member = chain[0]
+        if member.is_self_signed or member.subject_id != NodeID(packet.src_id):
+            return          # only the subject may ask for its own
+        if self._cert_store.verify_chain(chain) != self._id:
+            return          # a chain to somebody else, or one that no longer holds
+        ancestors = [cert.issuer_id.raw for cert in chain[:-1]
+                     if cert.issuer_id != self._id]
+        if not self._claim_renewal(member.subject_id):
+            return
+        if not self._cert_store.lineage.record(member.subject_id.raw, ancestors):
+            return
+        fresh = self._identity.issue_cert(member.subject_id, member.subject_pub)
+        self._cert_add(fresh)
+        self._note_cert_change()
+        await self._route_outbound(
+            Packet.create(CERT_RENEWED, self._id.raw, packet.src_id,
+                          fresh.serialize()),
+            blocking=False)   # we are inside a receive loop
+
+    def _compaction_answer(self, cert: Certificate) -> bool:
+        """Is ``cert`` the root's answer to the compaction we asked for?"""
+        asked = self._compact_asked_at
+        if asked is None or time.monotonic() - asked > _COMPACT_ANSWER:
+            return False
+        chain = self._cert_store.get_chain_to_root(self._id)
+        return bool(chain) and chain[-1].subject_id == cert.issuer_id
+
+    def _cascade_revocation(self, subject: NodeID, issuer: NodeID) -> int:
+        """Pass a revocation on to the members we signed directly below it.
+
+        A member whose original chain ran through ``subject`` would have lost
+        its membership with it; one we compacted would not, so we revoke ours.
+        And ``subject`` itself, when the revocation comes from one of the
+        issuers its chain ran through: that issuer could already take it out by
+        revoking its own invitee, which is the authority this keeps, not a new
+        one. Returns how many we revoked."""
+        book = self._cert_store.lineage
+        if not len(book):
+            return 0
+        affected = list(book.descendants(subject.raw))
+        if issuer != self._id and issuer.raw in book.ancestors(subject.raw):
+            affected.insert(0, subject.raw)
+        book.forget(subject.raw)
+        revoked = 0
+        for raw in dict.fromkeys(affected):
+            book.forget(raw)
+            member = NodeID(raw)
+            if member == self._id:
+                continue
+            try:
+                record = revocation.build(member, self._identity.dsa_public_key,
+                                          self._identity.sign)
+            except (ValueError, TypeError):
+                continue
+            if self._cert_store.revoke(record, self._identity.verify) is None:
+                continue
+            self._announce_revocation(record)
+            self._enforce_revocation(member)
+            revoked += 1
+        self._note_cert_change()
+        return revoked
 
     def _claim_renewal(self, subject: NodeID) -> bool:
         """One renewal served per subject per `_CERT_RENEW_MIN_GAP`.
@@ -12588,6 +12704,8 @@ Hints come first (the ``have`` byte on an announce, from an
         afterwards. Anything refused is dropped in silence — the sender is
         typically several hops away, and the peer that handed us the packet only
         relayed it, so there is nobody here to charge for it."""
+        if packet.payload.startswith(_COMPACT_MAGIC):
+            return await self._serve_chain_compaction(packet)
         if len(packet.payload) > _CERT_RENEW_MAX:
             return
         try:
@@ -12633,8 +12751,9 @@ Hints come first (the ``have`` byte on an announce, from an
             return
         if cert.issuer_id != NodeID(packet.src_id):
             return
-        if not any(held.issuer_id == cert.issuer_id
-                   for held in self._cert_store.certs_for(self._id)):
+        if (not any(held.issuer_id == cert.issuer_id
+                    for held in self._cert_store.certs_for(self._id))
+                and not self._compaction_answer(cert)):
             return          # an issuer that never certified us is not renewing
         if self._cert_add(cert):
             self._note_change("nodes")
@@ -12666,6 +12785,7 @@ Hints come first (the ``have`` byte on an announce, from an
         self._note_cert_change()
         self._announce_revocation(raw, exclude=peer)
         self._enforce_revocation(parsed["subject_id"])
+        self._cascade_revocation(parsed["subject_id"], parsed["issuer_id"])
 
     def _announce_revocation(self, raw: bytes,
                              exclude: '_Peer | None' = None) -> None:
@@ -12761,6 +12881,7 @@ Hints come first (the ``have`` byte on an announce, from an
         self._note_cert_change()
         self._announce_revocation(raw)
         self._enforce_revocation(subject)
+        self._cascade_revocation(subject, self._id)
         return True
 
     # -----------------------------------------------------------------------
