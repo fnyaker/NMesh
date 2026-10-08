@@ -633,6 +633,9 @@ class MeshNode:
         # What this node offers when two of them negotiate their cadences: a
         # range per mode, four numbers (`mlo.Bounds`).
         self._ka_bounds = mlo.Bounds()
+        # What the operator set; `_ka_bounds` is what is offered, which may have
+        # a higher fast floor while many links probe fast (`_rebalance_probe_floor`).
+        self._ka_configured = mlo.Bounds()
         # Cadence requests, metered per link like every other plane that costs
         # the receiver something.
         self._ka_request_rate: OrderedDict[bytes, tuple] = OrderedDict()
@@ -1978,6 +1981,7 @@ class MeshNode:
                 self._reap_mute_accepted()
                 self._reap_expired_tarpits()
                 self._update_bundles()
+                self._rebalance_probe_floor()
                 self._apply_traffic_profiles()
                 self._note_failing_links()
                 if self._rescue:
@@ -2259,7 +2263,7 @@ class MeshNode:
         refuses instead, naming the order. `config.save` sorts and reports what
         it stored (`adjusted`); the start-up path sorts and logs it, since a
         node that will not start over a hand-edited file is worse."""
-        held = self._ka_bounds
+        held = self._ka_configured
         asked = (held.fast_min if fast_min_ms is None else fast_min_ms,
                  held.fast_max if fast_max_ms is None else fast_max_ms,
                  held.slow_min if slow_min_ms is None else slow_min_ms,
@@ -2273,7 +2277,15 @@ class MeshNode:
             self.log("keepalive bounds out of order: read as sorted",
                      source="node", level=logbook.WARN, topic="keepalive",
                      asked="%s %s %s %s" % asked)
-        self._ka_bounds = mlo.clamp_bounds(*asked)
+        self._ka_configured = mlo.clamp_bounds(*asked)
+        self._offer_keepalive_bounds(
+            mlo.loaded_bounds(self._ka_configured, self._fast_links()))
+        return self._ka_bounds
+
+    def _offer_keepalive_bounds(self, bounds: mlo.Bounds) -> None:
+        """Offer ``bounds`` on every link: re-agree, and re-propose before
+        anything probes at a new cadence."""
+        self._ka_bounds = bounds
         for peer in list(self._peers):
             if peer.authenticated_id is None or peer.session is None:
                 continue
@@ -2282,7 +2294,25 @@ class MeshNode:
                 peer.ka_accord_at = time.monotonic()
             self._spawn_bounded(self._announce_keepalive(peer))
         self._wake_keepalive()
-        return self._ka_bounds
+
+    def _fast_links(self) -> int:
+        """Links whose far end announced it is probing us at a fast cadence."""
+        ceiling = self._ka_configured.fast_max
+        return sum(1 for peer in self._peers
+                   if peer.session is not None and peer.ka_next_ms is not None
+                   and peer.ka_next_ms <= ceiling)
+
+    def _rebalance_probe_floor(self) -> None:
+        """On the sweep: raise or lower the fast floor we offer with how many
+        links are probing us fast, so the answers stay under
+        `mlo.FAST_PROBE_BUDGET` (`mlo.loaded_bounds`). A no-op until the floor
+        actually moves, which the rounding keeps rare."""
+        offered = mlo.loaded_bounds(self._ka_configured, self._fast_links())
+        if offered == self._ka_bounds:
+            return
+        self.log("keepalive floor moved with load", source="mlo", topic="keepalive",
+                 fast_min_ms=offered.fast_min, links=self._fast_links())
+        self._offer_keepalive_bounds(offered)
 
     def _accord_with(self, peer: '_Peer') -> mlo.Accord:
         """The cadences this link is held to.

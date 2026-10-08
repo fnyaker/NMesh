@@ -1194,6 +1194,20 @@ The two ceilings still do real work, and it is the honest kind:
   cheaper answer is the right one — but see the medium's own timeout below,
   which is the constraint that actually binds.
 
+### A busy node offers a higher fast floor
+
+A relay pays for other nodes' consoles: every link a peer probes at the fast
+cadence costs it ten answers a second, and nothing it configured could bound
+the total. So what a node *offers* is its configured bounds with the fast floor
+raised to keep the links probing it fast under `mlo.FAST_PROBE_BUDGET`
+answers a second (`mlo.loaded_bounds`), recomputed on the keepalive sweep
+(`_rebalance_probe_floor`) and re-proposed only when the rounded floor moves.
+`accord` takes the higher floor of the two ends, so every peer follows without
+being asked — and since the floor never passes `fast_max - 1`, bundling with a
+busy node gets slower, never impossible. Measured: twenty leaves awake on one
+relay, 810 → 400 packets a second, every bundle still active. The configured
+bounds stay in `_ka_configured`; `keepalive_bounds()` is what is offered.
+
 ### The medium has the last word on going quiet
 
 Two nodes can agree to idle at five minutes over a transport that reaps a

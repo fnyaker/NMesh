@@ -165,6 +165,36 @@ def clamp_bounds(fast_min, fast_max, slow_min, slow_max) -> Bounds:
     return Bounds(*values)
 
 
+#: Probes a node answers per second at the fast cadence, all its links
+#: together, before it starts asking for fewer (`loaded_bounds`).
+FAST_PROBE_BUDGET = 200.0
+#: What the raised floor is rounded up to, so a node with one more link does
+#: not re-propose to every link.
+FLOOR_STEP_MS = 50
+
+
+def loaded_bounds(configured: Bounds, fast_links: int,
+                  budget: float = FAST_PROBE_BUDGET) -> Bounds:
+    """What a node offers when ``fast_links`` peers are probing it fast.
+
+    Every link probed at the fast cadence costs its answers, and a relay pays
+    for other nodes' consoles being open: forty awake links measured ~800
+    packets a second on one relay (`Docs/Architecture/scale.md`, point 2). So
+    the fast floor a node declares rises with the number of links running
+    fast, to keep their total under ``budget`` — and since `accord` takes the
+    *higher* floor of the two ends, every peer follows without being asked.
+    Never past the configured ceiling (minus one, so the range stays a range):
+    bundling with a busy node gets slower, never impossible because of load."""
+    needed = 0
+    if fast_links > 0 and budget > 0:
+        needed = -(-int(fast_links * 1000.0 / budget) // FLOOR_STEP_MS) * FLOOR_STEP_MS
+    fast_min = min(max(configured.fast_min, needed), configured.fast_max - 1)
+    if fast_min <= configured.fast_min:
+        return configured
+    return Bounds(fast_min, configured.fast_max, configured.slow_min,
+                  configured.slow_max)
+
+
 def well_formed(fast_min, fast_max, slow_min, slow_max) -> bool:
     """Is this a declaration a correct node could have meant? (rule K3)
 

@@ -1637,3 +1637,38 @@ class TestTheMapIsToldWhatTheWayToANodeIsDoing:
         _link(node, mean_ms=10.0, probes=50)
         direct = node._console_topology(time.monotonic())["direct"]
         assert direct[0]["state"]["quality"] == "clean"
+
+
+class TestABusyNodeAsksForFewerProbes:
+    """A relay pays for other nodes' consoles: forty awake links measured ~800
+    packets a second on one relay. The fast floor it offers rises with the
+    links probing it fast, and `accord` makes every peer follow."""
+
+    def test_the_floor_rises_with_the_links_running_fast(self):
+        base = mlo.Bounds()
+        assert mlo.loaded_bounds(base, 0) == base
+        assert mlo.loaded_bounds(base, 10) == base           # 10 × 10/s ≤ budget
+        busy = mlo.loaded_bounds(base, 128)
+        assert busy.fast_min == 650                           # 640 rounded up
+        assert 128 * 1000 / busy.fast_min <= mlo.FAST_PROBE_BUDGET
+        assert busy.as_tuple()[1:] == base.as_tuple()[1:]
+        assert mlo.well_formed(*busy.as_tuple())
+
+    def test_it_never_closes_the_fast_range(self):
+        base = mlo.Bounds()
+        flood = mlo.loaded_bounds(base, 10 ** 6)
+        assert flood.fast_min == base.fast_max - 1
+        assert mlo.accord(flood, base).fast_ok
+
+    def test_the_node_offers_it_and_takes_it_back(self):
+        node = _node()
+        links = [_link(node, NodeID(bytes([n]) * 20), uri=f"fake://{n}:1")
+                 for n in range(1, 61)]
+        for peer in links:
+            peer.ka_next_ms = 100                  # all of them probing fast
+        node._rebalance_probe_floor()
+        assert node.keepalive_bounds().fast_min == 300        # 60 × 1000 / 200
+        for peer in links:
+            peer.ka_next_ms = 15000                # all gone back to idling
+        node._rebalance_probe_floor()
+        assert node.keepalive_bounds() == node._ka_configured

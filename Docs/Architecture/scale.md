@@ -17,7 +17,7 @@ test for anything that grows.
 | # | Point | State |
 |---|---|---|
 | 1 | Membership chains and the routing answers that carry them | **fixed** (compaction, lookup end); smaller chains on the wire in progress |
-| 2 | Links per node, and what probing them costs a relay | open |
+| 2 | Links per node, and what probing them costs a relay | **fixed** (probe budget) |
 | 3 | Gossip planes (addresses, revocations, abuse, releases) | open |
 | 4 | Distributed storage (DHT, names, package directory) | open |
 | 5 | Per-remote-node tables | partly reviewed (below) |
@@ -106,6 +106,39 @@ nodes still parse), after which `_ENTRY_CHAIN_MAX` can rise.
 legitimate peak of ~66 that does not grow with `N`. What it still allows a
 hostile peer is ~1.6 MB/s of answers from one link — a matter for point 3 and
 for the early-drop work, not for growth.
+
+## 2. Links per node, and what probing them costs a relay
+
+A node holds at most `_MAX_PEERS` = 128 **links** (not nodes). That is the
+capacity a public relay gives the members behind NAT that depend on it, and
+the ratio of public nodes to NAT'd ones has to respect it: a member that finds
+its relay full is refused at the handshake and looks for another through its
+neighbourhood.
+
+Per link, measured on one relay with twenty leaves each holding a TCP and a UDP
+link to it:
+
+| state | relay, packets/s | relay, kB/s |
+|---|---|---|
+| leaves idle (slow cadence, 15–20 s) | 8 | 0.8 |
+| leaves awake, before | 810 | 80 |
+| leaves awake, after | 400 | 35 |
+
+Idle costs nothing. Awake — somebody's console or app open on a leaf — every
+link it bundles is probed ten times a second, and the relay answers each: its
+cost grew with how many *other* nodes were being looked at, with nothing on its
+side to bound it. At 128 links that was ~2 600 packets a second of probes.
+
+**Fixed — a probe budget.** The fast floor a node offers rises with the links
+probing it fast, so their answers stay under `mlo.FAST_PROBE_BUDGET` (200 a
+second); `accord` takes the higher floor, so every peer follows without being
+asked, and the floor never closes the fast range. A relay's probe load is now
+~400 packets a second at most, whatever the mesh, and every bundle measured
+stays active (`transports.md`, *A busy node offers a higher fast floor*).
+
+Per-link memory is bounded by the media: a UDP link's reorder buffer
+(`max_reorder`, 256 frames of ~1.2 kB) is its largest structure, ~300 kB at
+worst, so 128 links are ~40 MB in the worst case and far less in practice.
 
 ## 5. Per-remote-node tables (first pass)
 
