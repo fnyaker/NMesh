@@ -47,9 +47,14 @@ The cost is linear in `D`, and `D` is how the mesh grew, not something anybody
 chose: a fleet where machines invite machines reaches it in a week.
 
 **Fixed — chain compaction.** A member whose chain is longer than two sends it
-to its root (`_compact_own_chain`, a `CERT_RENEW` whose payload starts with
-`_COMPACT_MAGIC`); the root checks it verifies to itself and signs the member
-directly (`_serve_chain_compaction`). Every member then presents two
+to an ancestor, the root first (`_compact_own_chain`, a `CERT_RENEW` whose
+payload starts with `_COMPACT_MAGIC`); the ancestor checks the chain runs
+through it and signs the member directly (`_serve_chain_compaction`). A root
+that does not answer is followed by the next ancestor down, then the asking
+backs off — the mesh is decentralised, and no member depends on one node being
+up: `_renew_own_membership` keeps every membership alive with its own issuer,
+so the chain through the inviter is a live fallback for the day the root is
+gone. Every member then presents two
 certificates whatever `D` is — measured to `D` = 8, each joining with three and
 ending with two. The renewal loop asks after its first sweep and every
 `_COMPACT_RETRY` until it is short, so a root that was offline is asked again.

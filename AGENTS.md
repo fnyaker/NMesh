@@ -399,6 +399,13 @@ scope. Add yours.
   every link; the relays had never been the cause. → Before naming where time
   goes, vary the path: a second network, or loopback, is what separates the
   code from the road.
+- **A fix that quietly centralised a decentralised system.** Chain compaction
+  made the root sign compacted members, and renewal only asked the issuer of
+  the shortest chain — so every compacted member would have needed the root
+  alive each year, where each used to be renewed by its own inviter. The
+  operator's question ("and if the root disappears?") found it, not the tests.
+  → Before shipping anything that names a special node (a root, a relay, an
+  issuer), ask what happens when that node is gone for good, and test it.
 - **A live network copied into a public repository.** Bug reports, gotchas and
   a test written from live observations carried the operator's public
   addresses, relays' addresses, interface addresses and every node's name —
