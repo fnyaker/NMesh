@@ -16,7 +16,7 @@ test for anything that grows.
 
 | # | Point | State |
 |---|---|---|
-| 1 | Membership chains and the routing answers that carry them | **fixed** (compaction), options below in progress |
+| 1 | Membership chains and the routing answers that carry them | **fixed** (compaction, lookup end); smaller chains on the wire in progress |
 | 2 | Links per node, and what probing them costs a relay | open |
 | 3 | Gossip planes (addresses, revocations, abuse, releases) | open |
 | 4 | Distributed storage (DHT, names, package directory) | open |
@@ -69,11 +69,37 @@ which could already take it out by revoking its own invitee. The book is
 bounded (`lineage.MAX_ENTRIES`) and **full refuses rather than evicts**: a member
 left with its long chain is better than one its inviter can no longer revoke.
 
-Still to do on this point, as decided: smaller chains on the wire (the issuer's
-key is the next certificate's subject key — 27 % per certificate, negotiated so
-older nodes still parse), and ceilings (`_ENTRY_CHAIN_MAX`,
-`_FOUND_NODE_MAX_BYTES`) set with room for the transient chain a member holds
-between joining and being compacted.
+**Ceilings, measured before moved.** `_ENTRY_CHAIN_MAX` (6) is already what the
+packet cap allows: an invitation's answer carries the inviter's chain, the
+certificate it issues and the key material, and with 7 kB certificates a
+seven-long chain makes it ~64 kB, past `Packet`'s 60 000. It can only rise once
+certificates are smaller on the wire. `_FOUND_NODE_MAX_BYTES` was **not**
+raised: a simulated Kademlia mesh (1 000 to 100 000 ids) finds its targets
+equally well with 3, 5, 8 or 20 entries per answer — answer size is not what
+limits a lookup, and a bigger one only buys an attacker more reflection.
+
+What did limit it was the **lookup's end**. With tables as sparse as NMesh's
+(it never refreshes a bucket) and a share of nodes offline:
+
+| mesh | per bucket | offline | old rule, 4 rounds | Kademlia's rule, 10 rounds |
+|---|---|---|---|---|
+| 10 000 | 2 | 30 % | 64 % | 98 % |
+| 50 000 | 2 | 30 % | 30 % | 96 % |
+| 50 000 | 3 | 30 % | 62 % | 96 % |
+| 50 000 | 2 | 50 % | 18 % | 66 % |
+
+The old rule stopped when the closest id it *knew of* stopped changing — what a
+round whose candidates were all offline does. `kad_lookup` now stops when the
+closest node that *answered* did not improve and nothing left to ask is closer,
+under `_KAD_LOOKUP_MAX_ROUNDS` = 10 (was 4); it costs 6–7 rounds on average in
+the hard case, and ends as early as before in the easy one.
+`tests/test_lookup_termination.py` runs the real loop against such a mesh
+(70 % found under the old rule, ≥ 90 % now). Keeping buckets populated is the
+other lever, left to point 3.
+
+Still to do on this point: smaller chains on the wire (the issuer's key is the
+next certificate's subject key — 27 % per certificate, negotiated so older
+nodes still parse), after which `_ENTRY_CHAIN_MAX` can rise.
 
 **Not a scale problem, recorded so it is not re-audited:** `_QUERY_RATE_MAX`
 (512 per 10 s per ingress identity) is a flood valve, measured against a
