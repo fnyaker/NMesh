@@ -354,6 +354,11 @@ class MeshNode:
         # When we last asked our root to sign us directly (`_compact_own_chain`):
         # its answer is taken for `_COMPACT_ANSWER` after that, and never unasked.
         self._compact_asked_at: float | None = None
+        self._compact_asked_to: NodeID | None = None
+        # Asks made without the chain getting shorter, and when the next one is
+        # due: the round goes root first, then down the chain, then backs off.
+        self._compact_misses: int = 0
+        self._compact_not_before: float = 0.0
         self._pending_connections: dict[NodeID, asyncio.Event] = {}
         # One dial per (node, address) at a time; a second caller waits on the
         # first one's outcome. Each entry lives for one dial, so the table is
@@ -12523,18 +12528,21 @@ Hints come first (the ``have`` byte on an announce, from an
             "a 6 h timer")
         await asyncio.sleep(_CERT_RENEW_FIRST)
         while self._running:
-            asked = False
             try:
                 await self._renew_own_membership()
-                asked = await self._compact_own_chain()
+                await self._compact_own_chain()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 pass          # a sweep that fails is retried at the next tick
             job.ran()
-            # A chain still waiting to be shortened is asked about again soon:
-            # the root may simply have been offline.
-            await asyncio.sleep(_COMPACT_RETRY if asked else _CERT_RENEW_TICK)
+            # A chain still waiting to be shortened is asked about again when
+            # its next ask is due, never later than the renewal tick.
+            wait = _CERT_RENEW_TICK
+            if self._compact_pending():
+                wait = min(wait, max(60.0, self._compact_not_before
+                                     - time.monotonic()))
+            await asyncio.sleep(wait)
 
     async def _renew_own_membership(self) -> bool:
         """Ask our issuer for a fresh certificate when ours is running out.
@@ -12547,26 +12555,43 @@ Hints come first (the ``have`` byte on an announce, from an
         fresh invitation, which is the same thing as saying an expired
         membership really is one.
 
+        **Every** membership we hold is renewed, not only the one our shortest
+        chain runs through. A member a root signed directly also keeps the
+        certificate its inviter signed: if the root is gone, the chain through
+        the inviter is still alive and `get_chain_to_root` falls back to it. Kept
+        alive by the inviter alone, it makes the root something a member uses
+        rather than something it depends on.
+
         Returns whether a request went out."""
         if self._cert_store.prune_expired():
             self._note_cert_change()
+        now = int(time.time())
+        newest: dict[bytes, Certificate] = {}
+        for cert in self._cert_store.certs_for(self._id):
+            # A self-signed one means we are our own root: nobody issued it, so
+            # there is nothing to renew and nobody to ask.
+            if (cert.is_self_signed or not cert.expires_at or cert.is_expired(now)
+                    or self._cert_store.is_revoked(cert)):
+                continue
+            held = newest.get(cert.issuer_id.raw)
+            if held is None or cert.expires_at > held.expires_at:
+                newest[cert.issuer_id.raw] = cert
+        asked = False
+        for cert in newest.values():
+            if cert.expires_at - now > _CERT_RENEW_WINDOW:
+                continue
+            await self._route_outbound(
+                Packet.create(CERT_RENEW, self._id.raw, cert.issuer_id.raw,
+                              cert.serialize()))
+            asked = True
+        return asked
+
+    def _compact_pending(self) -> bool:
         chain = self._cert_store.get_chain_to_root(self._id)
-        if not chain:
-            return False
-        mine = chain[0]
-        # A self-signed first link means we are only our own root: nobody issued
-        # us anything, so there is nothing to renew and nobody to ask.
-        if mine.is_self_signed or not mine.expires_at:
-            return False
-        if mine.expires_at - int(time.time()) > _CERT_RENEW_WINDOW:
-            return False
-        await self._route_outbound(
-            Packet.create(CERT_RENEW, self._id.raw, mine.issuer_id.raw,
-                          mine.serialize()))
-        return True
+        return bool(chain) and len(chain) > 2 and not chain[0].is_self_signed
 
     async def _compact_own_chain(self) -> bool:
-        """Ask our root to sign us directly when our chain is longer than two.
+        """Ask an ancestor to sign us directly when our chain is longer than two.
 
         Our certificate is signed by whoever invited us, theirs by whoever
         invited them, and so on up to the root: one post-quantum certificate,
@@ -12575,27 +12600,47 @@ Hints come first (the ``have`` byte on an announce, from an
         it at all. The root re-signs a member whose chain verifies to it, so the
         chain stays two long however the mesh grew (`lineage.py`).
 
+        The root first, because it gives the shortest chain; but nothing here
+        depends on it. A root that does not answer is followed by the next
+        ancestor down, which shortens the chain less but still stops it
+        growing, and after a whole round of silence the asking backs off to
+        `_COMPACT_RETRY_MAX`. Whoever signs keeps the lineage and passes
+        revocations on, so no single node holds the mesh's memberships up.
+
         Sent as a `CERT_RENEW` so a relay too old to know of it still carries
-        it; a root too old to serve it reads a certificate that is not its own
-        and drops it. Returns whether a request went out."""
+        it; an ancestor too old to serve it reads a certificate that is not its
+        own and drops it. Returns whether a request went out."""
         chain = self._cert_store.get_chain_to_root(self._id)
         if not chain or len(chain) <= 2 or chain[0].is_self_signed:
+            self._compact_misses, self._compact_not_before = 0, 0.0
+            return False
+        now = time.monotonic()
+        if now < self._compact_not_before:
             return False
         payload = _COMPACT_MAGIC + _encode_chain(chain)
         if len(payload) > _COMPACT_MAX:
             return False
-        self._compact_asked_at = time.monotonic()
+        # chain = [us, our inviter, its inviter, ..., root]: the ones that can
+        # shorten it are the inviter's inviter and everyone above, root first.
+        candidates = [cert.subject_id for cert in reversed(chain[2:])]
+        target = candidates[self._compact_misses % len(candidates)]
+        rounds = self._compact_misses // len(candidates)
+        self._compact_misses += 1
+        self._compact_not_before = now + min(_COMPACT_RETRY * (2 ** min(rounds, 16)),
+                                             _COMPACT_RETRY_MAX)
+        self._compact_asked_at, self._compact_asked_to = now, target
         await self._route_outbound(
-            Packet.create(CERT_RENEW, self._id.raw, chain[-1].subject_id.raw,
-                          payload))
+            Packet.create(CERT_RENEW, self._id.raw, target.raw, payload))
         return True
 
     async def _serve_chain_compaction(self, packet: Packet) -> None:
         """A member below us asks to be signed by us directly.
 
-        Hands out nothing the chain did not already prove: it verifies to us,
-        through issuers none of which is revoked, so every one of them vouched
-        for the next and we vouched for the first. The certificate we sign binds
+        The root, or any ancestor above the member's own inviter whose chain is
+        shorter than what it would replace. Hands out nothing the chain did not
+        already prove: it verifies to a root we trust, through issuers none of
+        which is revoked, and we are one of them, so we vouched — transitively —
+        for the member already. The certificate we sign binds
         the member's id to its own key, which only the key's holder can use — a
         request sent under somebody else's id buys them nothing.
 
@@ -12615,10 +12660,18 @@ Hints come first (the ``have`` byte on an announce, from an
         member = chain[0]
         if member.is_self_signed or member.subject_id != NodeID(packet.src_id):
             return          # only the subject may ask for its own
-        if self._cert_store.verify_chain(chain) != self._id:
-            return          # a chain to somebody else, or one that no longer holds
-        ancestors = [cert.issuer_id.raw for cert in chain[:-1]
-                     if cert.issuer_id != self._id]
+        if self._cert_store.verify_chain(chain) is None:
+            return          # a chain that does not hold, or not to a root we trust
+        # We must be on it — above the member's own inviter, or there is
+        # nothing to shorten — and our own chain must make it shorter.
+        position = next((index for index, cert in enumerate(chain[1:], 1)
+                         if cert.subject_id == self._id), None)
+        if position is None or position < 2:
+            return
+        ours = self._cert_store.get_chain_to_root(self._id)
+        if not ours or len(ours) + 1 >= len(chain):
+            return
+        ancestors = [chain[index].subject_id.raw for index in range(1, position)]
         if not self._claim_renewal(member.subject_id):
             return
         if not self._cert_store.lineage.record(member.subject_id.raw, ancestors):
@@ -12632,12 +12685,12 @@ Hints come first (the ``have`` byte on an announce, from an
             blocking=False)   # we are inside a receive loop
 
     def _compaction_answer(self, cert: Certificate) -> bool:
-        """Is ``cert`` the root's answer to the compaction we asked for?"""
+        """Is ``cert`` the answer to the compaction we asked for, from the
+        ancestor we asked?"""
         asked = self._compact_asked_at
         if asked is None or time.monotonic() - asked > _COMPACT_ANSWER:
             return False
-        chain = self._cert_store.get_chain_to_root(self._id)
-        return bool(chain) and chain[-1].subject_id == cert.issuer_id
+        return cert.issuer_id == self._compact_asked_to
 
     def _cascade_revocation(self, subject: NodeID, issuer: NodeID) -> int:
         """Pass a revocation on to the members we signed directly below it.

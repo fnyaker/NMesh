@@ -3547,3 +3547,22 @@ than two; the root records the lineage and cascades revocations through it.
 Measured to the eighth generation: every member ends with two certificates.
 Smaller chains on the wire and the ceilings are still to come
 (`Docs/Architecture/scale.md`, point 1).
+
+## 84 — high — Compaction made every compacted member depend on the root
+
+> **Status — fixed before any node ran it** (introduced by the fix for 83 in
+> 0.4.74, corrected in 0.4.75). Tests:
+> `tests/integration/test_chain_compaction.py::TestTheRootIsNotNeeded`.
+
+**Where** — `src/node.py`: `_renew_own_membership`, `_compact_own_chain`,
+`_serve_chain_compaction`.
+
+**What happens** — renewal asked the issuer of the *shortest* chain only. Once
+the root had signed a member directly, the root was that issuer, so a root gone
+for a year would have let every compacted member expire — where before each one
+was renewed by its own inviter. And compaction asked the root alone, so a root
+that was down meant chains grew again.
+
+**Fixed** — every membership a node holds is renewed by its own issuer, so the
+chain through the inviter stays a live fallback; compaction asks the root first
+and then each ancestor down the chain, backing off after a silent round.

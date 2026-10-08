@@ -67,10 +67,13 @@ _COMPACT_MAGIC    = b"NMC1"
 # Bytes of a compaction request, before any parse: a chain of `_ENTRY_CHAIN_MAX`
 # post-quantum certificates is ~44 kB.
 _COMPACT_MAX      = 58_000
-# How long after asking the root's answer is taken, and how often a member
-# whose chain is still long asks again.
-_COMPACT_ANSWER   = 600.0
-_COMPACT_RETRY    = 900.0
+# How long after asking an answer is taken, how soon a member whose chain is
+# still long asks again, and the longest it waits once a whole round of
+# ancestors stayed silent — a root that is gone must not be asked every quarter
+# of an hour by every member for ever.
+_COMPACT_ANSWER    = 600.0
+_COMPACT_RETRY     = 900.0
+_COMPACT_RETRY_MAX = 86400.0
 _ENTRY_COUNT_MAX = 20   # Kademlia k; the receiver would drop a longer answer
 # Certificate renewal. A membership certificate lasts a year
 # (`CryptoIdentity.issue_cert`) and nothing renewed it: at T+365 days a node went
@@ -932,6 +935,7 @@ __all__ = [
     "_COMPACT_MAGIC",
     "_COMPACT_MAX",
     "_COMPACT_RETRY",
+    "_COMPACT_RETRY_MAX",
     "_ENTRY_CHAIN_MAX",
     "_ENTRY_COUNT_MAX",
     "_ENTRY_HEADER",

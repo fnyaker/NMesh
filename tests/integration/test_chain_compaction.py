@@ -40,8 +40,9 @@ async def _until(predicate, seconds: float = 15.0) -> bool:
     return predicate()
 
 
-async def _line(generations: int):
-    """root invites n1, n1 invites n2, ... — each compacted before it invites."""
+async def _line(generations: int, compact: bool = True):
+    """root invites n1, n1 invites n2, ... — each compacted before it invites,
+    unless ``compact`` is off."""
     base = free_port(generations + 1)
     nodes = [_node()]
     await nodes[0].start([f"tcp://127.0.0.1:{base}"])
@@ -52,7 +53,7 @@ async def _line(generations: int):
                         nodes[-1].generate_invite())
         await node.wait_for_session(timeout=20)
         nodes.append(node)
-        if _chain_len(node) > 2:
+        if compact and _chain_len(node) > 2:
             assert await node._compact_own_chain()
             assert await _until(lambda: _chain_len(node) == 2)
     return nodes, base
@@ -145,6 +146,56 @@ class TestARevocationStillReachesACompactedMember:
                                for c in root._cert_store.certs_for(node.id))
             assert voided(second) and voided(third)
             assert not voided(first)
+        finally:
+            for node in nodes:
+                await node.stop()
+
+
+class TestTheRootIsNotNeeded:
+    """Decentralised means a member never depends on one node being up."""
+
+    async def test_with_the_root_gone_an_ancestor_shortens_the_chain(self):
+        nodes, _ = await _line(4, compact=False)
+        root, first, second, third, fourth = nodes
+        try:
+            assert _chain_len(fourth) == 5
+            await root.stop()
+            # Root first, then down the chain: the root stays silent, so the
+            # next ask goes to `first`, whose chain is two long.
+            for _ in range(3):
+                fourth._compact_not_before = 0.0
+                await fourth._compact_own_chain()
+                if await _until(lambda: _chain_len(fourth) < 5, 4.0):
+                    break
+            assert _chain_len(fourth) == 3
+            assert fourth._cert_store.get_chain_to_root(fourth.id)[0].issuer_id == first.id
+            assert first._cert_store.lineage.ancestors(fourth.id.raw)
+        finally:
+            for node in nodes[1:]:
+                await node.stop()
+
+    async def test_every_membership_is_renewed_and_the_long_chain_is_a_fallback(
+            self, monkeypatch):
+        import src.node as node_mod
+        nodes, _ = await _line(2)
+        root, first, second = nodes
+        try:
+            assert _chain_len(second) == 2      # signed by the root directly
+            sent = []
+
+            async def _record(packet, **_):
+                sent.append(packet.dst_id)
+            monkeypatch.setattr(node_mod, "_CERT_RENEW_WINDOW", 10 ** 9)
+            monkeypatch.setattr(second, "_route_outbound", _record)
+            assert await second._renew_own_membership()
+            assert {root.id.raw, first.id.raw} <= set(sent)
+            # Without the root's certificate the chain through the inviter
+            # still holds: nothing about the member depended on the root.
+            store = second._cert_store
+            store._certs[second.id.raw] = [c for c in store.certs_for(second.id)
+                                           if c.issuer_id != root.id]
+            store._chains.clear()
+            assert _chain_len(second) == 3
         finally:
             for node in nodes:
                 await node.stop()
