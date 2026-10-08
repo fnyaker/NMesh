@@ -59,6 +59,7 @@ KEY_GRANT         = 0x2F   # the publisher secret, sealed to that key
 INVITE_OFFER      = 0x30   # "expect a seek for this code" — the inviter, to a relay
 SPEED_PROBE       = 0x31   # padding, to measure a link by loading it
 SPEED_ECHO        = 0x32   # the same padding back — one for one, never more
+STOP_RELAY        = 0x33   # a destination's signed "stop relaying that node to me"
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -122,5 +123,6 @@ __all__ = [
     "RELEASE_FETCH",
     "SPEED_ECHO",
     "SPEED_PROBE",
+    "STOP_RELAY",
     "STORE",
 ]

@@ -33,6 +33,7 @@ from .invite import InviteManager, compute_response
 from .cert import Certificate, FINGERPRINT_LEN
 from .cert_store import CertStore
 from . import revocation
+from . import stop_relay
 from .revocation import MAX_RECORD as _REVOCATION_MAX
 from . import accusation
 from .accusation import MAX_RECORD as _ACCUSATION_MAX
@@ -670,6 +671,12 @@ class MeshNode:
         self._stun_enabled: bool = False
         # Per-target cooldown for relayed→direct path upgrade attempts
         self._upgrade_last: OrderedDict[NodeID, float] = OrderedDict()
+        # Stop-relay (`stop_relay.py`). As a relay: (blocked src, destination)
+        # -> the rule a destination signed. As a destination: (blocked src,
+        # the node that delivered it) -> when we asked. Both bounded.
+        self._stop_rules: OrderedDict[tuple[bytes, bytes], dict] = OrderedDict()
+        self._stops_asked: OrderedDict[tuple[bytes, bytes], dict] = OrderedDict()
+        self._stop_rate: OrderedDict[bytes, tuple] = OrderedDict()
         # Invite-block join state (driven from the console)
         self._join_task: asyncio.Task | None = None
         self._join_status: dict | None = None
@@ -7535,6 +7542,10 @@ class MeshNode:
         if packet.type in _ROUTABLE_TYPES:
             if peer.authenticated_id is None:
                 return
+            # Refused as early as the header allows: before the replay key is
+            # hashed, before anything is forwarded or decrypted.
+            if self._refuse_routed(peer, packet):
+                return
             # msg_id must commit to the packet's content. This stops a relay from
             # minting fresh msg_ids for the same payload to slip past dedup and
             # amplify a flood — any tampering to change the id also breaks it.
@@ -10109,6 +10120,137 @@ Hints come first (the ``have`` byte on an announce, from an
         self._persist_pseudos()   # a name learned once is a name kept
         self._note_change("names")
         return claim
+
+    # -----------------------------------------------------------------------
+    # Stop-relay: moving the drop to where the traffic enters
+    # -----------------------------------------------------------------------
+
+    def _refuse_routed(self, peer: '_Peer', packet: Packet) -> bool:
+        """Drop a routed packet on its header alone. True when dropped.
+
+        Two cases, and only these two. A packet **to us** from a node we no
+        longer serve (suspect or worse, the line `_tarpit` draws for a direct
+        link) — through a relay, since such a direct link is already
+        tarpitted — is dropped, and the relay is asked to stop delivering it
+        (`_ask_stop_relay`). A packet **through us** that a destination signed a
+        stop-relay rule against is dropped, and the request goes back to
+        whoever fed it (`_pass_stop_upstream`). What *we* think of a node never
+        decides what we relay to somebody else: only its destination may."""
+        src, dst = packet.src_id, packet.dst_id
+        if dst == self._id.raw:
+            if src == peer.authenticated_id.raw:
+                return False
+            if not self._reputation.is_suspect(NodeID(src)):
+                return False
+            self._ask_stop_relay(peer, src)
+            return True
+        if not self._stop_rules:
+            return False
+        rule = self._stop_rules.get((src, dst))
+        if rule is None:
+            return False
+        if time.monotonic() >= rule["until"]:
+            del self._stop_rules[(src, dst)]
+            return False
+        if src != peer.authenticated_id.raw:
+            self._pass_stop_upstream(peer, rule)
+        return True
+
+    def _ask_stop_relay(self, peer: '_Peer', src: bytes) -> None:
+        """Ask the link that delivered a refused node's packet to stop. Once
+        per (node, link) per request lifetime; a link that announced the plane
+        and is still delivering after `_STOP_RELAY_GRACE` is charged, once — a
+        refusal we asked for and watched ourselves."""
+        via = peer.authenticated_id
+        if not self.peer_announces(peer, features.STOP_RELAY):
+            return
+        now = time.monotonic()
+        key = (src, via.raw)
+        asked = self._stops_asked.get(key)
+        if asked is not None and now < asked["until"]:
+            if now - asked["at"] > _STOP_RELAY_GRACE and not asked["charged"]:
+                asked["charged"] = True
+                self.report_abuse(via, _STOP_RELAY_REFUSAL_WEIGHT,
+                                  "kept relaying a node it was asked to stop relaying")
+            return
+        try:
+            record = stop_relay.build(NodeID(src), self._identity.dsa_public_key,
+                                      self._identity.sign, ttl=_STOP_RELAY_TTL)
+        except (ValueError, TypeError):
+            return
+        # Asked again before the relay's copy runs out, so a rule that is still
+        # wanted never lapses between the two.
+        self._stops_asked[key] = {"at": now, "until": now + _STOP_RELAY_TTL * 0.8,
+                                  "charged": False}
+        self._stops_asked.move_to_end(key)
+        while len(self._stops_asked) > _STOP_RULES_MAX:
+            self._stops_asked.popitem(last=False)
+        self._spawn_bounded(self._send_stop_relay(peer, record))
+
+    async def _send_stop_relay(self, peer: '_Peer', record: bytes) -> None:
+        try:
+            await peer.send(Packet.create(STOP_RELAY, self._id.raw,
+                                          peer.authenticated_id.raw, record))
+        except Exception:
+            pass
+
+    def _pass_stop_upstream(self, peer: '_Peer', rule: dict) -> None:
+        """A link is still feeding us what a destination asked us not to
+        relay: hand it the destination's own request, once, and charge it once
+        if it goes on after `_STOP_RELAY_GRACE`."""
+        via = peer.authenticated_id.raw
+        now = time.monotonic()
+        told = rule["told"].get(via)
+        if told is None:
+            if self.peer_announces(peer, features.STOP_RELAY) and len(rule["told"]) < 16:
+                rule["told"][via] = now
+                self._spawn_bounded(self._send_stop_relay(peer, rule["record"]))
+            return
+        if now - told > _STOP_RELAY_GRACE and via not in rule["charged"]:
+            rule["charged"].add(via)
+            self.report_abuse(peer.authenticated_id, _STOP_RELAY_REFUSAL_WEIGHT,
+                              "kept relaying a node it was asked to stop relaying")
+
+    async def _handle_stop_relay(self, peer: '_Peer', packet: Packet) -> None:
+        """A destination's signed "stop relaying that node to me", from the
+        link it reached us on.
+
+        Honoured only for the destination that signed it, whoever handed it
+        over — which is why a relay can pass it on and why nobody can use it
+        against a third party. Bounded per link, per destination and in all;
+        a full table forgets the oldest rule rather than refusing a new one,
+        since a refusal would get an honest relay charged by the requester."""
+        if not self._gossip_allowed(self._stop_rate, peer, _STOP_RELAY_RATE_WINDOW,
+                                    _STOP_RELAY_RATE_MAX, plane="stop-relay"):
+            return
+        raw = packet.payload
+        if not raw or len(raw) > _STOP_RELAY_MAX:
+            return
+        parsed = stop_relay.parse(raw, self._identity.verify)
+        if parsed is None:
+            return          # forged, or expired on the way — nothing to honour
+        requester, blocked = parsed["requester"], parsed["blocked"]
+        if requester == self._id:
+            return          # about our own inbox, which `_refuse_routed` keeps
+        key = (blocked.raw, requester.raw)
+        until = time.monotonic() + max(0.0, parsed["expires_at"] - time.time())
+        now = time.monotonic()
+        for stale in [k for k, r in self._stop_rules.items() if r["until"] <= now]:
+            del self._stop_rules[stale]
+        rule = self._stop_rules.get(key)
+        if rule is None:
+            if sum(1 for _, dst in self._stop_rules
+                   if dst == requester.raw) >= _STOP_RULES_PER_DST:
+                return
+            while len(self._stop_rules) >= _STOP_RULES_MAX:
+                self._stop_rules.popitem(last=False)
+            self._stop_rules[key] = {"until": until, "record": raw, "told": {},
+                                     "charged": set()}
+        elif until > rule["until"]:
+            # A renewal: the links we passed the old one to get the new one the
+            # next time they feed us, so their copy does not lapse either.
+            rule["until"], rule["record"] = until, raw
+            rule["told"].clear()
 
     def _spawn_bounded(self, coro) -> None:
         """Run a coroutine detached from the caller.
@@ -13918,6 +14060,7 @@ _HANDLERS = {
     ECHO_REQUEST:      MeshNode._handle_echo_request,
     SPEED_PROBE:       MeshNode._handle_speed_probe,
     SPEED_ECHO:        MeshNode._handle_speed_echo,
+    STOP_RELAY:        MeshNode._handle_stop_relay,
     ECHO_REPLY:        MeshNode._handle_echo_reply,
     CERT_RENEW:        MeshNode._handle_cert_renew,
     CERT_RENEWED:      MeshNode._handle_cert_renewed,
@@ -13956,4 +14099,5 @@ _MESSAGE_PLANE = {
     ABUSE_REPORT: features.ABUSE,
     KA_PROPOSE: features.KEEPALIVE, KA_REQUEST: features.KEEPALIVE,
     SPEED_PROBE: features.SPEEDTEST, SPEED_ECHO: features.SPEEDTEST,
+    STOP_RELAY: features.STOP_RELAY,
 }

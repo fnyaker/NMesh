@@ -113,17 +113,22 @@ SPEEDTEST = "speed"
 # a packet sent in that gap must not be lost (`Packet.replay_key`).
 BLAKE2B_IDS = "msgid_b2b"
 
+# Asking the relays on a path to stop forwarding one node's traffic to us, and
+# passing such a request on (`stop_relay.py`). A node that never announced it is
+# never sent one — and never judged for not honouring one.
+STOP_RELAY = "stoprelay"
+
 SPOKEN = frozenset({CORE, KADEMLIA, E2E, DIRECTORY, PSEUDO, CATALOG, RELEASE,
                     PUNCH, REACH, RELAY, RENDEZVOUS, RENEW, REVOKE, ABUSE,
                     KEEPALIVE, MLO, PACKAGES, HANDOVER, SPEEDTEST,
-                    BLAKE2B_IDS})
+                    BLAKE2B_IDS, STOP_RELAY})
 
 # Planes added *after* this negotiation existed. Silence about one of these is
 # not a node from before the name — it is a node that has never heard of it,
 # and sending it the new thing is exactly what rule 2 forbids. See
 # ``MeshNode.peer_announces``, which is the predicate these are asked through.
 SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO, PACKAGES, HANDOVER, RENDEZVOUS,
-                               SPEEDTEST, BLAKE2B_IDS})
+                               SPEEDTEST, BLAKE2B_IDS, STOP_RELAY})
 
 
 class FeatureError(Exception):

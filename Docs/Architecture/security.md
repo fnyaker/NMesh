@@ -432,6 +432,39 @@ tells the node through `_Peer.on_abuse`, hung there by `MeshNode._new_peer`, and
 A peer with no identity is still charged on the link alone, because there is
 nothing else to charge.
 
+## Refusing a node all the way back (`stop_relay.py`)
+
+A node this one no longer serves — suspect or worse, the line `_tarpit` draws
+for a direct link — used to be refused only on a direct link. Through a relay,
+everything it sent arrived, was decrypted and handed on, and every relay on the
+path paid for traffic the destination had already decided to refuse.
+
+- **Dropped on the header.** `_refuse_routed` runs in `_handle_packet` before
+  the replay key is hashed, before anything is forwarded or decrypted: a
+  routed packet *to us* from a node we do not serve is dropped there.
+- **The relay is asked to stop.** The destination signs a `STOP_RELAY` record —
+  "stop relaying *that node* to *me*", for `_STOP_RELAY_TTL` (at most
+  `stop_relay.MAX_TTL`) — and sends it on the link that delivered the packet,
+  once per (node, link), renewed before it runs out.
+- **The request goes back along the path.** A relay holding the rule drops
+  matching packets as they arrive and hands the *same signed record* to the
+  link that fed them, once per link; that relay does the same. The rule is
+  re-stamped at each hop like a revocation, but it is the destination's
+  signature that a relay checks.
+- **It speaks only for the destination's own inbox.** A relay honours a record
+  for the key that signed it and nobody else, so nobody can have a node cut off
+  from anybody but themselves; and a relay never refuses to relay on its own
+  opinion of a node — only on a destination's request. Hearsay stays hearsay.
+- **Refusing is suspect.** A link that announced `stoprelay` and is still
+  delivering the refused traffic `_STOP_RELAY_GRACE` after being asked is
+  charged `_STOP_RELAY_REFUSAL_WEIGHT` by the node that asked — once per rule
+  and link, and on what it saw itself. A node that never announced the plane is
+  never sent a request and never judged for one.
+- **Bounded**: requests per link (`_STOP_RELAY_RATE_*`), rules per destination
+  (`_STOP_RULES_PER_DST`) and in all (`_STOP_RULES_MAX`); a full table forgets
+  its oldest rule rather than refusing a new one, since a refusal would get an
+  honest relay charged. `parse` never raises.
+
 ## Zero trust: being in the network is not being trusted
 
 Source: `reputation.py`, `accusation.py`, and `MeshNode.report_abuse`.
