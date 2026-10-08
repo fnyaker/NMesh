@@ -3582,3 +3582,20 @@ stand on lookups.
 
 **Fixed** — Kademlia's own end (the closest node that answered did not improve
 and nothing left to ask is closer), ten rounds at most: 96 % in the same mesh.
+
+## 86 — medium — A relay's probe load grew with every awake peer
+
+> **Status — fixed.** Tests: `tests/test_mlo.py::TestABusyNodeAsksForFewerProbes`.
+
+**Where** — `src/mlo.py`: `accord`; `src/node.py`: the keepalive sweep.
+
+**What happens** — a link bundled for multi-link operation is probed ten times
+a second, by a node whose console or app is open, and the relay at the other
+end answers every probe. Measured with twenty awake leaves on one relay: 810
+packets and 80 kB a second, against 8 and 0.8 idle — ~2 600 packets a second at
+`_MAX_PEERS`, paid by the relay for nodes it has nothing to do with.
+
+**Fixed** — the fast floor a node offers rises with the links probing it fast
+(`mlo.loaded_bounds`, budget `mlo.FAST_PROBE_BUDGET`), and the accord makes
+every peer follow: the same twenty leaves cost 400 packets and 35 kB a second,
+every bundle still active.
