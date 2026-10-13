@@ -46,6 +46,7 @@ MAX_SHELLS = 8                # shell sessions tracked at once
 MAX_SCAN_HOSTS = 256
 MAX_UPDATES = 64              # per-node update progress kept for the UI
 MAX_INVITES = 32              # invitations held for the page, one per node
+MAX_PASSWORDS = 32            # provisioned consoles' passwords, until read
 MAX_DOCKER_ANSWERS = 32       # docker answers held for the page that asked
 # What a docker operation costs on the far side. The reads are one round trip;
 # the four that pull images are minutes, and a browser is not going to hold a
@@ -126,6 +127,10 @@ class FleetBridge:
         # rather than logged: the code *is* the secret, and an activity log is
         # a long-lived list on a screen anybody walking past can read.
         self._invites: "OrderedDict[str, dict]" = OrderedDict()
+        # node hex -> the console password a machine we provisioned generated
+        # and sent us. Memory only, and read once: nobody else is ever told it,
+        # so this is the one copy outside that machine.
+        self._passwords: "OrderedDict[str, dict]" = OrderedDict()
         # node hex -> where its update has got to. An update runs for minutes;
         # the node list should say so rather than leaving a scrolling log as the
         # only sign of life.
@@ -218,8 +223,12 @@ class FleetBridge:
                       f"{short}… {'granted ' + ', '.join(event.caps) if event.granted else 'denied: ' + event.reason}",
                       node_hex)
         elif isinstance(event, NodeAdopted):
+            if event.password:
+                self._record_password(node_hex, event)
             self._say("ok", f"{event.host or short}… came online and joined "
-                            f"the fleet", node_hex)
+                            f"the fleet" + (" — its console password is waiting "
+                                            "to be read once" if event.password
+                                            else ""), node_hex)
         elif isinstance(event, Revoked):
             self._say("warn", f"{short}… revoked the relationship", node_hex)
         elif isinstance(event, CapsChanged):
@@ -389,6 +398,31 @@ class FleetBridge:
             }
             self._bump()
 
+    def _record_password(self, node_hex: str, event) -> None:
+        with self._lock:
+            self._passwords.pop(node_hex, None)
+            while len(self._passwords) >= MAX_PASSWORDS:
+                self._passwords.popitem(last=False)
+            self._passwords[node_hex] = {
+                "node": node_hex, "at": time.time(), "host": event.host,
+                "label": event.label, "password": event.password,
+            }
+            self._bump()
+
+    def waiting_passwords(self) -> list:
+        """Which machines have a password waiting — never the password."""
+        with self._lock:
+            return [{key: value for key, value in entry.items()
+                     if key != "password"} for entry in self._passwords.values()]
+
+    def take_password(self, node_hex: str) -> dict | None:
+        """Hand a provisioned machine's console password over, and forget it."""
+        with self._lock:
+            entry = self._passwords.pop(str(node_hex), None)
+            if entry is not None:
+                self._bump()
+        return entry
+
     def take_invite(self, node_hex: str) -> dict | None:
         """Hand the invitation to the page that asked, and forget it.
 
@@ -460,6 +494,7 @@ class FleetBridge:
             "pending_in": state.pending_in(),
             "pending_out": state.pending_out(),
             "provisioned": state.provisioned(),
+            "passwords": self.waiting_passwords(),
             # One membership list, and the page derives "which groups is this
             # node in?" from it. A second copy on each node is a second chance
             # for the two to disagree.

@@ -995,6 +995,69 @@ class TestInviteRoute:
             console.stop(); await host.stop_all(); await node.stop()
 
 
+class TestProvisionedPasswordRoute:
+    """A provisioned machine's console password reaches the operator who
+    installed it, and is handed over exactly once."""
+
+    def _adopted(self, password="generated-password-123"):
+        from src.apps.fleet import NodeAdopted
+        return NodeAdopted(NodeID(bytes.fromhex("cd" * 20)), "10.0.0.5",
+                           "new box", password)
+
+    async def test_it_is_handed_over_once_and_never_polled(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            bridge = host.bridge("fleet")
+            bridge._on_event(self._adopted())
+            snapshot = json.dumps(bridge.snapshot())
+            assert "generated-password-123" not in snapshot
+            assert [entry["node"] for entry in bridge.waiting_passwords()] == ["cd" * 20]
+            assert "generated-password-123" not in json.dumps(list(bridge._log))
+            status, _, _, body = await _post(console, "/api/fleet/password", token,
+                                             {"node": "cd" * 20})
+            assert status == 200 and body["password"] == "generated-password-123"
+            status, _, _, _ = await _post(console, "/api/fleet/password", token,
+                                          {"node": "cd" * 20})
+            assert status == 404
+            assert bridge.waiting_passwords() == []
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_an_adoption_without_one_holds_nothing(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            bridge = host.bridge("fleet")
+            bridge._on_event(self._adopted(password=""))
+            assert bridge.waiting_passwords() == []
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_what_it_holds_is_bounded(self):
+        from src.apps import fleet_web
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            bridge = host.bridge("fleet")
+            from src.apps.fleet import NodeAdopted
+            for index in range(fleet_web.MAX_PASSWORDS + 5):
+                bridge._on_event(NodeAdopted(
+                    NodeID(index.to_bytes(20, "big")), "h", "", "password-%06d" % index))
+            assert len(bridge.waiting_passwords()) == fleet_web.MAX_PASSWORDS
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+    async def test_it_needs_a_session(self):
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            host.bridge("fleet")._on_event(self._adopted())
+            status, _, _, _ = await _post(console, "/api/fleet/password", None,
+                                          {"node": "cd" * 20})
+            assert status == 401
+            assert host.bridge("fleet").waiting_passwords()
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+
 class TestOperationTracking:
     """A remote action answers asynchronously. With no tracking, the page has
     no way of saying whether it succeeded, failed, or is still running — which

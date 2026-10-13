@@ -977,9 +977,11 @@ The interface asks explicitly for:
 - if it is unticked, **an account that can** and its password;
 - **where NMesh goes**: *system* (`/opt/nmesh`, a dedicated service account —
   recommended) or *user* (the login account's home, no root);
-- **the capabilities the new machines grant you** — ticked by default:
-  `status`, `update`, `manage` and `passwordless`, because a machine installed
-  from here has nobody in front of it and a console password nobody typed;
+- **the capabilities the new machines grant you** — `full` by default, and
+  `full` too when a request names none: whoever deploys a machine already has
+  root on it through SSH, and nobody will sit in front of it to grant anything
+  later, so a narrower grant is a door its owner can only reopen by installing
+  again. Untick it and tick less to deploy a machine you will not run yourself;
 - **"Keep them updated from the publishers this node accepts"**, ticked, which
   is what makes those machines able to update themselves at all (below).
 
@@ -1065,8 +1067,29 @@ trust), the **release publishers** the machine should accept, and a
    certificate comes after;
 3. enrols the operator with the intended capabilities;
 4. proves possession of the token, which lets the operator **bind this brand-new
-   mesh identity to the provisioning run** they just did;
+   mesh identity to the provisioning run** they just did — and, in the same
+   signed, end-to-end encrypted claim, hands them the **console password** it
+   generated on this start;
 5. **deletes the file**, whatever happens.
+
+### The new machine's console password
+
+The operator is the one person who has to be able to open that console, and
+the claim already makes them its operator with `full` — more than the password
+opens — so the claim carries it (`console_password`). On the operator's side it
+is accepted only from a claim whose token matched a run this node started, and
+only if it is a password the console itself would accept (printable, 12 to 256
+characters, no surrounding space); anything else is dropped and the machine is
+adopted without it.
+
+It is then held **in memory**, one per machine (`MAX_PASSWORDS`, 32), and never
+written to the activity log, the snapshot, or disk: the *Nodes* page shows
+"Console password waiting" with no secret in it, and **Show it** fetches it from
+`POST /api/fleet/password`, which forgets it as it answers. Shown once; a
+restart of the operator's node before anybody looked loses it, and `full` still
+opens that machine. On the machine itself the password also waits in
+`console.first-password` (`0600`) until the first login there
+([`../Setup/guide`](../Setup/guide)).
 
 ### The publishers, and why they cannot be added later
 
@@ -1173,7 +1196,7 @@ the shell stream : type(1) ‖ sid(16) ‖ raw bytes
 |---|---|---|---|
 | `ENROL_REQUEST` | 0x01 | operator → node | signed, `fleet.enrol` |
 | `ENROL_GRANT` / `_DENY` / `_REVOKE` | 0x02–0x04 | ↔ | signed, `fleet.grant` |
-| `PREAUTH_CLAIM` | 0x05 | new node → operator | signed, `fleet.preauth` |
+| `PREAUTH_CLAIM` | 0x05 | new node → operator | signed, `fleet.preauth`: `{token, caps, host, console_password?}` |
 | `ENROL_NARROW` | 0x06 | operator → node (handing a right back) | signed, `fleet.narrow` |
 | `STATUS_REQUEST` / `_REPORT` | 0x10 / 0x11 | → / ← | the request only |
 | `ERROR` | 0x12 | ← | — |
@@ -1318,6 +1341,7 @@ All behind the console session (Bearer or cookie). Details:
 | *(any console route)* | the `X-NMesh-Node: <id>` header | relays the call to that node instead of running it here — for a control frame, the same frame goes down the relay and that node's plane decides |
 | POST | `/api/fleet/status` / `update` / `scan` | actions |
 | POST | `/api/fleet/invite` | `{node, ttl?, ticket?}` → the invitation itself. The one fleet route that **waits** for its answer: what comes back is a single-use secret the page shows once |
+| POST | `/api/fleet/password` | `{node}` → `{node, host, label, at, password}`, the console password a machine provisioned from here sent with its claim. **Read once**: the next call answers 404. The snapshot's `passwords` lists who has one waiting, never the password |
 | POST | `/api/fleet/shell` / `input` / `resize` / `close` | the shell |
 | GET | `/api/fleet/shell?node=` | the live session on that node — what a page re-attaching to a shell it did not open asks |
 | GET | `/api/fleet/shell?rid=[&wait=1]` | the shell *this* request opened, or `409 {error, failed: true}` once the far node refused it |

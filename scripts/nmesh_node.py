@@ -268,10 +268,12 @@ def _pin_publishers(node, preauth) -> int:
     return pinned
 
 
-async def _adopt_operator(node, host, preauth, path) -> None:
+async def _adopt_operator(node, host, preauth, path,
+                          console_password: str | None = None) -> None:
     """First start after provisioning: accept the operator's publishers, join
     the mesh they named, adopt them as an operator, prove which provisioning run
-    we came from, and delete the pre-authorisation.
+    we came from — handing them the console password generated on this start,
+    if there is one — and delete the pre-authorisation.
 
     The file is removed whatever happens. It is single-use by construction — the
     operator only honours the token once — so keeping it around after the
@@ -289,7 +291,7 @@ async def _adopt_operator(node, host, preauth, path) -> None:
             return
         app = host.app("fleet")
         if app is not None:
-            await app.claim_preauth(preauth)
+            await app.claim_preauth(preauth, console_password)
             print(f"  Fleet         : joined the mesh and adopted operator "
                   f"{preauth['operator_id'].hex()[:16]}…")
     except Exception as exc:
@@ -608,7 +610,8 @@ async def main() -> None:
     _settle_the_trial(node)
 
     if preauth is not None and host is not None:
-        await _adopt_operator(node, host, preauth, preauth_path)
+        await _adopt_operator(node, host, preauth, preauth_path,
+                              console.generated_password)
 
     print("=" * 60)
     print(f"  NMesh node    : {node.id.raw.hex()[:16]}…  listening tcp://{listen_addr}")
@@ -634,8 +637,13 @@ async def main() -> None:
         if app["running"]:
             print(f"  App           : {app['name']:<6} {console.url.rstrip('/')}"
                   f"{app['path']}")
-    if console.generated_password:
+    waiting = console.first_password_path
+    if console.generated_password and (sys.stdout.isatty() or not waiting):
         print(f"  Password      : {console.generated_password}   (shown once — save it)")
+    elif waiting:
+        # Not on a terminal, so this line ends in a log that outlives it.
+        print(f"  Password      : generated — read it from {waiting}; the file "
+              f"is deleted at the first login")
     elif args.console_password:
         print("  Password      : (the one you set via NMESH_CONSOLE_PASSWORD)")
     else:

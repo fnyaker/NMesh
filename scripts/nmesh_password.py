@@ -69,6 +69,10 @@ def main(argv) -> int:
     # A reset is what somebody does who thinks a way in was stolen, so the
     # sessions that outlive restarts (`nmeshctl login --for`) end with the old
     # password — exactly as a change made through the console ends them.
+    # A generated password left waiting to be read is no password any more.
+    if not console_auth.forget_first(console_auth.first_path_for(state_dir)):
+        print(f"could not remove {console_auth.first_path_for(state_dir)} — "
+              f"it holds the old password, remove it by hand", file=sys.stderr)
     lasting = console_sessions.path_for(state_dir)
     try:
         os.unlink(lasting)

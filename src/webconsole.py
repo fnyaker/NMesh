@@ -407,13 +407,30 @@ class WebConsole:
             password = console_auth.generate()
             self.generated_password = password
         if path:
-            return console_auth.write(path, password)
+            stored = console_auth.write(path, password)
+            if self.generated_password is not None:
+                first = console_auth.first_path_for(self._state_dir)
+                try:
+                    console_auth.write_first(first, password)
+                except OSError:
+                    pass          # the banner prints it instead
+            return stored
         # No state directory: the credential lives for this process only.
         salt = secrets.token_bytes(16)
         return salt, console_auth.hash_password(password, salt)
 
+    @property
+    def first_password_path(self) -> str | None:
+        """Where a generated password still waits to be read, or ``None``."""
+        path = console_auth.first_path_for(self._state_dir)
+        return path if path and os.path.exists(path) else None
+
     def _check_password(self, password: str) -> bool:
-        return console_auth.check(password, self._salt, self._pw_hash)
+        ok = console_auth.check(password, self._salt, self._pw_hash)
+        if ok:
+            # Somebody has it: the copy on disk has done its job.
+            console_auth.forget_first(console_auth.first_path_for(self._state_dir))
+        return ok
 
     def set_password(self, new_password: str) -> None:
         """Replace the console password. Raises ``CredentialError`` on a bad one.
@@ -425,6 +442,7 @@ class WebConsole:
         path = self._cred_path()
         if path:
             self._salt, self._pw_hash = console_auth.write(path, new_password)
+            console_auth.forget_first(console_auth.first_path_for(self._state_dir))
         else:
             salt = secrets.token_bytes(16)
             self._salt = salt
@@ -2355,6 +2373,13 @@ def _make_handler(console: WebConsole):
                     self._json(200, {"rid": fleet.status(node)})
                 elif action == "update":
                     self._json(200, {"rid": fleet.update(node)})
+                elif action == "password":
+                    # Read once: the bridge forgets it as it hands it over.
+                    entry = fleet.take_password(str(node))
+                    if entry is None:
+                        self._json(404, {"error": "no password waiting for that node"})
+                    else:
+                        self._json(200, entry)
                 elif action == "invite":
                     # The answer *is* the invitation, so this one waits for it
                     # rather than handing back a request id and leaving the
