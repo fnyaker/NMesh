@@ -1,0 +1,22 @@
+# Workflow actions are pinned to a commit SHA (tests/test_workflows_pinned.py);
+# Dependabot is what moves the pin, as a reviewable PR, when an action releases.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly

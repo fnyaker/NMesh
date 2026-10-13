@@ -433,6 +433,12 @@ scope. Add yours.
   ring is off (no hold survives one — `logging.md`), so a query returns nothing
   whatever happened. → `logs.status` first; an answer from a ring that is not
   running is no evidence of absence.
+- **The suite run in the base image as root, over the working tree.**
+  `docker run -v "$PWD:/app" … pytest` wrote root-owned `__pycache__` into
+  `src/` and `tests/`, which the next local `rm -rf` of the caches could not
+  remove. → Run it with `-e PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider` (or
+  `--user "$(id -u):$(id -g)"`), and clear the caches from inside the container
+  if it already happened.
 
 ### Running the tests (read this before trusting "green")
 
