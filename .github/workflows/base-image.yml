@@ -18,6 +18,13 @@ on:
       - .github/workflows/base-image.yml
   workflow_dispatch:
 
+# One publication of `:latest` at a time, the newest queued last: two merges a
+# minute apart started two builds, and the older one finished second and put
+# its image back over the newer one.
+concurrency:
+  group: publish-base-image
+  cancel-in-progress: false
+
 permissions: {}
 
 jobs:

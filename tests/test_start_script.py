@@ -448,10 +448,19 @@ def test_a_missing_candidate_is_not_usable(tmp_path):
     assert out == "NOT_USABLE"
 
 
+def _stamp(prefix):
+    """What `scripts/build_liboqs.sh` leaves beside a build it proved."""
+    lines = (START.parent / "scripts" / "liboqs.lock").read_text().splitlines()
+    (prefix / "nmesh-liboqs.lock").write_text("\n".join(
+        line for line in lines
+        if line.startswith(("LIBOQS_VERSION=", "LIBOQS_COMMIT=", "LIBOQS_TARBALL_SHA256="))) + "\n")
+
+
 def test_adoption_copies_the_library_instead_of_building(tmp_path):
     source = tmp_path / "old" / "_oqs"
     (source / "lib").mkdir(parents=True)
     (source / "lib" / "liboqs.so").write_text("ELF")
+    _stamp(source)
     (source / "include").mkdir()
     (source / "include" / "oqs.h").write_text("header")
     dest = tmp_path / "new" / "_oqs"
@@ -466,6 +475,23 @@ def test_adoption_copies_the_library_instead_of_building(tmp_path):
     assert out == f"ADOPTED:{source}"
     assert (dest / "lib" / "liboqs.so").read_text() == "ELF"
     assert (dest / "include" / "oqs.h").exists()
+    assert (dest / "nmesh-liboqs.lock").exists()
+
+
+def test_a_candidate_with_no_stamp_is_never_adopted(tmp_path):
+    """It may have been built before sources were checked: rebuild instead."""
+    source = tmp_path / "old" / "_oqs"
+    (source / "lib").mkdir(parents=True)
+    (source / "lib" / "liboqs.so").write_text("ELF")
+    dest = tmp_path / "new" / "_oqs"
+    out = run_snippet(tmp_path, f"""
+        OQS_PREFIX="{dest}"
+        OQS_REUSE_FROM="{source}"
+        pq_ready() {{ [ -f "${{OQS_INSTALL_PATH:-}}/lib/liboqs.so" ]; }}
+        adopt_liboqs 1.2.3 && echo ADOPTED || echo NOT_ADOPTED
+    """, env={"NMESH_LIBOQS_CACHE": str(tmp_path / "cache")})
+    assert out == "NOT_ADOPTED"
+    assert not dest.exists() or not (dest / "lib").exists()
 
 
 def test_an_unloadable_candidate_is_never_adopted(tmp_path):
@@ -510,12 +536,26 @@ def test_a_build_fills_the_cache(tmp_path):
     built = tmp_path / "prefix"
     (built / "lib").mkdir(parents=True)
     (built / "lib" / "liboqs.so").write_text("ELF")
+    _stamp(built)
     cache = tmp_path / "cache"
     run_snippet(tmp_path, f"""
         OQS_PREFIX="{built}"
         cache_liboqs 0.16.0
     """, env={"NMESH_LIBOQS_CACHE": str(cache)})
     assert (cache / "liboqs-0.16.0" / "lib" / "liboqs.so").read_text() == "ELF"
+    assert (cache / "liboqs-0.16.0" / "nmesh-liboqs.lock").exists()
+
+
+def test_an_unproven_build_is_never_cached(tmp_path):
+    built = tmp_path / "prefix"
+    (built / "lib").mkdir(parents=True)
+    (built / "lib" / "liboqs.so").write_text("ELF")
+    cache = tmp_path / "cache"
+    run_snippet(tmp_path, f"""
+        OQS_PREFIX="{built}"
+        cache_liboqs 0.16.0
+    """, env={"NMESH_LIBOQS_CACHE": str(cache)})
+    assert not (cache / "liboqs-0.16.0" / "lib").exists()
 
 
 def test_an_unwritable_cache_does_not_break_the_install(tmp_path):
@@ -770,3 +810,63 @@ def test_the_last_resort_build_links_the_interpreter_in():
     symbols, wrong on Android."""
     main = START.read_text().split("MAIN", 1)[1]
     assert "-C link-arg=-lpython" in main
+
+
+# ── which liboqs was proven (BUGSVULNS 93) ──────────────────────────────────
+
+class TestTheProvenLibrary:
+    """A library in the prefix is kept or reused only with the stamp
+    `scripts/build_liboqs.sh` writes beside it, for the lock in this tree."""
+
+    def _prefix(self, tmp_path, *, lib="lib", stamp=None):
+        prefix = tmp_path / "_oqs"
+        (prefix / lib).mkdir(parents=True)
+        (prefix / lib / "liboqs.so.9").write_bytes(b"")
+        if stamp is not None:
+            (prefix / "nmesh-liboqs.lock").write_text(stamp)
+        return prefix
+
+    def _ask(self, tmp_path, question, prefix):
+        root = START.parent
+        return run_snippet(tmp_path, f'cd "{root}"; {question} "{prefix}" && echo yes || echo no')
+
+    def _current(self):
+        lines = (START.parent / "scripts" / "liboqs.lock").read_text().splitlines()
+        return "\n".join(l for l in lines if l.startswith(("LIBOQS_VERSION=", "LIBOQS_COMMIT=",
+                                                            "LIBOQS_TARBALL_SHA256="))) + "\n"
+
+    def test_a_library_in_lib_alone_is_found(self, tmp_path):
+        prefix = self._prefix(tmp_path)
+        assert self._ask(tmp_path, "liboqs_in_prefix", prefix) == "yes"
+
+    def test_one_in_lib64_alone_is_found(self, tmp_path):
+        prefix = self._prefix(tmp_path, lib="lib64")
+        assert self._ask(tmp_path, "liboqs_in_prefix", prefix) == "yes"
+
+    def test_no_stamp_is_unproven(self, tmp_path):
+        prefix = self._prefix(tmp_path)
+        assert self._ask(tmp_path, "liboqs_unproven_at", prefix) == "yes"
+
+    def test_the_current_lock_s_stamp_is_proven(self, tmp_path):
+        prefix = self._prefix(tmp_path, stamp=self._current())
+        assert self._ask(tmp_path, "liboqs_proven_at", prefix) == "yes"
+        assert self._ask(tmp_path, "liboqs_unproven_at", prefix) == "no"
+
+    def test_another_lock_s_stamp_is_not(self, tmp_path):
+        prefix = self._prefix(tmp_path, stamp=self._current().replace("LIBOQS_COMMIT=", "LIBOQS_COMMIT=0"))
+        assert self._ask(tmp_path, "liboqs_unproven_at", prefix) == "yes"
+
+    def test_an_empty_prefix_is_nothing_to_replace(self, tmp_path):
+        (tmp_path / "_oqs").mkdir()
+        assert self._ask(tmp_path, "liboqs_unproven_at", tmp_path / "_oqs") == "no"
+
+    def test_a_copy_others_could_rewrite_is_refused(self, tmp_path):
+        prefix = self._prefix(tmp_path, stamp=self._current())
+        assert self._ask(tmp_path, "liboqs_writable_by_others", prefix) == "no"
+        (prefix / "lib" / "liboqs.so.9").chmod(0o664)
+        assert self._ask(tmp_path, "liboqs_writable_by_others", prefix) == "yes"
+
+    def test_a_symlink_is_not_mistaken_for_a_writable_file(self, tmp_path):
+        prefix = self._prefix(tmp_path, stamp=self._current())
+        (prefix / "lib" / "liboqs.so").symlink_to("liboqs.so.9")
+        assert self._ask(tmp_path, "liboqs_writable_by_others", prefix) == "no"

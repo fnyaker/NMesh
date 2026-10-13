@@ -3712,7 +3712,10 @@ packages come from a hash-locked set (`docker/requirements.lock`) audited weekly
 
 ## 93 — medium — A liboqs built before the lock, or left in a cache, is reused unproven
 
-> **Status — open.**
+> **Status — fixed.** Tests: `tests/test_start_script.py::TestTheProvenLibrary`,
+> `tests/test_liboqs_lock.py::TestTheBuildStamps`; five scenarios of
+> `start.sh` run end to end in a clean Debian container (fresh, stamped,
+> legacy, legacy with no way to fetch, unproven cache).
 
 **Where** — `start.sh`: `adopt_liboqs`, `liboqs_candidates`, `cache_liboqs`.
 
@@ -3723,11 +3726,12 @@ so does one copied from a cache or a prefix another install left — including
 `~/.cache/nmesh`, which the account running the installer can write and a later
 system install may adopt.
 
-**What it would take** — a stamp next to each build naming the lock it was
-built from (commit and digest), written only by `build_liboqs.sh`, and refusal to
-adopt anything without the current one; existing nodes would then rebuild once,
-which on a small machine is minutes of downtime at the next start, so when that
-happens is a decision.
+**Fixed** — `build_liboqs.sh` writes `nmesh-liboqs.lock` beside every build it
+proved; `start.sh` keeps, caches and adopts only a library carrying the current
+one, owned by this account or root and writable by nobody else. A library in
+the prefix without it is rebuilt at the next start, beside the old one, and
+swapped in only once the new one loads: a node that cannot rebuild keeps what it
+has and says so. Existing nodes pay the compile once, at their next start.
 
 ## 94 — high — The published image shipped 260 fixable HIGH/CRITICAL vulnerabilities
 
@@ -3835,3 +3839,22 @@ builds and then cannot import. The test written for exactly this failed on
 3.14. On 3.14 Trivy found four fixable HIGHs, all in pip's own vendored
 packages, so the running image no longer carries pip. Unit and integration
 suites pass on 3.14; CI's interpreter is now 3.14 (`TEST.md`, `AGENTS.md`).
+
+## 100 — medium — Two builds raced to publish the base image, and the older won
+
+> **Status — fixed.** Tests: `tests/test_workflows_pinned.py`
+> (`test_what_publishes_latest_does_it_one_run_at_a_time`).
+
+**Where** — `.github/workflows/base-image.yml`; the `docker` job of `ci.yml`
+pushes the application image's `:latest` the same way.
+
+**What happens** — merging two PRs that both touched the base image a minute
+apart started two builds. The one from the older commit finished second, so
+`nmesh-base:latest` went back to a build from before liboqs was compiled from a
+checked source, without `/opt/liboqs`; every application build after it failed
+on the missing directory. Nothing in the image says which commit it came from,
+so the only symptom was that later builds broke.
+
+**Fixed** — both publishers run in a concurrency group that never cancels a
+run in progress, so they finish in the order they were queued and the newest
+commit publishes last. The base was republished from `main` by hand.

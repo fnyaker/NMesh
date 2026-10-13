@@ -67,6 +67,10 @@ jobs:
   docker:
     needs: test
     runs-on: ubuntu-latest
+    # Pushes `:latest` on main; two pushes racing would let the older image win.
+    concurrency:
+      group: docker-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
