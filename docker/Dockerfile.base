@@ -5,7 +5,7 @@
 # changes (see .github/workflows/base-image.yml). The application image
 # (docker/Dockerfile) builds FROM this one, so ordinary NMesh code changes never
 # recompile liboqs.
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 # liboqs-python builds liboqs from source with CMake's default generator
 # ("Unix Makefiles"), which needs `make` — so build-essential (gcc + g++ +
