@@ -60,6 +60,7 @@ class TestInitDetection:
         result = run_snippet(
             tmp_path, "detect_init",
             fake_bins=[("systemctl", "#!/bin/sh\nexit 1\n")],
+            env={"NMESH_SYSTEMD_RUN_DIR": str(tmp_path / "no-systemd")},
             isolate=True)
         assert result.stdout.strip() == "none"
 

@@ -2492,7 +2492,9 @@ running X.
 - `systemctl` being present does **not** prove systemd is running: many container
   images ship it with no init behind, and every call dies on "Failed to connect
   to bus". The real test for a running systemd is the existence of
-  `/run/systemd/system` — `install.sh` requires both.
+  `/run/systemd/system` — `install.sh` requires both. The directory is read from
+  `$NMESH_SYSTEMD_RUN_DIR` when set, so the test that proves "no systemd" does not
+  fail on a developer's machine that has one.
 - `sudo mkdir -p` on a path **inside the user's home** gives the directory to
   root. `install.sh` used to create `~/.local/share/nmesh/data` root-owned for a
   user installation, and the node — running under that account — died on its very
