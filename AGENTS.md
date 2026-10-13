@@ -456,6 +456,12 @@ scope. Add yours.
   Listing `RemoteFlowSource` on a local database showed it, and showed the
   real gap: the mesh. → Before saying what an analyser sees, query it for its
   sources.
+- **A test helper that swallowed its own failures.** The fuzzer's first seed
+  builders caught every exception "so one bad seed does not stop a campaign";
+  three targets were then fuzzed from nothing for a whole run, and one from a
+  seed cut in half by the length cap, all reporting zero findings. → A helper
+  that builds a test's premise raises; check the premise is there (seeds
+  non-empty, coverage above zero) before reading a quiet result.
 
 ### Running the tests (read this before trusting "green")
 

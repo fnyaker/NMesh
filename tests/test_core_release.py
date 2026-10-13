@@ -44,6 +44,12 @@ class TestTheDescriptor:
         doc = cr.parse_release(_release(idn), idn.verify)
         assert doc["publisher_id"] == cr.publisher_id(doc["publisher"])
 
+    def test_a_release_without_notes_is_one_signed_with_none(self):
+        idn = CryptoIdentity()
+        doc = json.loads(_release(idn, notes=""))
+        del doc["notes"]
+        assert cr.parse_release(json.dumps(doc).encode(), idn.verify)["notes"] == ""
+
     def test_a_tampered_field_breaks_the_signature(self):
         idn = CryptoIdentity()
         blob = _release(idn)
@@ -112,6 +118,10 @@ class TestTheDescriptor:
                     "publisher": "aa", "sig": "bb", "ts": 1}).encode(),
         json.dumps({"v": 2, "version": "1.0.0", "size": 10, "sha256": "a" * 64,
                     "publisher": "aa", "sig": "bb", "ts": "soon"}).encode(),
+        # Every field well formed, no "notes": refused at the signature, not
+        # by a KeyError before it — this one needs no key to send.
+        json.dumps({"v": 2, "version": "1.0.0", "size": 10, "sha256": "a" * 64,
+                    "publisher": "aa", "sig": "bb", "ts": 1}).encode(),
         b"x" * 200_000,
     ])
     def test_hostile_blobs_raise_nothing_but_release_error(self, blob):

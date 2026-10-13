@@ -138,6 +138,34 @@ every Monday, since a fix released after the last build is news nothing in the
 tree carries. `tests/test_workflows_pinned.py` refuses a `docker run` of a
 registry image not pinned by digest.
 
+### Coverage-guided fuzzing (`tests/fuzz`)
+
+`tests/test_fuzz.py` throws random bytes, which stop at the first length
+check. `tests/fuzz` keeps what made a parser take a new branch and mutates from
+there, the way AFL does, on the standard library alone: coverage comes from
+`sys.monitoring` (3.12+), counting first sightings of lines and branches under
+`src/`. Every parser a peer's bytes reach is a target in
+`tests/fuzz/targets.py`, with the contract its code states — "raises
+`TicketError`, never anything else", "`None` for anything that does not check
+out" — and anything else it raises is a finding, as is a parse slower than
+half a second. Signature checks are answered "yes", so the fuzzer reaches what
+an adversary who signs can send. Seeds are built by the tree's own encoders,
+and a seed that fails to build fails the suite rather than leaving a target
+fuzzed from nothing.
+
+```
+python -m tests.fuzz --list
+python -m tests.fuzz                       # every target, 60 s each
+python -m tests.fuzz packet core_release -s 600
+```
+
+The suite runs each target for 3 000 inputs (`tests/test_fuzz_guided.py`),
+which catches a contract a change breaks outright; `fuzz.yml` runs every one
+for 30 s each week and keeps any finding as an artifact. The long runs belong
+on a machine with time to spare: the corpus under `.fuzz/corpus` is fed back
+each time, so a campaign starts where the last one stopped. A new parser of
+peer input gets a target in the same commit.
+
 `audit.yml` runs `pip-audit` over `docker/requirements.lock`, the hash-locked set
 the base image installs, on every change and every Monday.
 `tests/test_liboqs_lock.py` holds `scripts/liboqs.lock`, `requirements.txt`

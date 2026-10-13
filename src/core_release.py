@@ -386,7 +386,9 @@ def parse_release(data: bytes, verify) -> dict:
         raise ReleaseError("release hash invalid")
     if not publisher or len(publisher) > 8192:
         raise ReleaseError("release publisher key invalid")
-    if not verify(_signing_input(doc), signature, publisher):
+    # Signed with the notes as they were built, "" when there were none: the
+    # input is read from the checked value, never from a key that may be absent.
+    if not verify(_signing_input({**doc, "notes": notes}), signature, publisher):
         raise ReleaseError("release signature invalid")
     doc["publisher"] = publisher
     doc["publisher_id"] = publisher_id(publisher)

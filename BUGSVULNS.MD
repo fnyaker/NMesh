@@ -3746,3 +3746,37 @@ distribution's packages, and adds `openssh-client` and the code: 47 HIGH or
 CRITICAL left, none with a fix yet, and 245 MB instead of 675. CI fails on a
 fixable HIGH or CRITICAL in the image it builds; `audit.yml` scans the
 published one weekly.
+
+## 95 — low — A core release descriptor without `notes` raised `KeyError` before its signature was checked
+
+> **Status — fixed.** Tests: `tests/test_core_release.py`
+> (`test_hostile_blobs_raise_nothing_but_release_error`,
+> `test_a_release_without_notes_is_one_signed_with_none`). Found by
+> `tests/fuzz` (target `core_release`).
+
+**Where** — `src/core_release.py`: `parse_release` → `_signing_input`.
+
+**What happens** — `notes` is optional on parse (`doc.get("notes", "")`) but
+`_signing_input` read `body["notes"]`. A descriptor with every other field well
+formed and no `notes` raised `KeyError`, which no caller expects:
+`ReleaseBook.offer` catches `ReleaseError` only. Nothing crashed — the node's
+own callers and the link loop catch everything — but the packet was dropped
+without being counted as malformed, and it needs no key to send: the error
+comes before the signature.
+
+**Fixed** — the signing input is built from the checked value, `""` when the
+field is absent; such a descriptor now fails at the signature like any other.
+
+## 96 — low — `PUNCH_RELAY` with an address that is not UTF-8 raised instead of being refused
+
+> **Status — fixed.** Tests: `tests/test_hole_punch.py::TestPunchCodecs`.
+> Found by `tests/fuzz` (target `punch`).
+
+**Where** — `src/mesh/codecs.py`: `_decode_punch_relay`.
+
+**What happens** — the decoder promises `None` for anything it cannot read and
+raised `UnicodeDecodeError` on either address. The link loop swallowed it, so
+the frame cost nothing, but it was not counted against the peer either: a peer
+sending only those is never cut.
+
+**Fixed** — both decodes return `None`.

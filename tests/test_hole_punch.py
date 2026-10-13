@@ -69,6 +69,17 @@ class TestPunchCodecs:
     def test_punch_relay_truncated(self):
         assert _decode_punch_relay(b"\x00" * 10) is None
 
+    @pytest.mark.parametrize("which", ["peer", "observed"])
+    def test_relay_decode_refuses_an_address_that_is_not_utf8(self, which):
+        """Found by `tests/fuzz`: the decoder raised instead of saying None,
+        and the link loop then dropped the packet without counting it."""
+        good = b"192.0.2.1:9001"
+        bad = b"\xff\xfe"
+        peer, observed = (bad, good) if which == "peer" else (good, bad)
+        data = (b"\x03" * 20 + struct.pack("!H", len(peer)) + peer
+                + struct.pack("!H", len(observed)) + observed)
+        assert _decode_punch_relay(data) is None
+
     def test_punch_probe_roundtrip(self):
         node_id = os.urandom(20)
         nonce = os.urandom(16)
