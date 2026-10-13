@@ -1630,3 +1630,13 @@ def test_a_page_follows_the_node_exactly_as_far_as_it_granted():
     rule = js.split("const local = (path) =>", 1)[1].split(";", 1)[0]
     assert "CONTEXT.caps.includes(grant)" in rule
     assert "caps: []," in js.split("const CONTEXT = {", 1)[1][:600]
+
+
+def test_the_topology_legend_waits_for_a_link_to_explain():
+    """Under a graph with one dot on it, six lines on what lines mean is a
+    wall of text; the first-run painter hides it until a node is linked."""
+    from src.webassets import console
+    assert 'id="map-legend-text"' in console.INDEX_HTML
+    painter = console.CONSOLE_PAGE_JS.split("function paintFirstRun(state){", 1)[1]
+    painter = painter.split("\n}\n", 1)[0]
+    assert 'legend.hidden = !card.hidden' in painter

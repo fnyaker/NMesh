@@ -164,7 +164,7 @@ INDEX_HTML = """<!doctype html>
           <div class="card-body">
             <svg id="graph" class="mesh-graph clickable" viewBox="0 0 420 250" role="img"
                  aria-label="Connected nodes — click to open the full map"></svg>
-            <p class="tiny muted">A line is an authenticated direct link: amber while it
+            <p id="map-legend-text" class="tiny muted">A line is an authenticated direct link: amber while it
               loses probes, red and dashed once it is failing, doubled when MLO bundles
               it, dotted beside it while MLO looks for a second link. A faint dashed
               line is a session routed through a first hop — anything deeper is opaque
@@ -1758,26 +1758,24 @@ function paintFirstRun(state){
   const card = $("first-run");
   if(!card) return;
   card.hidden = (state.node_count || 0) > 0;
+  const legend = $("map-legend-text");
+  if(legend) legend.hidden = !card.hidden;
   if(card.hidden) return;
   const standing = (state.trust || {}).standing;
   const joined = standing === "member" || standing === "root";
   $("first-run-title").textContent = joined
     ? "Nothing is connected right now"
-    : "This node is not in a network yet";
+    : "Join a network, or start one";
   $("first-run-sub").textContent = joined
     ? "This node can prove who it is — it has nobody to prove it to"
-    : "There are two ways in, and either one is fine";
+    : "";
   const steps = joined ? [
     "Add an address for a node you know, under Network → Add a node.",
     "Or leave it: an address this node already knows is redialled on its own, "
       + "and a link that comes back fills this page in.",
   ] : [
-    "Joining a network somebody else runs: ask them for a join ticket, then "
-      + "paste it under Network → Add a node.",
-    "Starting one here: create a join ticket on that same page and give it to "
-      + "the node you want to bring in. Whoever admits the first node becomes "
-      + "the network's root.",
-    "Either way, this page fills itself in as soon as a link authenticates.",
+    "Join: paste a join ticket from a member under Network → Add a node.",
+    "Start: create a ticket on that page and give it to the first node you bring in.",
   ];
   // Through setHTML: this repaints on the cadence, and assigning innerHTML on a
   // timer replaces the list under the reader's finger and drops any selection.
@@ -3042,11 +3040,8 @@ const STANDING_TEXT = {
                 + "from a node that is still a member.",
             level: "danger"},
   none:    {label: "Not a member of any network",
-            head: "This node has not joined a network.",
-            what: "It can prove nothing to anybody, so every link it tries is refused "
-                + "without a word — which looks exactly like a network fault. Use a "
-                + "join ticket from a member, or issue one here to start a network of "
-                + "your own.",
+            head: "Not in a network.",
+            what: "Every link is refused until it joins one or starts its own.",
             level: "danger"},
 };
 // The two broken standings, plus the deadline that has stopped being a

@@ -372,6 +372,12 @@ scope. Add yours.
   $p; done`, the loop's own shell matched, and it killed itself the same way.
   Take the PID the background task reported, or match with `ps … | grep
   "[d]evmesh"`, whose pattern does not match its own text.
+- **`pkill -f` a third time, over `ssh`/`pct exec`.** `pct exec 112 -- bash -c
+  'pkill -f nmesh_node.py; …deploy…'` matched the `bash -c` carrying that very
+  text, so the deploy after it never ran and the screenshot taken next showed
+  the old page. → Kill by PID read from `pgrep`/`ps` in a separate step, and
+  confirm the new file is on the target (grep for the new string) before
+  looking at what it renders.
 - **A clock patched through a module that shares it.** `monkeypatch.setattr(
   node_mod.time, "monotonic", …)` replaces `time.monotonic` for the whole
   process, the event loop's clock included: every `sleep` and `wait_for` froze
