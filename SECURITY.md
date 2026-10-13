@@ -36,3 +36,5 @@ nodes following GitHub pick up through the updater.
   (`docker/requirements.lock`) that `pip-audit` checks every week.
 - The image a node runs carries no compiler or build tools, and is scanned by
   Trivy on every build and every week: a fixable HIGH or CRITICAL fails it.
+- The console is scanned by OWASP ZAP every week, its API included and signed
+  in, against a throwaway node.

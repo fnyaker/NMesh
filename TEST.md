@@ -138,6 +138,19 @@ every Monday, since a fix released after the last build is news nothing in the
 tree carries. `tests/test_workflows_pinned.py` refuses a `docker run` of a
 registry image not pinned by digest.
 
+### The console under a scanner (`audit.yml`, `console-dast`)
+
+Every week, a throwaway node from the published image is scanned by OWASP ZAP
+(pinned by digest): its public pages with the baseline scan, then **every API
+route the pages call**, actively and signed in. The API has to be described to
+it — the spider follows links, and the console's API is only ever reached from
+JavaScript, so a spidered scan tests seven static files — which is what
+`tests/zap/console_openapi.py` does from the same route reading the MCP server
+uses. A FAIL fails the job; the reports are kept as an artifact. Expect one
+warning, HSTS, which is refused on purpose (`src/http_headers.py`), and 502s
+on Fleet routes asked about a node that does not exist, which is the right
+answer.
+
 ### Coverage-guided fuzzing (`tests/fuzz`)
 
 `tests/test_fuzz.py` throws random bytes, which stop at the first length

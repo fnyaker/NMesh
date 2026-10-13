@@ -691,6 +691,15 @@ skeleton. A spinner with no end is a bug report nobody can act on.
   choice.
 - **Strict CSP** (`default-src 'self'`), same-origin assets, no external
   resource (no CDN), a cap on request size.
+- **One header policy** for the console and chat's server
+  (`src/http_headers.py`): the CSP above, `nosniff`, no referrer, `no-store`,
+  a `Permissions-Policy` refusing camera, microphone, location, USB, serial,
+  Bluetooth, HID, payment and screen capture (the terminal keeps its own
+  clipboard), and cross-origin isolation (`COOP`/`CORP` same-origin, `COEP`
+  `require-corp`). The `Server` line says `nmesh-console` and nothing about the
+  interpreter. **No HSTS, on purpose**: on a self-signed certificate it turns the
+  browser's warning into a page that cannot be opened at all, and the
+  certificate's trust comes from its pinned fingerprint.
 - The HTTP server runs in a dedicated thread and **marshals** every interaction
   with the node onto the asyncio loop: the node's state is never touched outside
   the loop's thread.

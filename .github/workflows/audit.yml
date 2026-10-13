@@ -48,3 +48,68 @@ jobs:
             aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
             image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
             --exit-code 1 --no-progress '${{ steps.img.outputs.app }}:latest'
+
+  # The console as a browser and an attacker meet it, scanned by OWASP ZAP
+  # against a throwaway node: the public pages first, then every API route the
+  # pages call (tests/zap/console_openapi.py), actively and signed in. A FAIL
+  # fails the job; warnings are listed (HSTS is one, on purpose — see
+  # src/http_headers.py).
+  console-dast:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Image names (lowercased)
+        id: img
+        run: |
+          repo=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
+          echo "app=ghcr.io/$repo" >> "$GITHUB_OUTPUT"
+          echo "base=ghcr.io/$repo-base" >> "$GITHUB_OUTPUT"
+      - name: A node to scan
+        run: |
+          docker network create scan
+          password="$(head -c 18 /dev/urandom | base64 | tr -d '/+=')"
+          echo "::add-mask::$password"
+          echo "CONSOLE_PASSWORD=$password" >> "$GITHUB_ENV"
+          docker run -d --name target --network scan \
+            -e NMESH_CONSOLE_PASSWORD="$password" -e NMESH_FLEET=1 \
+            '${{ steps.img.outputs.app }}:latest'
+          for _ in $(seq 1 60); do
+            docker logs target 2>&1 | grep -q "Web console" && exit 0
+            sleep 1
+          done
+          docker logs target; exit 1
+      - name: Describe its API
+        run: |
+          mkdir -p zap && chmod 777 zap
+          docker run --rm -v "$PWD:/app" -w /app '${{ steps.img.outputs.base }}:latest' \
+            python -m tests.zap.console_openapi https://target:8787 > zap/openapi.json
+      - name: Scan the public pages
+        run: |
+          docker run --rm --network scan -v "$PWD/zap:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy@sha256:7aaa659b0d43078febd82e29bad112285c370727e86ab8340444220e17d9f0d2 \
+            zap-baseline.py -t https://target:8787/ -I -J baseline.json
+      - name: Scan the API, signed in
+        run: |
+          token="$(docker run --rm --network scan -e P="$CONSOLE_PASSWORD" \
+            '${{ steps.img.outputs.base }}:latest' python -c \
+            'import json,os,ssl,urllib.request as u; r=u.Request("https://target:8787/api/login", json.dumps({"password":os.environ["P"]}).encode(), {"Content-Type":"application/json"}); print(json.load(u.urlopen(r, context=ssl._create_unverified_context()))["token"])' 2>/dev/null)"
+          echo "::add-mask::$token"
+          docker run --rm --network scan -v "$PWD/zap:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy@sha256:7aaa659b0d43078febd82e29bad112285c370727e86ab8340444220e17d9f0d2 \
+            zap-api-scan.py -t /zap/wrk/openapi.json -f openapi -I -J api.json -T 20 \
+            -z "-config replacer.full_list(0).description=auth -config replacer.full_list(0).enabled=true -config replacer.full_list(0).matchtype=REQ_HEADER -config replacer.full_list(0).matchstr=Authorization -config replacer.full_list(0).regex=false -config replacer.full_list(0).replacement=Bearer\ $token"
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zap-reports
+          path: zap/*.json
+          if-no-files-found: ignore
+

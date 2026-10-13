@@ -58,6 +58,7 @@ from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
 from .apps.fleet_docker import DockerError
 from . import console_feed
+from .http_headers import SECURITY_HEADERS
 from .apps.fleet_console import (APPS_HEADER, FULL_HEADER, GOVERN_HEADER,
                                  REPLAY_HEADER)
 
@@ -924,15 +925,7 @@ def _generate_self_signed(host: str) -> tuple[bytes, bytes]:
 # HTTP handler
 # ---------------------------------------------------------------------------
 
-_SECURITY_HEADERS = {
-    "Content-Security-Policy": (
-        "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
-        "form-action 'self'; object-src 'none'"
-    ),
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
-    "Cache-Control": "no-store",
-}
+
 
 _STATIC = {
     "/": ("text/html; charset=utf-8", INDEX_HTML),
@@ -1027,6 +1020,7 @@ def _make_handler(console: WebConsole):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "nmesh-console"
+        sys_version = ""      # the interpreter's exact version is nobody's business
 
         def log_message(self, *args) -> None:
             pass  # stay quiet; the node has its own logging
@@ -1038,7 +1032,7 @@ def _make_handler(console: WebConsole):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            for k, v in _SECURITY_HEADERS.items():
+            for k, v in SECURITY_HEADERS.items():
                 self.send_header(k, v)
             for k, v in (extra_headers or []):
                 self.send_header(k, v)
@@ -1059,7 +1053,7 @@ def _make_handler(console: WebConsole):
 
         def _send_binary(self, data: bytes, name: str) -> None:
             # Images are served with their type so the UI can render them inline;
-            # everything else is an opaque download. nosniff (in _SECURITY_HEADERS)
+            # everything else is an opaque download. nosniff (in SECURITY_HEADERS)
             # stops the browser from reinterpreting the bytes.
             ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
             ctype = {
@@ -2224,7 +2218,7 @@ def _make_handler(console: WebConsole):
             # tells this handler not to try to read a second request off a
             # socket that is going to stay busy for hours.
             self.send_header("Connection", "close")
-            for key, value in _SECURITY_HEADERS.items():
+            for key, value in SECURITY_HEADERS.items():
                 self.send_header(key, value)
             self.end_headers()
             # Where the page was when it lost the connection. The browser
