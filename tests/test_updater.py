@@ -495,6 +495,15 @@ class TestGuards:
         monkeypatch.setenv("NMESH_UPDATE_REPO", "someone/fork")
         assert updater.repo() == "someone/fork"
 
+    @pytest.mark.parametrize("raw", [
+        "someone/fork/../../orgs/x", "someone/..", "someone/.", "someone",
+        "someone/fork?x=1", "someone/fork#x", "-someone/fork", "a" * 40 + "/fork",
+        "someone/fork\n", "some one/fork", "someone/" + "f" * 101, ""])
+    def test_a_repo_github_could_not_name_falls_back_to_the_pinned_one(
+            self, monkeypatch, raw):
+        monkeypatch.setenv("NMESH_UPDATE_REPO", raw)
+        assert updater.repo() == updater.DEFAULT_REPO
+
     def test_service_managed_only_when_told(self, monkeypatch):
         monkeypatch.delenv("NMESH_SERVICE_MANAGED", raising=False)
         assert updater.service_managed() is False

@@ -383,6 +383,38 @@ class TestTheStdioBridge:
             await app.stop()
 
 
+class TestTheStdioBridgeEndpoint:
+    @pytest.fixture
+    def bridge(self):
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                            "scripts", "nmesh_mcp_stdio.py")
+        spec = importlib.util.spec_from_file_location("nmesh_mcp_stdio", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @pytest.mark.parametrize("url", ["file:///etc/passwd", "ftp://192.0.2.1/x",
+                                     "http:///mcp", "127.0.0.1:8790/mcp", "",
+                                     "http://[::1/mcp"])
+    def test_only_an_http_address_is_spoken_to(self, bridge, url):
+        assert bridge.endpoint_ok(url) is False
+
+    @pytest.mark.parametrize("url", ["http://127.0.0.1:8790/mcp",
+                                     "https://192.0.2.1:8790/mcp"])
+    def test_an_http_address_is(self, bridge, url):
+        assert bridge.endpoint_ok(url) is True
+
+    def test_a_refused_address_stops_before_reading_a_line(self, bridge,
+                                                           monkeypatch):
+        monkeypatch.setenv("NMESH_MCP_URL", "file:///etc/passwd")
+        monkeypatch.setenv("NMESH_MCP_TOKEN", "mcp-x")
+        monkeypatch.setattr(bridge, "forward", lambda *a: pytest.fail("sent"))
+        monkeypatch.setattr(bridge.sys, "stdin", type("S", (), {
+            "buffer": [b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n']})())
+        assert bridge.main() == 2
+
+
 class TestTheServerIsBounded:
     async def test_past_its_ceiling_a_request_is_told_to_come_back(self, monkeypatch):
         app = await _running()

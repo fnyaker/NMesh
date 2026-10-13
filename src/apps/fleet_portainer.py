@@ -112,6 +112,7 @@ class Portainer:
         if not secure:
             return None
         context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         if self.fingerprint:
             # A pin replaces the chain, it does not weaken it: the certificate
             # is checked against a value an operator wrote down, which is more

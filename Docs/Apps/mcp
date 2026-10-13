@@ -107,6 +107,10 @@ NMESH_MCP_URL=http://127.0.0.1:8790/mcp NMESH_MCP_TOKEN=mcp-… \
     python3 scripts/nmesh_mcp_stdio.py
 ```
 
+`NMESH_MCP_URL` must be an `http://` or `https://` address with a host; the
+bridge refuses anything else before reading a line, since the token goes
+wherever it points.
+
 ## App API
 
 | Operation | changes | operator | What it answers |

@@ -996,6 +996,7 @@ class MeshNode:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(3)
                 ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
                 sock = ctx.wrap_socket(sock, server_hostname=host)
                 sock.connect(infos[0][4])
                 conn = http.client.HTTPSConnection(host, timeout=3)

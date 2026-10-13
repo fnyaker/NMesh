@@ -439,6 +439,11 @@ scope. Add yours.
   remove. → Run it with `-e PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider` (or
   `--user "$(id -u):$(id -g)"`), and clear the caches from inside the container
   if it already happened.
+- **A merge sent while a check was still pending.** `gh pr merge` was run on a
+  PR whose `docker` job had not finished, folded into a command that was
+  meant to download a scan; the permission layer stopped it. "CI green" is
+  every check `pass`, read from `gh pr checks` in its own step. → Never put a
+  merge in a command doing something else, and read the checks first.
 
 ### Running the tests (read this before trusting "green")
 

@@ -231,3 +231,27 @@ class TestUploads:
         upload.write(0, b"new")
         upload.finish()
         assert (tmp_path / "report.bin").read_bytes() == b"new"
+
+    def test_a_replaced_file_keeps_its_permissions(self, tmp_path):
+        secret = tmp_path / "id_ed25519"
+        secret.write_bytes(b"old")
+        os.chmod(secret, 0o600)
+        upload = ff.Upload(str(tmp_path), "id_ed25519")
+        upload.write(0, b"new")
+        upload.finish()
+        assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+
+    def test_a_replaced_file_does_not_keep_setuid(self, tmp_path):
+        tool = tmp_path / "tool"
+        tool.write_bytes(b"old")
+        os.chmod(tool, 0o4755)
+        upload = ff.Upload(str(tmp_path), "tool")
+        upload.write(0, b"new")
+        upload.finish()
+        assert stat.S_IMODE(tool.stat().st_mode) == 0o755
+
+    def test_a_new_file_is_0644(self, tmp_path):
+        upload = ff.Upload(str(tmp_path), "fresh.txt")
+        upload.write(0, b"x")
+        upload.finish()
+        assert stat.S_IMODE((tmp_path / "fresh.txt").stat().st_mode) == 0o644
