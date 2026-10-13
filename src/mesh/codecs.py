@@ -413,7 +413,10 @@ def _decode_punch_relay(data: bytes) -> tuple[bytes, str, str] | None:
     offset += 2
     if offset + pa_len > len(data):
         return None
-    peer_addr = data[offset:offset + pa_len].decode('utf-8')
+    try:
+        peer_addr = data[offset:offset + pa_len].decode('utf-8')
+    except UnicodeDecodeError:
+        return None
     offset += pa_len
     if offset + 2 > len(data):
         return None
@@ -421,7 +424,10 @@ def _decode_punch_relay(data: bytes) -> tuple[bytes, str, str] | None:
     offset += 2
     if offset + oa_len > len(data):
         return None
-    observed_addr = data[offset:offset + oa_len].decode('utf-8')
+    try:
+        observed_addr = data[offset:offset + oa_len].decode('utf-8')
+    except UnicodeDecodeError:
+        return None
     return peer_id, peer_addr, observed_addr
 
 
