@@ -34,3 +34,5 @@ nodes following GitHub pick up through the updater.
   `scripts/liboqs.lock`, and a node with no liboqs refuses to start rather than
   let the wrapper fetch one; the base image installs a hash-locked package set
   (`docker/requirements.lock`) that `pip-audit` checks every week.
+- The image a node runs carries no compiler or build tools, and is scanned by
+  Trivy on every build and every week: a fixable HIGH or CRITICAL fails it.

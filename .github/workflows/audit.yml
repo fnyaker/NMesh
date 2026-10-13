@@ -28,3 +28,23 @@ jobs:
         with:
           inputs: docker/requirements.lock
           require-hashes: true
+
+  # The image already published: a fix released this week for a package in it
+  # is a reason to rebuild, and nothing in the tree says so.
+  published-image:
+    # Not on a pull request: no change in one can fix an image already out.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    steps:
+      - name: Image name (lowercased)
+        id: img
+        run: echo "app=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - name: Scan it
+        run: |
+          docker pull '${{ steps.img.outputs.app }}:latest'
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 --no-progress '${{ steps.img.outputs.app }}:latest'

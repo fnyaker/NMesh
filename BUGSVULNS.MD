@@ -3726,3 +3726,23 @@ built from (commit and digest), written only by `build_liboqs.sh`, and refusal t
 adopt anything without the current one; existing nodes would then rebuild once,
 which on a small machine is minutes of downtime at the next start, so when that
 happens is a decision.
+
+## 94 — high — The published image shipped 260 fixable HIGH/CRITICAL vulnerabilities
+
+> **Status — fixed.** Tests: `tests/test_docker_image_tree.py`,
+> `tests/test_workflows_pinned.py`; the image is scanned in CI.
+
+**Where** — `docker/Dockerfile`, built `FROM` the base image.
+
+**What happens** — the application image was the base image plus the code, so
+every node in a container carried gcc, binutils, CMake, git and the dev headers
+liboqs was built with, and the distribution's packages as of whenever the base
+was last built. Trivy on `ghcr.io/…/nmesh:latest`: 434 HIGH or CRITICAL, 260 of
+them with a fix published; nothing scanned it.
+
+**Fixed** — the application image is a fresh slim stage that takes only
+`/opt/liboqs` and the installed packages from the base, upgrades the
+distribution's packages, and adds `openssh-client` and the code: 47 HIGH or
+CRITICAL left, none with a fix yet, and 245 MB instead of 675. CI fails on a
+fixable HIGH or CRITICAL in the image it builds; `audit.yml` scans the
+published one weekly.

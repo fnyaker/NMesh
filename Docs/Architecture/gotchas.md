@@ -2458,6 +2458,15 @@ running X.
   interpreter that may read it, the audit runner's included.
   The base build needs `make` → `build-essential`, not `gcc` alone (otherwise
   CMake: "CMAKE_MAKE_PROGRAM is not set").
+- Docker: the application image is a **fresh `python:*-slim` stage** that copies
+  `/opt/liboqs` and `site-packages` out of the base — the base's compiler,
+  CMake, git and headers never reach a running node. Two consequences: both
+  Dockerfiles must start from the **same Python** (the copy is by path,
+  `/usr/local/lib/python3.X/site-packages`; another version builds and then
+  cannot import), and nothing the base put in `/app` is there any more —
+  `requirements.txt` included, which the provisioning payload needs.
+  `tests/test_docker_image_tree.py` holds both. CI scans the built image with
+  Trivy and fails on a fixable HIGH or CRITICAL.
 - Docker: the application image must copy **`start.sh` and `pyproject.toml`** as
   well as `src/` and `scripts/`. Without them the fleet app fails at runtime with
   "no NMesh tree at /app" — `build_payload` requires `src` **and** `start.sh` to

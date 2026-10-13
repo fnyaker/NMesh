@@ -107,6 +107,17 @@ jobs:
             -t '${{ steps.img.outputs.app }}:latest' \
             -t '${{ steps.img.outputs.app }}:${{ github.sha }}' .
 
+      # A vulnerability the distribution or a package has already fixed, left in
+      # the image a node runs, fails the build. One with no fix yet is listed
+      # and let through: nothing here could do better than wait for it.
+      # Trivy runs from its image pinned by digest (v0.75.0), not an action.
+      - name: Scan the application image
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 --no-progress '${{ steps.img.outputs.app }}:latest'
+
       - name: Push the application image (main only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |

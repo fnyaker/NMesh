@@ -41,6 +41,41 @@ def test_a_workflow_starts_with_no_permission(path):
         f"{path.name}: set `permissions: {{}}` and grant each job its own"
 
 
+_OPTIONS_WITH_VALUE = {"-v", "--volume", "-w", "--workdir", "-e", "--env",
+                       "--name", "--entrypoint", "-u", "--user", "--network"}
+
+
+def _images_run(text: str) -> list[str]:
+    """The image each ``docker run`` names, continuation lines joined."""
+    joined = re.sub(r"\\\n\s*", " ", text)
+    images = []
+    for command in re.findall(r"docker run ([^\n]+)", joined):
+        tokens = command.split()
+        index = 0
+        while index < len(tokens) and tokens[index].startswith("-"):
+            index += 2 if tokens[index] in _OPTIONS_WITH_VALUE else 1
+        if index < len(tokens):
+            images.append(tokens[index])
+    return images
+
+
+@pytest.mark.parametrize("path", _workflows(), ids=lambda p: p.name)
+def test_a_third_party_image_is_pinned_by_digest(path):
+    """An image built in the job is named through a step output (``$…`` or
+    ``'${{ … }}'``); anything else comes from a registry, where a tag moves."""
+    for image in _images_run(path.read_text()):
+        if image.lstrip("'\"").startswith("$"):
+            continue
+        assert re.search(r"@sha256:[0-9a-f]{64}$", image), \
+            f"{path.name}: pin {image} by digest"
+
+
+def test_the_image_parser_finds_what_it_must():
+    text = ("docker run --rm -v /a:/b \\\n  aquasec/trivy:0.75.0 image x\n"
+            "docker run --rm -v \"$PWD:/app\" -w /app \"$BASE\" pytest\n")
+    assert _images_run(text) == ["aquasec/trivy:0.75.0", '"$BASE"']
+
+
 def test_a_tag_reference_is_refused():
     assert not _PINNED.match("actions/checkout@v4")
     assert not _PINNED.match("actions/checkout@11d5960")
