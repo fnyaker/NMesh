@@ -131,6 +131,13 @@ codeql query run --database=/tmp/nmesh-db .github/codeql/nmesh/probe/ListSources
 codeql database analyze /tmp/nmesh-db .github/codeql/nmesh/queries --format=sarif-latest --output=/tmp/mesh.sarif
 ```
 
+The `docker` job scans the image it built with Trivy (pinned by digest) and
+fails on a HIGH or CRITICAL vulnerability that has a fix; one with none yet is
+listed and let through. `audit.yml` scans the published image the same way
+every Monday, since a fix released after the last build is news nothing in the
+tree carries. `tests/test_workflows_pinned.py` refuses a `docker run` of a
+registry image not pinned by digest.
+
 `audit.yml` runs `pip-audit` over `docker/requirements.lock`, the hash-locked set
 the base image installs, on every change and every Monday.
 `tests/test_liboqs_lock.py` holds `scripts/liboqs.lock`, `requirements.txt`

@@ -37,7 +37,7 @@ def copied_entries() -> set:
 def test_image_ships_everything_build_payload_requires():
     copied = copied_entries()
     missing = [entry for entry in fleet_provision.PAYLOAD_INCLUDE
-               if entry not in copied and entry != "requirements.txt"]
+               if entry not in copied]
     assert not missing, (
         f"the Dockerfile does not copy {missing}: a containerised node "
         'would fail with "no NMesh tree at /app"')
@@ -49,9 +49,16 @@ def test_the_mandatory_pair_is_present():
     assert {"src", "start.sh"} <= copied
 
 
-def test_requirements_come_from_the_base_image():
-    """requirements.txt is not copied again here: the base image already put it
-    in /app. If that line disappears from the base, the payload will lose the
-    file with nothing breaking at build time."""
-    base = (ROOT / "docker" / "Dockerfile.base").read_text()
-    assert re.search(r"COPY\s+requirements\.txt", base)
+def _python_images(path: Path) -> list:
+    return re.findall(r"^FROM\s+(python:\S+)", path.read_text(), re.M)
+
+
+def test_both_images_run_the_same_python():
+    """The application image is a fresh stage that copies the base's
+    ``site-packages`` by path. A base on another Python puts them where this
+    interpreter never looks, and the build still succeeds until the import."""
+    base = _python_images(ROOT / "docker" / "Dockerfile.base")
+    app = _python_images(DOCKERFILE)
+    assert base and app and set(base) == set(app)
+    version = re.match(r"python:(\d+\.\d+)", app[0]).group(1)
+    assert f"/usr/local/lib/python{version}/site-packages" in DOCKERFILE.read_text()
