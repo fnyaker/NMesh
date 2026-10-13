@@ -3681,3 +3681,48 @@ It goes at the first successful login, at a password change and at
 `--reset-password`. A machine installed by Fleet also sends it, in its signed
 end-to-end encrypted claim, to the operator who installed it, whose console
 shows it once and forgets it.
+
+## 92 — high — liboqs was compiled from a tag nobody checked, or from `main`
+
+> **Status — fixed.** Tests: `tests/test_liboqs_lock.py`,
+> `tests/test_liboqs_guard.py`.
+
+**Where** — `start.sh`: `fetch_liboqs`; `docker/Dockerfile.base`, which let
+`import oqs` build it; liboqs-python's own fallback on a missing library.
+
+**What happens** — the post-quantum library every node runs was built from
+`git clone --branch <tag>` or the tag's archive, with nothing comparing what
+arrived to anything. A tag is a pointer its owner can move. When no tag
+matched the wrapper's version, `start.sh` went on to the `x.y.0` tag and then
+to **`main`**, a branch that moves by design. The base image never ran that
+code at all: it imported the wrapper with no library, and the wrapper's answer
+is to clone the tag and compile it on the spot. Whoever controls that tag, or
+the path to GitHub with a certificate it accepts, chooses the crypto of every
+node installed after them.
+
+**Fixed** — `scripts/liboqs.lock` names the release, its commit and its
+archive's SHA-256; `scripts/build_liboqs.sh` builds only a clone whose HEAD is
+that commit or an archive with that digest, and nothing else; both `start.sh`
+and the base image call it. `src/liboqs_guard.py` stops `import oqs` when there
+is no library to load, so the wrapper never fetches one. The base image's
+packages come from a hash-locked set (`docker/requirements.lock`) audited weekly
+(`.github/workflows/audit.yml`).
+
+## 93 — medium — A liboqs built before the lock, or left in a cache, is reused unproven
+
+> **Status — open.**
+
+**Where** — `start.sh`: `adopt_liboqs`, `liboqs_candidates`, `cache_liboqs`.
+
+**What happens** — a node that already has a working liboqs keeps it: the
+check is functional (the wrapper loads it, both algorithms answer), so a
+library built from an unchecked source before 92 was fixed stays in use, and
+so does one copied from a cache or a prefix another install left — including
+`~/.cache/nmesh`, which the account running the installer can write and a later
+system install may adopt.
+
+**What it would take** — a stamp next to each build naming the lock it was
+built from (commit and digest), written only by `build_liboqs.sh`, and refusal to
+adopt anything without the current one; existing nodes would then rebuild once,
+which on a small machine is minutes of downtime at the next start, so when that
+happens is a decision.

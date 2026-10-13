@@ -109,13 +109,34 @@ test on the exact runtime the app ships with (Python 3.13). If the base image is
 not reachable (first bootstrap, or a fork PR with no package access), CI builds
 it once locally to stay green — the same fallback as the `docker` job.
 
-Alongside it, GitHub runs **CodeQL** (extended queries, Python, JavaScript and
-the workflows), **secret scanning** with push protection, and **Dependabot**
+Alongside it, GitHub runs **CodeQL** (`codeql.yml`: extended queries on
+Python, JavaScript and the workflows, plus `.github/codeql/nmesh`, the same
+security queries with mesh input as their source), **secret scanning** with push protection, and **Dependabot**
 (`.github/dependabot.yml`); [`SECURITY.md`](SECURITY.md) lists them. Every
 action in a workflow is pinned to a full commit SHA and every workflow starts
 from `permissions: {}`, granting each job its own; `tests/test_workflows_pinned.py`
 refuses a tag reference or a missing `permissions: {}`. A new action goes in by
 SHA with its version as a comment (`@<sha> # v4.4.0`); Dependabot moves the pin.
+
+`.github/codeql/nmesh/NMeshSources.qll` is where the mesh is declared as
+remote input: bytes an asyncio protocol or stream hands over, a spooled frame,
+and the parameters of the handlers a dispatch table reaches
+(`_on_*(self, src, document)`, `_handle_*(self, peer, packet)`) — a handler
+named otherwise is invisible to those queries. To see what it matches, or to
+run the queries before pushing, with the CodeQL CLI:
+
+```
+codeql database create /tmp/nmesh-db --language=python --source-root=.
+codeql query run --database=/tmp/nmesh-db .github/codeql/nmesh/probe/ListSources.ql
+codeql database analyze /tmp/nmesh-db .github/codeql/nmesh/queries --format=sarif-latest --output=/tmp/mesh.sarif
+```
+
+`audit.yml` runs `pip-audit` over `docker/requirements.lock`, the hash-locked set
+the base image installs, on every change and every Monday.
+`tests/test_liboqs_lock.py` holds `scripts/liboqs.lock`, `requirements.txt`
+and that lock together, and runs `scripts/build_liboqs.sh` offline against a
+moved tag and a tampered archive; `NMESH_NETWORK_TESTS=1` also checks the
+locked digest against the archive GitHub serves today.
 
 ### `[gwN] node down: Not properly terminated`
 

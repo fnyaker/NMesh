@@ -20,10 +20,17 @@ nodes following GitHub pick up through the updater.
 ## What the repository runs on its own
 
 - **CodeQL** code scanning (extended query suite) on Python, JavaScript and the
-  workflows themselves, on every push, every pull request and weekly.
+  workflows themselves, on every push, every pull request and weekly — plus the
+  same security queries run with **what a peer sends** as their source
+  (`.github/codeql/nmesh`): the standard models know HTTP servers, not the
+  mesh's sockets, spool frames and message handlers.
 - **Secret scanning** with **push protection**: a push carrying a known
   credential format is refused.
 - **Dependabot** alerts and security updates for the dependencies of
   `requirements.txt`, the base image and the workflow actions.
 - Every workflow action is pinned to a full commit SHA, and each workflow starts
   with no token permission, granting each job only what it uses.
+- liboqs is compiled only from the commit and archive digest in
+  `scripts/liboqs.lock`, and a node with no liboqs refuses to start rather than
+  let the wrapper fetch one; the base image installs a hash-locked package set
+  (`docker/requirements.lock`) that `pip-audit` checks every week.

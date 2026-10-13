@@ -1,0 +1,7 @@
+# The standard extended suite, plus the same security queries with what a peer
+# sends as their source (.github/codeql/nmesh): the library models HTTP
+# servers, not the mesh.
+name: nmesh
+queries:
+  - uses: security-extended
+  - uses: ./.github/codeql/nmesh/queries

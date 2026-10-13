@@ -382,12 +382,14 @@ available_mem_mb() {
 # The shared library exists where the wrapper will look. No `import oqs`
 # here — checking must never trigger the wrapper's surprise auto-build.
 pq_lib_on_disk() {
+    # The node's own test (src/liboqs_guard.py), loaded by path: importing the
+    # package would import the wrapper, which is the thing being protected.
     python - >/dev/null 2>&1 <<'PYEOF'
-import ctypes.util, os, sys
-from pathlib import Path
-prefix = Path(os.environ.get("OQS_INSTALL_PATH", str(Path.home() / "_oqs")))
-hits = [p for d in ("lib", "lib64") for p in (prefix / d).glob("liboqs.*")]
-sys.exit(0 if (hits or ctypes.util.find_library("oqs")) else 1)
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("liboqs_guard", "src/liboqs_guard.py")
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+sys.exit(0 if guard.library_on_disk() else 1)
 PYEOF
 }
 
@@ -491,35 +493,6 @@ adopt_liboqs() {
             return 0
         fi
     done < <(liboqs_candidates "${1:-}")
-    return 1
-}
-
-# Fetch the liboqs sources for $OQS_PY_VER into $SRC: the tag matching the
-# wrapper version, else its x.y.0, else main. Minimal images often have no git,
-# so a tarball of the same ref from the same origin is an accepted fallback.
-fetch_liboqs() {
-    local ref url
-    for ref in "$OQS_PY_VER" "${OQS_PY_VER%.*}.0" main; do
-        if command -v git &>/dev/null && git clone --quiet --depth 1 --branch "$ref" \
-            https://github.com/open-quantum-safe/liboqs.git "$SRC" 2>/dev/null; then
-            [ "$ref" = main ] && warn "No liboqs tag matches liboqs-python $OQS_PY_VER — building main"
-            return 0
-        fi
-        rm -rf "$SRC"
-        if command -v curl &>/dev/null && command -v tar &>/dev/null; then
-            url="https://github.com/open-quantum-safe/liboqs/archive/refs/tags/${ref}.tar.gz"
-            [ "$ref" = main ] && url="https://github.com/open-quantum-safe/liboqs/archive/refs/heads/main.tar.gz"
-            if curl -fsSL "$url" -o "$BUILD_DIR/liboqs.tar.gz" 2>/dev/null; then
-                mkdir -p "$SRC"
-                if tar -xzf "$BUILD_DIR/liboqs.tar.gz" -C "$SRC" --strip-components=1 2>/dev/null; then
-                    rm -f "$BUILD_DIR/liboqs.tar.gz"
-                    [ "$ref" = main ] && warn "No liboqs tag matches liboqs-python $OQS_PY_VER — building main"
-                    return 0
-                fi
-            fi
-            rm -rf "$SRC" "$BUILD_DIR/liboqs.tar.gz"
-        fi
-    done
     return 1
 }
 
@@ -813,33 +786,7 @@ else
         # Build the liboqs release matching the installed wrapper so the two
         # stay in lockstep — a mismatched wrapper/library pair around the
         # crypto is not acceptable, even when it happens to load.
-        info "Building liboqs $OQS_PY_VER from source (one-time — a few minutes)…"
-
-        BUILD_DIR="${LIBOQS_BUILD_DIR:-$(node_home)/_oqs_build}"
-        rm -rf "$BUILD_DIR"
-        mkdir -p "$BUILD_DIR"
-        SRC="$BUILD_DIR/liboqs"
-
-        fetch_liboqs || fail "Failed to fetch the liboqs sources (need git or curl + network access)"
-
-        CMAKE_GEN=""
-        command -v ninja &>/dev/null && CMAKE_GEN="-GNinja"
-
-        # Same feature flags as the wrapper's own auto-build (the stateful
-        # signature symbols must exist or the wrapper fails to load), minus
-        # OpenSSL so no dev headers are needed. OQS_BUILD_ONLY_LIB skips
-        # tests and docs. The install prefix is the wrapper's search path —
-        # user-writable, never needs sudo.
-        cmake -S "$SRC" -B "$BUILD_DIR/build" $CMAKE_GEN \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=ON \
-            -DOQS_BUILD_ONLY_LIB=ON \
-            -DOQS_USE_OPENSSL=OFF \
-            -DOQS_ENABLE_SIG_STFL_LMS=ON \
-            -DOQS_ENABLE_SIG_STFL_XMSS=ON \
-            -DOQS_HAZARDOUS_EXPERIMENTAL_ENABLE_SIG_STFL_KEY_SIG_GEN=ON \
-            -DCMAKE_INSTALL_PREFIX="$OQS_PREFIX" \
-            || fail "liboqs cmake configure failed (see output above)"
+        info "Building liboqs from source, verified against scripts/liboqs.lock (one-time — a few minutes)…"
 
         # One job per core OOM-kills the build on machines with many cores but
         # little RAM (~1.5 GB per compile unit) — cap jobs by available RAM.
@@ -852,10 +799,9 @@ else
         fi
         info "Building liboqs with $BUILD_JOBS parallel job(s) (capped by available RAM)…"
 
-        cmake --build "$BUILD_DIR/build" --parallel "$BUILD_JOBS" \
-            || fail "liboqs build failed"
-        cmake --install "$BUILD_DIR/build" \
-            || fail "liboqs install failed"
+        BUILD_DIR="${LIBOQS_BUILD_DIR:-$(node_home)/_oqs_build}"
+        LIBOQS_BUILD_DIR="$BUILD_DIR" bash ./scripts/build_liboqs.sh "$OQS_PREFIX" "$BUILD_JOBS" \
+            || fail "liboqs could not be built (see output above)"
         # The install lives in $OQS_PREFIX — the build tree is dead weight.
         rm -rf "$BUILD_DIR"
         # Keep a copy so the next install — another prefix, another node on this

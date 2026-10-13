@@ -297,8 +297,11 @@ python nmesh.pyz --data ./data       # needs liboqs-python + cryptography instal
 ```
 
 A single file carrying the NMesh code. Note: the native crypto
-(`liboqs-python`, `cryptography`) must be installed in the interpreter — for a
-fully self-contained artefact, prefer the Docker image.
+(`liboqs-python`, `cryptography`) must be installed in the interpreter, and
+liboqs itself built — `scripts/build_liboqs.sh <prefix>` then
+`OQS_INSTALL_PATH=<prefix>`. A node with no liboqs refuses to start rather than
+let the wrapper fetch one unchecked. For a fully self-contained artefact, prefer
+the Docker image.
 
 ## FAQ
 

@@ -1,0 +1,30 @@
+# Known vulnerabilities in what a node installs, checked on every change and
+# once a week: an advisory is published against a version long after it was
+# locked, and nothing in the tree changes when it is.
+name: audit
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  python-dependencies:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # The hash-locked set the base image installs (docker/requirements.lock),
+      # audited without installing it.
+      - uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: docker/requirements.lock
+          require-hashes: true

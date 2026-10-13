@@ -6,7 +6,7 @@
 #   NMESH_CONSOLE_PORT    web console port         (default 8787)
 #   NMESH_CONSOLE_PASSWORD  console login password (optional; read straight from
 #                           the env by nmesh_node.py — if unset, a strong one
-#                           is generated and printed once in the logs)
+#                           is generated and kept in $NMESH_DATA/console.first-password)
 #   NMESH_CONNECTOR_PORT  data connector port      (optional)
 #   NMESH_SPOOL           spool directory          (optional, store-and-forward)
 #   NMESH_DATA            state directory          (default /data)

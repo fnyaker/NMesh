@@ -505,7 +505,7 @@ everything an update can break.
 | **An unknown distro** | Exotic derivatives | `ID`/`ID_LIKE` first, otherwise the package manager actually installed; as a last resort cmake/ninja through pip |
 | **Declarative distros** | NixOS, Gentoo | We install nothing behind the user's back: a `nix-shell` / `emerge` command is printed |
 | **No wheel for the platform** | musl, 32-bit ARM, RISC-V: `cryptography` compiles | On a `pip install` failure, installs Rust + the OpenSSL/FFI headers (`pkg_names native`) and retries |
-| **No `git`** | Minimal images | The liboqs sources are fetched as a tarball (same ref, same origin) with `curl` |
+| **No `git`** | Minimal images | The liboqs sources are fetched as the locked tag's archive with `curl`, and must hash to `scripts/liboqs.lock` |
 | **An inherited broken venv** | A distro upgrade that removes the interpreter, a venv created without pip | `venv_broken()` detects it on every run and recreates it |
 | **Little RAM, many cores** | The liboqs build gets OOM-killed (~1.5 GB per compilation unit) | Parallelism capped by `MemAvailable` |
 
@@ -530,9 +530,23 @@ without ever installing anything (`tests/test_start_script.py`).
 
 No distribution ships a liboqs worth trusting: Debian/Ubuntu never had one
 (removed from unstable in April 2025), Fedora sits on 0.10.0 — too old to
-guarantee ML-KEM-768 / ML-DSA-65. The script therefore compiles the **release
-matching exactly the `liboqs-python` wrapper installed**, into
-`$OQS_INSTALL_PATH` (default `~/_oqs`), the only place the wrapper looks. On
+guarantee ML-KEM-768 / ML-DSA-65. The script therefore compiles the release
+named in **`scripts/liboqs.lock`** — the one `requirements.txt` pins the
+`liboqs-python` wrapper to — into `$OQS_INSTALL_PATH` (default `~/_oqs`), the
+only place the wrapper looks.
+
+The source is **proven before it is compiled** (`scripts/build_liboqs.sh`,
+shared with the Docker base image): a `git clone` of the tag must land on the
+locked commit, and the tag's archive, fetched instead when there is no git,
+must hash to the locked SHA-256. Anything else stops the install — no other
+tag, never `main`. A tag is a pointer its owner can move; this is the
+post-quantum half of the node's crypto.
+
+The wrapper has its own answer to a missing library — clone the tag and
+compile it on the spot, unchecked — so the node never lets it get that far:
+`src/liboqs_guard.py` refuses to import it when there is no library where it
+would look, and `start.sh` asks the same function before its own checks
+import anything. On
 macOS the official Homebrew formula is accepted after both required algorithms
 are checked. The liboqs traps in detail:
 [`../Architecture/gotchas.md`](../Architecture/gotchas.md).

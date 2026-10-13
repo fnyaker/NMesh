@@ -1,0 +1,11 @@
+# The liboqs release this tree compiles, and what its source must hash to.
+#
+# Read by scripts/build_liboqs.sh (start.sh, docker/Dockerfile.base) and checked
+# against requirements.txt by tests/test_liboqs_lock.py. A tag is a pointer its
+# owner can move; the commit and the archive's digest are not. Bump all four
+# together: the commit is the one GitHub's API gives for the tag, the digest the
+# one two separate downloads of the archive agree on.
+LIBOQS_VERSION=0.16.0
+LIBOQS_COMMIT=5a1a854b0dc9f2141bdc771c555ee60c37950183
+LIBOQS_TARBALL_SHA256=162d5b510518ee5f285f82fa1f16402a885176e818bf1b1a4c3c91c9a2f01eae
+LIBOQS_PYTHON_VERSION=0.16.0.1
