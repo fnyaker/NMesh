@@ -450,6 +450,12 @@ scope. Add yours.
   meant to download a scan; the permission layer stopped it. "CI green" is
   every check `pass`, read from `gh pr checks` in its own step. → Never put a
   merge in a command doing something else, and read the checks first.
+- **A tool's blind spot named without asking the tool.** The agent told the
+  operator CodeQL could not see the console's HTTP server; it can — the console,
+  chat and MCP all subclass `BaseHTTPRequestHandler`, which the library models.
+  Listing `RemoteFlowSource` on a local database showed it, and showed the
+  real gap: the mesh. → Before saying what an analyser sees, query it for its
+  sources.
 
 ### Running the tests (read this before trusting "green")
 

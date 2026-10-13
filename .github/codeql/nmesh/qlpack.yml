@@ -1,0 +1,5 @@
+name: nmesh/mesh-input
+version: 0.1.0
+library: false
+dependencies:
+  codeql/python-all: "*"

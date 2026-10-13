@@ -20,7 +20,10 @@ nodes following GitHub pick up through the updater.
 ## What the repository runs on its own
 
 - **CodeQL** code scanning (extended query suite) on Python, JavaScript and the
-  workflows themselves, on every push, every pull request and weekly.
+  workflows themselves, on every push, every pull request and weekly — plus the
+  same security queries run with **what a peer sends** as their source
+  (`.github/codeql/nmesh`): the standard models know HTTP servers, not the
+  mesh's sockets, spool frames and message handlers.
 - **Secret scanning** with **push protection**: a push carrying a known
   credential format is refused.
 - **Dependabot** alerts and security updates for the dependencies of

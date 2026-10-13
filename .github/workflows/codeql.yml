@@ -1,0 +1,36 @@
+# CodeQL, configured here rather than by GitHub's default setup, so it can load
+# this tree's model of mesh input (.github/codeql/nmesh/NMeshSources.qll).
+name: CodeQL
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  schedule:
+    - cron: "41 4 * * 2"
+
+permissions: {}
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ python, javascript-typescript, actions ]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ${{ matrix.language == 'python' && './.github/codeql/codeql-config.yml' || '' }}
+          queries: ${{ matrix.language != 'python' && 'security-extended' || '' }}
+      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: /language:${{ matrix.language }}
