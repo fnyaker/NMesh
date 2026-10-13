@@ -462,6 +462,12 @@ scope. Add yours.
   seed cut in half by the length cap, all reporting zero findings. → A helper
   that builds a test's premise raises; check the premise is there (seeds
   non-empty, coverage above zero) before reading a quiet result.
+- **A cut turned into "keep going" without asking what the cut bounded.** To
+  make the abuse cut silent, an agent let a muted link's receive loop continue;
+  on a medium that fails without awaiting, that loop then spun forever and the
+  suite hung. The close had been the only thing ending it. → Before removing an
+  exit from a loop, find what else that exit was the bound for, and test the
+  loop with a medium that never waits.
 
 ### Running the tests (read this before trusting "green")
 

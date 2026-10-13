@@ -218,6 +218,9 @@ class _Peer:
         # hangs its identity-wide book here. Set by `MeshNode._new_peer`; a peer
         # nobody owns simply counts locally, which is the honest fallback.
         self.on_abuse = None
+        # Called when an authenticated link has used up its allowance: the
+        # node mutes it (`MeshNode._tarpit`) rather than have it closed here.
+        self.on_overflow = None
         self._task: asyncio.Task | None = None
 
     async def start(self, on_packet) -> None:
@@ -256,8 +259,10 @@ class _Peer:
                 # is treated as hostile and the peer is cut.
                 self._charge_identity()
                 if self.note_abuse():
-                    self.end_reason = "cut: too many frames that would not decode"
-                    return
+                    if not self._muted_instead():
+                        self.end_reason = "cut: too many frames that would not decode"
+                        return
+                    await asyncio.sleep(_MUTED_READ_PAUSE)
                 continue
             # …and what came back has to *be* a packet. Everything below counts
             # its length, traces it and hands it to a handler, all three of
@@ -269,8 +274,10 @@ class _Peer:
             if packet is None:
                 self._charge_identity()
                 if self.note_abuse():
-                    self.end_reason = "cut: the medium handed back no packet"
-                    return
+                    if not self._muted_instead():
+                        self.end_reason = "cut: the medium handed back no packet"
+                        return
+                    await asyncio.sleep(_MUTED_READ_PAUSE)
                 continue
             nbytes = _HEADER_BYTES + len(packet.payload)
             self.counters.on_in(nbytes)
@@ -292,6 +299,25 @@ class _Peer:
                     self.on_slow(self, packet.type, held)
                 except Exception:            # noqa: BLE001 — never the reason
                     pass
+
+    def _muted_instead(self) -> bool:
+        """Past its allowance, an authenticated link is muted, not closed.
+
+        A close is the one signal a detected peer can read — it changes
+        identity and starts again — so the link is handed to the node's tarpit,
+        which drops what it sends and lets it go at a random moment. A link
+        with no identity has nothing to hide that from, and closing it is what
+        bounds the connections a stranger can hold open. Never raises."""
+        if self.tarpit_until:
+            return True
+        hook = self.on_overflow
+        if hook is None or self.authenticated_id is None:
+            return False
+        try:
+            hook(self)
+        except Exception:                       # noqa: BLE001 — never the reason
+            return False
+        return bool(self.tarpit_until)
 
     def _charge_identity(self) -> None:
         """Tell the node a frame would not decode, so the *identity* is charged.

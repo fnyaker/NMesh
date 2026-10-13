@@ -5290,6 +5290,7 @@ class MeshNode:
         peer = _Peer(transport, is_client_side=is_client_side)
         peer.on_dead = on_dead if on_dead is not None else self._reap_peer
         peer.on_abuse = self._charge_identity_abuse
+        peer.on_overflow = self._tarpit
         peer.on_slow = self._on_slow_handler
         peer.total = self._metrics.total
         peer.trace = self.trace
@@ -10333,7 +10334,11 @@ Hints come first (the ``have`` byte on an announce, from an
         Never inline: we are inside that peer's own receive task, which must not
         be cancelled from here (see :meth:`_reap_peer`)."""
         self._charge_identity_abuse(peer)
-        if peer.note_abuse():
+        if not peer.note_abuse():
+            return
+        if peer.authenticated_id is not None:
+            self._tarpit(peer)          # silent: see `_Peer._muted_instead`
+        else:
             self._spawn_bounded(self._reap_peer(
                 peer, "cut: too many protocol violations on this link"))
 

@@ -1163,7 +1163,11 @@ verifying also means a hostile name costs no signature check.
 unparseable, badly signed, or non-canonical is counted against the link it came
 on (`_Peer.note_abuse`), and the peer is cut once the count passes
 `_MAX_MALFORMED` — the same counter and the same ceiling as an undecodable
-frame, because it is the same judgement. An honest relay verifies before
+frame, because it is the same judgement. For an authenticated link "cut" is the
+tarpit above, never a close (`_Peer._muted_instead`, `MeshNode._charge_abuse`):
+a close at the 33rd violation would tell the peer exactly what the tarpit
+withholds. Only a link with no identity is closed on the spot — it has nothing
+to hide that from, and closing is what bounds the links a stranger holds open. An honest relay verifies before
 re-sending, so whoever hands us a bad claim either forged it or forwarded
 without checking; neither is something to absorb quietly.
 

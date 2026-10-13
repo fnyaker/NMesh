@@ -3780,3 +3780,21 @@ the frame cost nothing, but it was not counted against the peer either: a peer
 sending only those is never cut.
 
 **Fixed** — both decodes return `None`.
+
+## 97 — medium — An authenticated flooder was told it had been detected
+
+> **Status — fixed.** Tests: `tests/integration/test_hostile_peer.py`,
+> `tests/test_pseudo_mesh.py::TestHostilePeers`.
+
+**Where** — `src/mesh/peers.py`: the receive loop; `src/node.py`:
+`_charge_abuse`.
+
+**What happens** — the charter cuts an abusive peer silently: its traffic is
+dropped and the link let go at a random moment, because a peer told it was
+detected changes identity and starts again. Past `_MAX_MALFORMED` (32) the
+per-link counter closed the link outright, from both the receive loop and the
+handlers' path, tarpit or not. Over real TCP, an authenticated member sending
+40 undecodable frames had its connection closed by the victim 0.1 s later.
+
+**Fixed** — past the ceiling an authenticated link is tarpitted; only a link
+with no identity is closed at once.

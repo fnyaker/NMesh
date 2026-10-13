@@ -721,6 +721,11 @@ _PEER_STOP_TIMEOUT        = 2.0
 # nothing while it waits, so every probe on that link goes unanswered for that
 # long — and on the far end that is indistinguishable from loss.
 _SLOW_HANDLER             = 1.0
+# How long a muted link's receive loop waits after a frame that would not
+# decode. A medium can fail without ever awaiting, and a link that is no longer
+# closed for it would then spin the event loop; reading a peer whose traffic is
+# dropped anyway at a hundred frames a second costs it nothing worth keeping.
+_MUTED_READ_PAUSE         = 0.01
 # How long the keepalive loop waits for one probe to be queued. Probes are sent
 # one link after another, so a send that waits is a wait every other link pays
 # too: one full queue used to stop every probe on every link for ten seconds.
@@ -1160,6 +1165,7 @@ __all__ = [
     "_SHORT_SEEK_LEN",
     "_SLEEP_ENDS_LINKS",
     "_SLOW_HANDLER",
+    "_MUTED_READ_PAUSE",
     "_SPEED_CHUNK",
     "_SPEED_IDLE_PROBES",
     "_SPEED_INFLIGHT",
