@@ -2444,6 +2444,20 @@ running X.
 
 ## Miscellaneous
 
+- **A per-link ceiling that closed what the tarpit had muted.** The receive loop
+  (undecodable frames) and `_charge_abuse` (lies a handler caught) both closed
+  the link at `_MAX_MALFORMED`, so an authenticated peer sending 33 bad frames
+  saw "the peer closed the connection" within 0.1 s — the one signal the tarpit
+  exists to withhold, sent whether or not the identity had already been muted.
+  Past the ceiling an authenticated link is now handed to `_tarpit`; only an
+  unauthenticated one is closed. `tests/integration/test_hostile_peer.py`
+  watches the flooder's own side of the socket, which is the only place this
+  shows: from the victim's side a close and a tarpit both stop the traffic.
+  The close was also what bounded a medium that fails without awaiting: a muted
+  link's loop keeps reading, and on such a medium it spun the event loop until
+  the node stopped answering. It now waits `_MUTED_READ_PAUSE` after each bad
+  frame (`tests/test_charter.py`).
+
 - `console.stop()` blocked for 0.5 s: `ThreadingHTTPServer.serve_forever()` polls
   its shutdown flag every 0.5 s by default. We pass a tight `poll_interval`
   (`webconsole.py`, `chat_web.py`).

@@ -279,6 +279,10 @@ class TestHostilePeers:
             await node.stop()
 
     async def test_a_persistent_liar_is_cut(self):
+        """Muted the moment it runs out, and let go later — never closed on the
+        spot, which is the one signal a detected peer can read."""
+        import asyncio
+        import time
         node = await _node()
         try:
             peer = _FakePeer()
@@ -286,9 +290,31 @@ class TestHostilePeers:
             node._peers.append(peer)
             for _ in range(_MAX_MALFORMED + 2):
                 await self._feed(node, peer, os.urandom(50))
-            # The reap runs detached (we are inside the peer's own receive task),
-            # so let it land before looking.
-            import asyncio
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert peer.tarpit_until > time.monotonic()
+            assert peer in node._peers and not peer.transport.closed
+            peer.tarpit_until = time.monotonic() - 1
+            node._reap_expired_tarpits()
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert peer not in node._peers
+            assert peer.transport.closed
+        finally:
+            await node.stop()
+
+    async def test_a_liar_with_no_identity_is_closed_at_once(self):
+        """Nothing to hide it from, and closing is what bounds the links a
+        stranger can hold open."""
+        import asyncio
+        node = await _node()
+        try:
+            peer = _FakePeer()
+            peer.authenticated_id = None
+            peer.transport = _FakeTransport()
+            node._peers.append(peer)
+            for _ in range(_MAX_MALFORMED + 2):
+                node._charge_abuse(peer)
             for _ in range(5):
                 await asyncio.sleep(0)
             assert peer not in node._peers

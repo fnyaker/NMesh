@@ -263,6 +263,37 @@ class TestNoiseIsChargedToWhoeverSentIt:
         finally:
             await node.stop()
 
+    async def test_a_muted_link_on_a_medium_that_never_waits_does_not_starve_the_node(self):
+        """Past its allowance an authenticated link is muted, not closed, so its
+        loop goes on reading. A medium that fails without awaiting would then
+        spin the event loop for as long as the hold lasts."""
+        import asyncio
+        import time
+
+        from src.node import MeshNode
+        from src.node_id import NodeID
+        from src.packet import PacketError
+        from tests.conftest import FakeTransport, make_manager
+
+        class _Garbage(FakeTransport):
+            async def receive(self):
+                raise PacketError("bad frame")
+
+        node = MeshNode(transport_manager=make_manager())
+        try:
+            peer = await node._inject_peer(_Garbage())
+            peer.authenticated_id = NodeID.generate()
+            deadline = time.monotonic() + 5.0
+            while not peer.tarpit_until and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert peer.tarpit_until, "the link was never muted"
+            started = time.monotonic()
+            await asyncio.sleep(0.05)
+            assert time.monotonic() - started < 0.5
+            assert peer in node._peers
+        finally:
+            await node.stop()
+
     async def test_an_unauthenticated_peer_is_charged_on_the_link_only(self):
         """There is nothing else to charge: a peer with no identity has not
         given us one to remember."""
