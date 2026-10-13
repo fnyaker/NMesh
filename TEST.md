@@ -109,6 +109,14 @@ test on the exact runtime the app ships with (Python 3.13). If the base image is
 not reachable (first bootstrap, or a fork PR with no package access), CI builds
 it once locally to stay green — the same fallback as the `docker` job.
 
+Alongside it, GitHub runs **CodeQL** (extended queries, Python, JavaScript and
+the workflows), **secret scanning** with push protection, and **Dependabot**
+(`.github/dependabot.yml`); [`SECURITY.md`](SECURITY.md) lists them. Every
+action in a workflow is pinned to a full commit SHA and every workflow starts
+from `permissions: {}`, granting each job its own; `tests/test_workflows_pinned.py`
+refuses a tag reference or a missing `permissions: {}`. A new action goes in by
+SHA with its version as a comment (`@<sha> # v4.4.0`); Dependabot moves the pin.
+
 ### `[gwN] node down: Not properly terminated`
 
 This is **not** a test failure and not flaky infrastructure. It means a

@@ -333,7 +333,8 @@ The threat model: *the moment data leaves the node, it is in hostile
 territory*. Nothing arriving from the network or from disk is presumed sound;
 everything is validated, bounded, and rejected by default. Fuzzing proves that
 no hostile byte crashes a parser. Details and priorities:
-[`AGENTS.md`](AGENTS.md).
+[`AGENTS.md`](AGENTS.md). To report a vulnerability, privately:
+[`SECURITY.md`](SECURITY.md).
 
 ## Project layout
 
