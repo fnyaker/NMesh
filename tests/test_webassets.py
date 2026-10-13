@@ -346,7 +346,7 @@ def test_no_inline_style_attribute_anywhere(name):
 
 def test_the_console_still_forbids_inline_anything():
     """If the CSP were relaxed, the rule above would lose its meaning."""
-    from src.webconsole import _SECURITY_HEADERS
+    from src.http_headers import SECURITY_HEADERS as _SECURITY_HEADERS
     policy = _SECURITY_HEADERS["Content-Security-Policy"]
     assert "default-src 'self'" in policy
     assert "unsafe-inline" not in policy

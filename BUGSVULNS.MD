@@ -3798,3 +3798,22 @@ handlers' path, tarpit or not. Over real TCP, an authenticated member sending
 
 **Fixed** — past the ceiling an authenticated link is tarpitted; only a link
 with no identity is closed at once.
+
+## 98 — low — The console told every visitor its exact Python version
+
+> **Status — fixed.** Tests: `tests/test_http_headers.py`. Found by OWASP ZAP
+> (`10036`, `10063`, `90004`).
+
+**Where** — `src/webconsole.py`, `src/apps/chat_web.py`: the request handlers.
+
+**What happens** — `BaseHTTPRequestHandler` appends `sys_version` to the
+`Server` line, so every answer, the login page included, said
+`nmesh-console Python/3.13.13`: which interpreter, to the patch, a scanner
+looking for a known hole needs no further. The pages also carried no
+`Permissions-Policy` and no cross-origin isolation, and the two servers each
+kept their own copy of the header policy.
+
+**Fixed** — `sys_version` is empty on both; one policy (`src/http_headers.py`)
+adds `Permissions-Policy`, `COOP`, `CORP` and `COEP` to what was there. HSTS is
+left out on purpose and the reason written beside the policy. An authenticated
+active scan of the 56 API routes found nothing else.
