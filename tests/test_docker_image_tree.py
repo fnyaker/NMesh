@@ -62,3 +62,13 @@ def test_both_images_run_the_same_python():
     assert base and app and set(base) == set(app)
     version = re.match(r"python:(\d+\.\d+)", app[0]).group(1)
     assert f"/usr/local/lib/python{version}/site-packages" in DOCKERFILE.read_text()
+
+
+def test_a_registry_image_is_pinned_by_digest():
+    """A tag is moved by whoever publishes it; Dependabot moves the digest."""
+    for path in (ROOT / "docker" / "Dockerfile", ROOT / "docker" / "Dockerfile.base"):
+        for image in re.findall(r"^FROM\s+(\S+)", path.read_text(), re.M):
+            if image.startswith("${"):
+                continue                    # the base image, built in this tree
+            assert re.search(r"@sha256:[0-9a-f]{64}$", image), f"{path.name}: {image}"
+

@@ -14,7 +14,7 @@ FROM ${BASE_IMAGE} AS deps
 # CMake, git and the dev headers liboqs was built with, none of which a node
 # needs and all of which an attacker on the box would be glad of. Only the
 # built library and the installed packages are carried over.
-FROM python:3.13-slim
+FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
 
 WORKDIR /app
 
@@ -29,7 +29,7 @@ RUN apt-get update && apt-get upgrade -y \
 
 ENV OQS_INSTALL_PATH=/opt/liboqs
 COPY --from=deps /opt/liboqs /opt/liboqs
-COPY --from=deps /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
+COPY --from=deps /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
 RUN python -c "import oqs; oqs.KeyEncapsulation('ML-KEM-768'); oqs.Signature('ML-DSA-65')"
 
 COPY src/ ./src/

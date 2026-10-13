@@ -138,6 +138,15 @@ every Monday, since a fix released after the last build is news nothing in the
 tree carries. `tests/test_workflows_pinned.py` refuses a `docker run` of a
 registry image not pinned by digest.
 
+### The repository itself (`scorecard.yml`) and what it ships
+
+OpenSSF Scorecard runs on every push to `main` and weekly, and its findings
+land in the Security tab beside CodeQL's; they are not published to the
+OpenSSF API. `release.yml` and the `docker` job attest the provenance of the
+zipapp and of every image they push (`actions/attest-build-provenance`), and
+both Dockerfiles take `python:*-slim` by digest
+(`tests/test_docker_image_tree.py`), which Dependabot moves.
+
 ### The console under a scanner (`audit.yml`, `console-dast`)
 
 Every week, a throwaway node from the published image is scanned by OWASP ZAP
