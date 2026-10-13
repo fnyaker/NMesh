@@ -102,4 +102,7 @@ cmake -S "$SRC" -B "$WORK/build" "${GENERATOR[@]}" \
     || die "cmake configure failed"
 cmake --build "$WORK/build" --parallel "$JOBS" || die "build failed"
 cmake --install "$WORK/build" || die "install failed"
+# What this build was proven to be, beside it. start.sh reuses a library only
+# when this matches the lock it is running with; nothing else writes it.
+grep -E '^LIBOQS_(VERSION|COMMIT|TARBALL_SHA256)=' "$LOCK" > "$PREFIX/nmesh-liboqs.lock"
 echo "build_liboqs: liboqs $VERSION ($COMMIT) installed in $PREFIX"

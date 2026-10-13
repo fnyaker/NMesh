@@ -80,3 +80,13 @@ def test_a_tag_reference_is_refused():
     assert not _PINNED.match("actions/checkout@v4")
     assert not _PINNED.match("actions/checkout@11d5960")
     assert _PINNED.match("actions/checkout@" + "a" * 40)
+
+
+@pytest.mark.parametrize("name", ["base-image.yml", "ci.yml"])
+def test_what_publishes_latest_does_it_one_run_at_a_time(name):
+    """Two merges a minute apart once let the older build overwrite the newer
+    `:latest` (BUGSVULNS 100)."""
+    text = (WORKFLOWS / name).read_text()
+    assert re.search(r"concurrency:\s*\n\s+group: ", text), name
+    assert "cancel-in-progress: false" in text
+
