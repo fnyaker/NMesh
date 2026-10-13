@@ -2453,7 +2453,9 @@ running X.
   anything imports the wrapper: `import oqs` with no library fetches and builds
   one itself, unchecked. The packages come from `docker/requirements.lock`
   under `--require-hashes`; regenerate it with
-  `uv pip compile requirements.txt --universal --generate-hashes --python-version 3.13 --no-header -o docker/requirements.lock`.
+  `uv pip compile requirements.txt --universal --generate-hashes --python-version 3.10 --no-header -o docker/requirements.lock`
+  — from the oldest Python `start.sh` accepts, so the markers cover every
+  interpreter that may read it, the audit runner's included.
   The base build needs `make` → `build-essential`, not `gcc` alone (otherwise
   CMake: "CMAKE_MAKE_PROGRAM is not set").
 - Docker: the application image must copy **`start.sh` and `pyproject.toml`** as
