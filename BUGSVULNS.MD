@@ -3492,8 +3492,10 @@ way; POST with a body worked, which is why the existing tests passed.
 
 ## 81 — low — `test_spool_transport::test_bidirectional_over_directory` lost one message, once
 
-> **Status — open.** Seen once in CI (run 37657786505, PR #111), on a commit
-> that touched only the MCP bridge.
+> **Status — open.** Seen twice in CI: run 37657786505 (PR #111), on a commit
+> that touched only the MCP bridge, and run 38392590031 (PR #127), on one that
+> touched only the fuzzer, a release parser and the punch codec. Both times
+> the same direction was lost, the second message of the pair, after 25 s.
 
 **What happens** — after both sessions came up, `host` received `g2h` and
 `guest` never received `h2g` within 25 s.
