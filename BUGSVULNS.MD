@@ -3835,3 +3835,62 @@ builds and then cannot import. The test written for exactly this failed on
 3.14. On 3.14 Trivy found four fixable HIGHs, all in pip's own vendored
 packages, so the running image no longer carries pip. Unit and integration
 suites pass on 3.14; CI's interpreter is now 3.14 (`TEST.md`, `AGENTS.md`).
+
+## 100 — high — Past a few dozen nodes, a first message to a node nobody links to goes round in a circle
+
+> **Status — open.** Measured, not fixed. A shorter retry was tried and
+> measured, and does not help (see below).
+
+**Where** — `src/node.py`: `_forward_packet`, `_route_candidates`, and the
+replay drop in `_handle_packet`.
+
+**What happens** — a relay forwards a routed packet to its XOR-nearest
+neighbours **except the link it arrived on**, and nothing else prevents a cycle:
+`_is_seen` drops the second visit. In a trace of one `E2E_HANDSHAKE` from node
+A to node D, relay B sent it to C, C — whose nearest neighbour other than B was
+B's other neighbour — sent it on, and it came back to B, which had already seen
+it. The packet is lost without a word. The next attempt, five seconds later,
+often takes a route that the first one's background acquisition has since
+learned. A strict "forward only to a node closer than this one" rule is not the
+answer: on a chain the next hop is farther by definition (`routing.md`).
+
+**Reproduce** — N real `MeshNode`s on loopback in one process (TCP only), each
+newcomer joining through two random earlier members; wait 30 s; from random
+pairs that share no link send one message each and wait up to 20 s. Delivered in
+20 s: 40 nodes, 34–40 of 40, with some at exactly 5, 10 or 15 s; 100 nodes, 57
+of 60, median 1.7 s; 200 nodes, 23 of 30, median 10 s, and the same pairs fail
+run after run. Every failure is a first contact; once an end-to-end session
+exists the same pair answers in about 10 ms.
+
+**Tried** — a handshake retry of 0.75 s doubling to 5 s instead of a flat 5 s.
+At 200 nodes it delivered 19 of 30 (median 12 s) against 23 of 30: a retry sends
+the same packet down the same greedy walk. Not kept.
+
+**Needs** — a decision, not a patch. The candidates are: backtracking on a
+replay seen from a different link (a bounded per-packet set of first hops
+already tried, so a hostile replay buys at most `_ROUTE_SEND_FANOUT` forwards),
+or acquiring the route with a lookup **before** the first blind forward when no
+measured path exists, or sending the first handshake over two disjoint first
+hops. Each touches what the charter calls anti-amplification and must be
+measured against a hostile replayer.
+
+## 101 — low — An accepted link closed before the greeting raised out of the accept callback
+
+> **Status — open.**
+
+**Where** — `src/node.py`: `_on_new_transport`, the `peer.send` of the
+capabilities and the challenge; reached from `src/transports/tcp.py`
+(`_accept`) and `src/transports/manager.py` (`_dispatch_incoming`).
+
+**What happens** — when the far end closes the link before the node's first
+send, `peer.send` raises `ConnectionError("the tcp link is closed")`, which
+nothing catches: asyncio logs `Unhandled exception in client_connected_cb` with
+a traceback. Seen three times while 200 in-process nodes dialled each other at
+start-up (mutual dials). The node did not fall over, and what happens to
+the peer already appended to `_peers` was not followed. The charter's line is
+that no input should get an unhandled exception out of a receive path.
+
+**Not reproduced by a raw client** — 3984 connections opened and closed at once
+against a running node produced none. That points at the link being ended from
+inside the node rather than at a hostile client, but the cause was not
+confirmed. The only reproduction is the 200-node start-up of BUGSVULNS 100.
