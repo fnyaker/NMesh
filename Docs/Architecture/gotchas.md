@@ -2478,7 +2478,10 @@ running X.
   Dockerfiles must start from the **same Python** (the copy is by path,
   `/usr/local/lib/python3.X/site-packages`; another version builds and then
   cannot import), and nothing the base put in `/app` is there any more —
-  `requirements.txt` included, which the provisioning payload needs.
+  `requirements.txt` included, which the provisioning payload needs. The
+  runtime stage also uninstalls pip: a node never installs anything, and pip's
+  vendored urllib3 and msgpack were the only fixable HIGHs Trivy found once
+  the image moved to Python 3.14.
   `tests/test_docker_image_tree.py` holds both. CI scans the built image with
   Trivy and fails on a fixable HIGH or CRITICAL.
 - Docker: the application image must copy **`start.sh` and `pyproject.toml`** as

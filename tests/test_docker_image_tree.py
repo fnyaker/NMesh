@@ -72,3 +72,9 @@ def test_a_registry_image_is_pinned_by_digest():
                 continue                    # the base image, built in this tree
             assert re.search(r"@sha256:[0-9a-f]{64}$", image), f"{path.name}: {image}"
 
+
+def test_the_running_image_carries_no_installer():
+    """pip vendors its own urllib3 and msgpack, which a running node never
+    calls and nothing here would patch; the image drops it."""
+    assert "pip uninstall -y pip" in DOCKERFILE.read_text()
+

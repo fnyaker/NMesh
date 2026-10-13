@@ -30,7 +30,12 @@ RUN apt-get update && apt-get upgrade -y \
 ENV OQS_INSTALL_PATH=/opt/liboqs
 COPY --from=deps /opt/liboqs /opt/liboqs
 COPY --from=deps /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
-RUN python -c "import oqs; oqs.KeyEncapsulation('ML-KEM-768'); oqs.Signature('ML-DSA-65')"
+# A running node never installs anything — its packages came from the base,
+# hash-checked — so pip is not left behind, nor the copies of urllib3 and
+# msgpack it carries for itself, which a scanner rightly flags and nothing
+# here would ever patch.
+RUN python -m pip uninstall -y pip >/dev/null \
+    && python -c "import oqs; oqs.KeyEncapsulation('ML-KEM-768'); oqs.Signature('ML-DSA-65')"
 
 COPY src/ ./src/
 COPY scripts/ ./scripts/
