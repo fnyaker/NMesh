@@ -7,8 +7,11 @@ model and the principles are in [`AGENTS.md`](AGENTS.md), the mechanisms in
 ## Reporting a vulnerability
 
 Report it **privately**, through GitHub's *Report a vulnerability* button on
-the repository's **Security** tab. Do not open a public issue, and do not post
-it in a pull request.
+the repository's **Security** tab
+(<https://github.com/fnyaker/NMesh/security/advisories/new>). Do not open a
+public issue, and do not post it in a pull request. The report stays between
+you and the maintainers until a fix is published, and the advisory then
+credits you unless you ask otherwise.
 
 Please include what an adversary gains, how to reproduce it, and the version
 (`src/version.py`). Write addresses from 192.0.2.0/24, 198.51.100.0/24 or
@@ -16,6 +19,20 @@ Please include what an adversary gains, how to reproduce it, and the version
 
 Only the latest release is supported; a fix ships as a new patch version, which
 nodes following GitHub pick up through the updater.
+
+## Checking what you downloaded
+
+The zipapp attached to a release and every image pushed to GHCR carry a build
+provenance attestation, signed through Sigstore: which commit, which workflow.
+
+```
+gh attestation verify nmesh.pyz --repo fnyaker/NMesh
+gh attestation verify oci://ghcr.io/fnyaker/nmesh:latest --repo fnyaker/NMesh
+```
+
+That proves where a file came from, not that its code is right; what a node
+installs from the mesh is decided by the publishers its operator pinned
+([`Docs/Updates/guide`](Docs/Updates/guide)).
 
 ## What the repository runs on its own
 
@@ -38,3 +55,5 @@ nodes following GitHub pick up through the updater.
   Trivy on every build and every week: a fixable HIGH or CRITICAL fails it.
 - The console is scanned by OWASP ZAP every week, its API included and signed
   in, against a throwaway node.
+- **OpenSSF Scorecard** grades how the repository itself is kept, weekly,
+  into the Security tab.

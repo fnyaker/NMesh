@@ -3492,8 +3492,10 @@ way; POST with a body worked, which is why the existing tests passed.
 
 ## 81 — low — `test_spool_transport::test_bidirectional_over_directory` lost one message, once
 
-> **Status — open.** Seen once in CI (run 37657786505, PR #111), on a commit
-> that touched only the MCP bridge.
+> **Status — open.** Seen twice in CI: run 37657786505 (PR #111), on a commit
+> that touched only the MCP bridge, and run 38392590031 (PR #127), on one that
+> touched only the fuzzer, a release parser and the punch codec. Both times
+> the same direction was lost, the second message of the pair, after 25 s.
 
 **What happens** — after both sessions came up, `host` received `g2h` and
 `guest` never received `h2g` within 25 s.
@@ -3817,3 +3819,19 @@ kept their own copy of the header policy.
 adds `Permissions-Policy`, `COOP`, `CORP` and `COEP` to what was there. HSTS is
 left out on purpose and the reason written beside the policy. An authenticated
 active scan of the 56 API routes found nothing else.
+
+## 99 — low — Dependabot moved one image to Python 3.14 and not the other
+
+> **Status — fixed.** Tests: `tests/test_docker_image_tree.py`
+> (`test_both_images_run_the_same_python`, which is what failed on `main`).
+
+**What happens** — Dependabot's `docker` update bumps each `FROM` it finds in
+`docker/`, one PR per base; the base image went to 3.14 while the application
+image still copied `/usr/local/lib/python3.13/site-packages` out of it, which
+builds and then cannot import. The test written for exactly this failed on
+`main` the moment both were merged.
+
+**Fixed** — both on `python:3.14-slim`, pinned by digest; the copy names
+3.14. On 3.14 Trivy found four fixable HIGHs, all in pip's own vendored
+packages, so the running image no longer carries pip. Unit and integration
+suites pass on 3.14; CI's interpreter is now 3.14 (`TEST.md`, `AGENTS.md`).

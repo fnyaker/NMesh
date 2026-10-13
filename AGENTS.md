@@ -486,7 +486,7 @@ pytest -q
 pytest tests/integration -q
 ```
 
-CI uses Python 3.13 (base image); a local venv is often 3.12. Not every failure
+CI uses Python 3.14 (base image); a local venv is often 3.12. Not every failure
 reproduces across versions — check both when a difference matters.
 
 ### The integration suite is genuinely flaky under parallelism

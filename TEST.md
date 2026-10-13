@@ -105,7 +105,7 @@ integration tests on every push to `main` and every pull request.
 The tests run **inside the base image** (`docker/Dockerfile.base`, published by
 `base-image.yml`), which already carries a **compiled liboqs** and every
 dependency. So the heavy C library is no longer rebuilt on every run, and we
-test on the exact runtime the app ships with (Python 3.13). If the base image is
+test on the exact runtime the app ships with (Python 3.14). If the base image is
 not reachable (first bootstrap, or a fork PR with no package access), CI builds
 it once locally to stay green — the same fallback as the `docker` job.
 
@@ -137,6 +137,15 @@ listed and let through. `audit.yml` scans the published image the same way
 every Monday, since a fix released after the last build is news nothing in the
 tree carries. `tests/test_workflows_pinned.py` refuses a `docker run` of a
 registry image not pinned by digest.
+
+### The repository itself (`scorecard.yml`) and what it ships
+
+OpenSSF Scorecard runs on every push to `main` and weekly, and its findings
+land in the Security tab beside CodeQL's; they are not published to the
+OpenSSF API. `release.yml` and the `docker` job attest the provenance of the
+zipapp and of every image they push (`actions/attest-build-provenance`), and
+both Dockerfiles take `python:*-slim` by digest
+(`tests/test_docker_image_tree.py`), which Dependabot moves.
 
 ### The console under a scanner (`audit.yml`, `console-dast`)
 
@@ -205,11 +214,11 @@ pytest -q --timeout=60 --timeout-method=signal
 That reports the hang as an ordinary failure, with the traceback pointing at
 whatever the loop was parked on.
 
-**Reproduce on the CI interpreter, not yours.** CI runs Python 3.13; the suite
+**Reproduce on the CI interpreter, not yours.** CI runs Python 3.14; the suite
 passing on an older local Python proves less than it looks. `wait_closed()`
 changed semantics in 3.12 and deadlocked the data connector's shutdown on 3.13
 while staying green 3.11 (`gotchas.md` §1). Either run the base image, or point
-a 3.13 interpreter at the tree:
+a 3.14 interpreter at the tree:
 
 ```bash
 docker run --rm -v "$PWD:/app" -w /app ghcr.io/fnyaker/nmesh-base:latest pytest -q
