@@ -14,7 +14,9 @@ dependency** (stdlib + `cryptography`, already present).
 python scripts/console_demo.py --data ./mydata
 ```
 
-On the first run the password is **generated and printed once** — write it down.
+On the first run the password is **generated** and kept in
+`console.first-password` (`0600`) until the first login; it is printed only on
+a terminal, never into a service log ([`../Setup/guide`](../Setup/guide)).
 The SHA-256 fingerprint of the self-signed TLS certificate is printed too, so it
 can be checked in the browser.
 
@@ -672,7 +674,9 @@ skeleton. A spinner with no end is a bug report nobody can act on.
 
 - **TLS**, self-signed (ECDSA P-256), fingerprint printed at startup.
 - **Password** generated on the first run, stored only as a **salted scrypt
-  hash** (`console.cred`, mode 0600). Never in the clear on disk.
+  hash** (`console.cred`, mode 0600). In the clear on disk only while a
+  generated one waits to be read (`console.first-password`, 0600, gone at the
+  first login) — the one place it can be read without landing in a log.
 - **Session** authenticated by a **Bearer token** (`Authorization` header) **or
   a session cookie**. Login sets an `nmesh_session` cookie: `HttpOnly` (the
   page's JS cannot read it → an XSS does not exfiltrate it), `SameSite=Strict`
@@ -803,7 +807,8 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/fleet/invite` | `{node, ttl?, ticket?}` → an invitation minted by that node, on its behalf (capability `invite`). Waits for the answer: what comes back is a single-use code shown once |
 | POST    | `/api/fleet/status` / `update` / `scan` | actions on a managed node. `scan` takes `targets` (subnets **and/or** precise machines: `10.0.0.5`, `nas.lan:2222`); empty → **every** attached network |
 | POST    | `/api/fleet/shell` / `input` / `resize` / `close` | remote shell |
-| POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` |
+| POST    | `/api/fleet/provision` | SSH deployment: `{username, password?, key_id?, can_sudo, sudo_user?, sudo_password?, mode:system\|user, caps}` — `caps` defaults to `full` |
+| POST    | `/api/fleet/password` | `{node}` → the console password a machine provisioned from here generated and sent back, **read once** (404 after) ([`../Apps/fleet`](../Apps/fleet)) |
 | POST    | `/api/apps/enable` / `disable` / `install` / `uninstall` | `{id}` — **built-in** apps; the answer carries the new list — `apps.set` |
 | GET     | `/api/releases`  | mesh-native releases: what the network offers, the publishers pinned here, what this node watches, when it next looks, and its own publisher key — `releases.overview`, the one operation here a console *managing* this node may read |
 | POST    | `/api/releases/publish` | `{notes, key_id?, passphrase?}` — signs the installed tree with the node identity or with a publisher key held here, announces it, and files it in the package directory — `releases.publish`, local only, and the passphrase is the one field never trimmed |

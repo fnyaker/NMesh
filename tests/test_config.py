@@ -438,6 +438,14 @@ class TestPasswordScript:
         assert not console_sessions.LastingSessions(
             console_sessions.path_for(str(tmp_path))).valid(token)
 
+    def test_a_reset_takes_a_generated_password_still_waiting(self, tmp_path):
+        from src import console_auth
+        waiting = console_auth.first_path_for(str(tmp_path))
+        console_auth.write_first(waiting, "the-old-generated-one")
+        result = self.run(str(tmp_path))
+        assert result.returncode == 0, result.stderr
+        assert not os.path.exists(waiting)
+
     def test_stdout_carries_the_password_and_nothing_else(self):
         """install.sh captures stdout: a banner slipping in there would become
         the password."""

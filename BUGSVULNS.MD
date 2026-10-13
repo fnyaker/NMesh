@@ -3662,7 +3662,10 @@ built anywhere in `src/` or `scripts/` without it.
 
 ## 91 — medium — The first-run console password stays in the service log
 
-> **Status — open.** Found by CodeQL (`py/clear-text-logging-sensitive-data`).
+> **Status — fixed.** Tests: `tests/test_webconsole.py::TestFirstPassword`,
+> `tests/test_config.py` (reset), `tests/test_fleet.py::TestPreauth`,
+> `tests/test_console_fleet.py::TestProvisionedPasswordRoute`. Found by CodeQL
+> (`py/clear-text-logging-sensitive-data`).
 
 **Where** — `scripts/nmesh_node.py` prints `console.generated_password`;
 `install.sh` tells the operator to read it from the service log.
@@ -3672,8 +3675,9 @@ the logger, readable by whoever reads the journal (`adm`, `systemd-journal`,
 the Docker group), for as long as the journal keeps it. The password stays
 valid until somebody changes it, which nothing asks them to do.
 
-**What it would take** — write a generated password to a `0600` file in the
-state directory instead of stdout when stdout is not a terminal, print its
-path, and delete it on the first successful login or password change; update
-`install.sh`, the Docker guide and the setup guide. It changes how a first
-start is done, so it is left to a decision.
+**Fixed** — a generated password is written to `console.first-password`
+(`0600`) and printed only on a terminal; off one, the banner names the file.
+It goes at the first successful login, at a password change and at
+`--reset-password`. A machine installed by Fleet also sends it, in its signed
+end-to-end encrypted claim, to the operator who installed it, whose console
+shows it once and forgets it.

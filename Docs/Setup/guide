@@ -187,7 +187,16 @@ Two settings are deliberately **not** editable from the console:
 
 The console password is not in there either: that would be a credential in the
 clear in a file meant to be read and edited. It stays in
-`$NMESH_CONSOLE_PASSWORD`, or is generated and shown once.
+`$NMESH_CONSOLE_PASSWORD`, or is generated on the first start.
+
+A generated password is written to `console.first-password` in the state
+directory (`0600`, like the credential beside it), printed only when the node
+runs on a terminal, and **deleted at the first successful login**, at a
+password change, and by `--reset-password`. Off a terminal — a systemd or
+runit service, a container — the banner prints the file's path instead: a
+service log keeps what it is given for as long as the journal does, and lets in
+everyone who may read the journal. A machine installed by Fleet also sends it
+to the operator who installed it (`Docs/Apps/fleet`, *Phase 3*).
 
 Two things the launcher no longer does:
 

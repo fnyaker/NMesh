@@ -60,7 +60,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
-from .. import logbook
+from .. import console_auth, logbook
 from ..accusation import KIND_FLOOD as ABUSE_FLOOD
 from ..app_auth import ctx_hash
 from ..app_guard import AppGuard, Limit
@@ -72,6 +72,12 @@ from .fleet_state import (CAPABILITIES, FleetState, _is_node_hex, clean_caps,
                           clean_label, clean_stack_names)
 
 FLEET_APP_ID = builtin_id("fleet")
+
+# What a machine installed by provisioning grants whoever asked for it, unless
+# they asked for less. They already had root on it through SSH, and nobody sits
+# at it to grant more later: anything narrower is a door its owner can only
+# reopen by installing again.
+PROVISION_CAPS = ("full",)
 
 # -- message types ----------------------------------------------------------
 ENROL_REQUEST = 0x01
@@ -254,10 +260,14 @@ class EnrolAnswered:
 
 @dataclass
 class NodeAdopted:
-    """A machine we provisioned came up and claimed its pre-authorisation."""
+    """A machine we provisioned came up and claimed its pre-authorisation.
+
+    ``password`` is the console password it generated, when it did: the one
+    secret here, so it is kept out of ``repr`` and of the activity log."""
     src: NodeID
     host: str
     label: str
+    password: str = field(default="", repr=False)
 
 
 @dataclass
@@ -1082,10 +1092,16 @@ class FleetApp:
 
     # -- pre-authorisation (a machine we provisioned coming online) --------
 
-    async def claim_preauth(self, document: dict) -> bool:
+    async def claim_preauth(self, document: dict,
+                            console_password: str | None = None) -> bool:
         """Agent side, first start after provisioning: adopt the operator whose
         key arrived over the SSH channel, then prove to them that *this* mesh
-        identity is the machine they just installed."""
+        identity is the machine they just installed.
+
+        ``console_password`` is the password this console generated, if it
+        did. It goes to the operator in the same signed, end-to-end encrypted
+        frame: they are the one person who has to be able to log in, and they
+        already hold more than it opens."""
         operator_id = document["operator_id"]
         caps = clean_caps(document.get("capabilities"))
         if not caps:
@@ -1095,10 +1111,12 @@ class FleetApp:
                                    label=clean_label(document.get("label"))) is None:
             return False
         target = NodeID(operator_id)
+        claim = {"token": document["token"].hex(), "caps": caps,
+                 "host": self.facts.hostname or ""}
+        if _clean_console_password(console_password):
+            claim["console_password"] = console_password
         await self._send(target, self._signed_frame(
-            PREAUTH_CLAIM, target, PURPOSE_PREAUTH,
-            {"token": document["token"].hex(), "caps": caps,
-             "host": self.facts.hostname or ""}))
+            PREAUTH_CLAIM, target, PURPOSE_PREAUTH, claim))
         return True
 
     def _on_preauth_claim(self, src: NodeID, principal, document: dict) -> None:
@@ -1118,7 +1136,9 @@ class FleetApp:
         caps = clean_caps(document.get("caps")) or clean_caps(record.get("caps"))
         label = clean_label(record.get("label")) or clean_label(document.get("host"))
         self.state.add_managed(src.raw.hex(), caps=caps, label=label)
-        self._emit(NodeAdopted(src, str(record.get("host", ""))[:128], label))
+        self._emit(NodeAdopted(src, str(record.get("host", ""))[:128], label,
+                               _clean_console_password(
+                                   document.get("console_password"))))
         if self._auto_status:
             self._spawn(self.request_status(src))
 
@@ -2833,7 +2853,7 @@ class FleetApp:
             "rid": rid,
             "targets": _clean_targets(targets),
             "username": str(username)[:64],
-            "caps": clean_caps(caps) if caps else ["status", "update"],
+            "caps": clean_caps(caps) if caps else list(PROVISION_CAPS),
             "publishers": fleet_provision.clean_publishers(publishers),
             "join_uris": [str(u)[:256] for u in (join_uris or [])][:8],
             "join_code": str(join_code or "")[:64],
@@ -2909,7 +2929,7 @@ class FleetApp:
             return
 
         options = fleet_provision.clean_install_options(document.get("options"))
-        caps = clean_caps(document.get("caps")) or ["status", "update"]
+        caps = clean_caps(document.get("caps")) or list(PROVISION_CAPS)
         # The operator's list, re-cleaned here like anything else off the wire.
         # This node relays it; it never adds to it.
         publishers = fleet_provision.clean_publishers(document.get("publishers"))
@@ -3017,7 +3037,7 @@ class FleetApp:
             # the batch finishes, and an unknown claim is dropped.
             self.state.add_provisioned(
                 digest, host=str(document.get("host", ""))[:128],
-                caps=["status", "update"],
+                caps=list(PROVISION_CAPS),
                 label=str(document.get("host", ""))[:128])
         self._emit(CommandOutput(src, rid, "provision",
                                  f"{document.get('host', '?')}: "
@@ -3034,7 +3054,7 @@ class FleetApp:
             if entry.get("ok") and isinstance(digest, str) and len(digest) == 64:
                 self.state.add_provisioned(
                     digest, host=str(entry.get("host", ""))[:128],
-                    caps=["status", "update"],
+                    caps=list(PROVISION_CAPS),
                     label=str(entry.get("label") or entry.get("host", ""))[:128])
         self._emit(CommandResult(src, _rid(document), "provision",
                                  all(r.get("ok") for r in results) if results else False,
@@ -3109,7 +3129,7 @@ class FleetApp:
                 "account can sudo, or name one that can — or install under the "
                 "login account instead")
         payload = fleet_provision.build_payload(self._repo_root)
-        caps = clean_caps(caps) or ["status", "update"]
+        caps = clean_caps(caps) or list(PROVISION_CAPS)
         publishers = fleet_provision.clean_publishers(publishers)
         results = []
         try:
@@ -3343,6 +3363,18 @@ def _log_run(raw) -> str:
     so anything else is simply no run at all."""
     text = str(raw or "")[:32].lower()
     return text if text and all(c in "0123456789abcdef" for c in text) else ""
+
+def _clean_console_password(raw) -> str:
+    """A console password a claim carries, or ``""``. Held to the console's
+    own rules (``console_auth.validate``) and to printable text, since it ends
+    on a screen."""
+    if not isinstance(raw, str) or not raw.isprintable():
+        return ""
+    try:
+        return console_auth.validate(raw)
+    except console_auth.CredentialError:
+        return ""
+
 
 def _rid(document: dict) -> str:
     rid = document.get("rid")

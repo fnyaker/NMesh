@@ -14,6 +14,7 @@ import http.client
 import json
 import os
 import ssl
+import stat
 import sys
 import tempfile
 import threading
@@ -984,6 +985,62 @@ class TestTLS:
                             state_dir=d, password="second-pass")
             assert c2._check_password("second-pass")
             assert not c2._check_password("first-pass")
+        await node.stop()
+
+
+class TestFirstPassword:
+    """A generated password waits in a 0600 file, never only in a log, and
+    goes as soon as somebody has shown they have it."""
+
+    def _console(self, node, d, **kw):
+        return WebConsole(node, host="127.0.0.1", port=0, use_tls=False,
+                          state_dir=d, **kw)
+
+    async def test_a_generated_password_waits_in_a_private_file(self):
+        node = MeshNode(transport_manager=make_manager())
+        with tempfile.TemporaryDirectory() as d:
+            console = self._console(node, d)
+            path = os.path.join(d, "console.first-password")
+            assert console.first_password_path == path
+            assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+            with open(path) as handle:
+                assert handle.read().strip() == console.generated_password
+        await node.stop()
+
+    async def test_a_wrong_password_leaves_it_and_the_right_one_takes_it(self):
+        node = MeshNode(transport_manager=make_manager())
+        with tempfile.TemporaryDirectory() as d:
+            console = self._console(node, d)
+            password = console.generated_password
+            assert not console._check_password(password + "x")
+            assert console.first_password_path is not None
+            assert console._check_password(password)
+            assert console.first_password_path is None
+        await node.stop()
+
+    async def test_a_restart_still_points_at_it_until_it_is_read(self):
+        node = MeshNode(transport_manager=make_manager())
+        with tempfile.TemporaryDirectory() as d:
+            self._console(node, d)
+            again = self._console(node, d)
+            assert again.generated_password is None
+            assert again.first_password_path is not None
+        await node.stop()
+
+    async def test_a_password_change_takes_it(self):
+        node = MeshNode(transport_manager=make_manager())
+        with tempfile.TemporaryDirectory() as d:
+            console = self._console(node, d)
+            console.set_password("a-new-password-123")
+            assert console.first_password_path is None
+        await node.stop()
+
+    async def test_a_chosen_password_writes_nothing_in_the_clear(self):
+        node = MeshNode(transport_manager=make_manager())
+        with tempfile.TemporaryDirectory() as d:
+            console = self._console(node, d, password="chosen-by-a-person")
+            assert console.first_password_path is None
+            assert "console.first-password" not in os.listdir(d)
         await node.stop()
 
 

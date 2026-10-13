@@ -498,7 +498,7 @@ EOF
 
 # One runit service, the way termux-services expects it: an executable `run`
 # that execs the node in the foreground (runsv owns the restarting), and a `log`
-# service so the console's first-run password ends up somewhere readable instead
+# service so the console's first-run output ends up somewhere readable instead
 # of on a terminal that has since been closed.
 runit_service() {
     local dir="$1" data="$2" args="$3"
@@ -1154,8 +1154,10 @@ echo "  install the Termux:Boot app (F-Droid) — it runs the same"
 echo "  services without a terminal open."
 echo ""
 fi
-echo "  The console prints its URL and a generated password on first"
-echo "  start — read them from the service log above."
+echo "  The console prints its URL in the service log above. Its first"
+echo "  password is not logged: read it once from"
+echo "    $DATA/console.first-password"
+echo "  (as root or the node's account) — the file goes at the first login."
 echo ""
 echo "  Upgrade later : re-run ./install.sh from a newer checkout,"
 echo "                  or use the console's Settings → Updates page."

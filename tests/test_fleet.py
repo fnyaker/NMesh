@@ -1497,6 +1497,84 @@ class TestPreauth:
         await deliver(impostor, operator)
         assert operator.app.state.managed_one(impostor.id.raw.hex()) is None
 
+    def _adopted(self, operator):
+        return [e for e in operator.drain_events() if isinstance(e, NodeAdopted)]
+
+    async def test_the_claim_hands_the_operator_the_console_password(self, operator):
+        newbie = Peer()
+        parsed, token = self._document(operator)
+        operator.app.state.add_provisioned(fleet_provision.token_digest(token),
+                                           host="10.0.0.5", caps=["full"])
+        await newbie.app.claim_preauth(parsed, "generated-password-123")
+        await deliver(newbie, operator)
+        adopted, = self._adopted(operator)
+        assert adopted.password == "generated-password-123"
+        assert "generated-password-123" not in repr(adopted)
+
+    async def test_a_claim_with_no_run_behind_it_hands_over_nothing(self, operator):
+        newbie = Peer()
+        parsed, _token = self._document(operator)
+        await newbie.app.claim_preauth(parsed, "generated-password-123")
+        await deliver(newbie, operator)
+        assert self._adopted(operator) == []
+
+    @pytest.mark.parametrize("bad", ["short", "with\na-newline-in-it",
+                                     " padded-password-123", "x" * 300, 12345])
+    async def test_a_password_the_console_would_refuse_is_dropped(self, operator, bad):
+        newbie = Peer()
+        parsed, token = self._document(operator)
+        operator.app.state.add_provisioned(fleet_provision.token_digest(token),
+                                           host="10.0.0.5", caps=["full"])
+        frame = newbie.app._signed_frame(
+            fleet.PREAUTH_CLAIM, operator.id, fleet.PURPOSE_PREAUTH,
+            {"token": token.hex(), "caps": ["full"], "host": "box",
+             "console_password": bad})
+        operator.app._dispatch(newbie.id, frame)
+        await settle()
+        adopted, = self._adopted(operator)
+        assert adopted.password == ""
+
+    async def test_the_first_start_claims_with_the_password_it_generated(self, tmp_path):
+        """`scripts/nmesh_node.py` is what hands the console's password to the
+        claim; the claim tests above start one step after it."""
+        from scripts.nmesh_node import _adopt_operator
+
+        class _Node:
+            async def join(self, uri, code):
+                pass
+
+            async def wait_for_session(self, timeout):
+                pass
+
+        claimed = []
+
+        class _App:
+            async def claim_preauth(self, document, console_password=None):
+                claimed.append(console_password)
+                return True
+
+        class _Host:
+            def app(self, name):
+                return _App() if name == "fleet" else None
+
+        path = tmp_path / "preauth.json"
+        path.write_text("{}")
+        await _adopt_operator(_Node(), _Host(), {
+            "join_uris": ["tcp://192.0.2.1:9000"], "join_code": "c",
+            "operator_id": b"\x01" * 20}, str(path), "generated-password-123")
+        assert claimed == ["generated-password-123"]
+        assert not path.exists()
+
+    async def test_with_nothing_chosen_the_new_machine_grants_full(self, operator, agent):
+        await enrol(operator, agent, caps=["provision"])
+        operator.take_sent()
+        await operator.app.request_provision(
+            agent.id, targets=[{"ip": "10.0.0.5"}], username="bob", password="pw")
+        (_target, payload), = operator.take_sent()
+        alen = fleet._LEN.unpack_from(payload, 1)[0]
+        document = json.loads(payload[1 + fleet._LEN.size + alen:])
+        assert document["caps"] == ["full"]
+
 
 # ---------------------------------------------------------------------------
 # Hostile input

@@ -23,9 +23,10 @@ services:
       NMESH_CONSOLE_PORT: "8787"
       # Dashboard password. Easiest: uncomment the next line and set your own —
       # then you log in with exactly that. If you leave it commented out, a
-      # strong random password is generated on first start and printed in the
-      # logs; read it with:
-      #     docker compose -f docker/docker-compose.yml logs nmesh | grep Password
+      # strong random password is generated on first start and kept out of the
+      # logs (they would keep it for good); read it once with:
+      #     docker compose -f docker/docker-compose.yml exec nmesh cat /data/console.first-password
+      # The file is deleted at the first login.
       # NMESH_CONSOLE_PASSWORD: "choose-your-own-password"
       #
       # Fleet app (remote management + deployment, served at /fleet). Off by

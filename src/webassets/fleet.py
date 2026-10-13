@@ -120,6 +120,7 @@ FLEET_HTML = """<!doctype html>
       <!-- Groups: this console's own names for sets of machines. They say
            nothing to any node in them — they are a way of pointing at several
            at once from here. -->
+      <div id="passwords" class="stack"></div>
       <div id="groups" class="stack"></div>
       <div id="nodes" class="cards"></div>
     </section>
@@ -557,12 +558,11 @@ async function poll(){
   $("me").textContent = shortId(data.me);
   $("me").title = data.me || "";
   if(first){
-    // A machine installed from here has no operator in front of it and a
-    // console password nobody typed: without `manage` and `passwordless`,
-    // whoever deployed it cannot reach the console it just started.
-    capBoxes($("deploy-caps"), ["status", "update", "manage", "passwordless"]);
+    // A machine installed from here has nobody in front of it to grant
+    // anything later, and whoever deploys it already has root on it.
+    capBoxes($("deploy-caps"), ["full"]);
   }
-  paintInbox(); paintGroups(); paintNodes(); paintOperators(); paintPickers();
+  paintInbox(); paintPasswords(); paintGroups(); paintNodes(); paintOperators(); paintPickers();
   paintDocker(); paintLog(); paintJobs(); paintLogNodes();
   if(first) paintHosts(null);
   // A scan asked of a remote node answers asynchronously: its result lands in
@@ -600,6 +600,37 @@ function paintInbox(){
       '">Review &amp; accept</button><button class="danger" data-deny="' + esc(request.id) +
       '">Deny</button></div></div></article>';
   }).join(""));
+}
+// A machine provisioned from here sent the console password it generated. The
+// list says which ones did; the password itself is fetched on a click and the
+// console forgets it as it answers.
+function paintPasswords(){
+  const list = ST.passwords || [];
+  setHTML("passwords", list.map((entry) =>
+    '<article class="card"><div class="card-head"><div class="grow">' +
+    "<h2>Console password waiting</h2>" +
+    '<div class="sub mono">' + esc(entry.label || entry.host || shortId(entry.node)) +
+    " · " + esc(shortId(entry.node)) + "</div></div>" + badge("once", "warn") + "</div>" +
+    '<div class="card-body"><p class="small muted">This machine was installed from here and ' +
+    "generated its console password. It can be shown once: after that, only the machine " +
+    "has it.</p>" +
+    '<div class="btn-row"><button class="primary" data-reveal-password="' + esc(entry.node) +
+    '">Show it</button></div></div></article>').join(""));
+}
+async function passwordDialog(id){
+  const {ok, data} = await apiJson("/api/fleet/password", "POST", {node:id});
+  if(!ok || data.error){
+    toast(data.error || "That password is no longer here.", "danger");
+    return poll();
+  }
+  $("modal-title").textContent = "Console of " + (data.label || data.host || shortId(id));
+  $("modal-body").innerHTML =
+    '<div class="notice"><span>Shown once. Close this and it is gone from this console; ' +
+    "change it from that machine's Settings if it was seen by anybody else.</span></div>" +
+    '<div class="copyable"><code class="mono">' + esc(data.password) +
+    '</code><button class="sm" data-copy="' + esc(data.password) + '">Copy password</button></div>';
+  $("modal").showModal();
+  poll();
 }
 function approveDialog(id){
   const request = (ST.pending_in || []).find((entry) => entry.id === id);
@@ -1705,6 +1736,7 @@ document.body.addEventListener("click", async (event) => {
   }
   if(data.copy) return void copyText(data.copy);
   if(data.invite) return inviteDialog(data.invite);
+  if(data.revealPassword) return passwordDialog(data.revealPassword);
   if(data.logs){
     // The machine's own card sends the operator to the panel, filtered to it.
     $("logs-node").value = data.logs;

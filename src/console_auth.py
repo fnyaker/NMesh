@@ -18,6 +18,10 @@ import os
 import secrets
 
 FILENAME = "console.cred"
+# A generated password, kept for whoever installed the node to read once. The
+# alternative is the service log, which keeps it for as long as the journal
+# does and lets everyone who reads the journal in.
+FIRST_FILENAME = "console.first-password"
 
 # scrypt, not a plain hash: the console password is typed by a human and is the
 # only thing between the network and a node's management surface.
@@ -36,6 +40,41 @@ class CredentialError(Exception):
 
 def path_for(state_dir: str | None) -> str | None:
     return os.path.join(state_dir, FILENAME) if state_dir else None
+
+
+def first_path_for(state_dir: str | None) -> str | None:
+    return os.path.join(state_dir, FIRST_FILENAME) if state_dir else None
+
+
+def write_first(path: str, password: str) -> None:
+    """Keep a generated password where its owner alone can read it, 0600 from
+    the first byte."""
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(password + "\n")
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def forget_first(path: str | None) -> bool:
+    """Remove the generated password's file. ``True`` when it is gone."""
+    if not path:
+        return True
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def generate() -> str:
