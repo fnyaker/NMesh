@@ -2448,7 +2448,12 @@ running X.
   its shutdown flag every 0.5 s by default. We pass a tight `poll_interval`
   (`webconsole.py`, `chat_web.py`).
 - Docker: liboqs is **compiled** (a separate base image `Dockerfile.base`,
-  published only on dependency updates; the application image builds FROM it).
+  published only on dependency updates; the application image builds FROM it),
+  by `scripts/build_liboqs.sh` into `OQS_INSTALL_PATH=/opt/liboqs`, **before**
+  anything imports the wrapper: `import oqs` with no library fetches and builds
+  one itself, unchecked. The packages come from `docker/requirements.lock`
+  under `--require-hashes`; regenerate it with
+  `uv pip compile requirements.txt --universal --generate-hashes --python-version 3.13 --no-header -o docker/requirements.lock`.
   The base build needs `make` → `build-essential`, not `gcc` alone (otherwise
   CMake: "CMAKE_MAKE_PROGRAM is not set").
 - Docker: the application image must copy **`start.sh` and `pyproject.toml`** as

@@ -1,7 +1,11 @@
 import os
 import threading
 import time
-import oqs
+
+from . import liboqs_guard
+
+liboqs_guard.ensure()
+import oqs  # noqa: E402 — only once the guard has found a library to load
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes

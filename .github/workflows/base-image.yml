@@ -11,6 +11,9 @@ on:
     branches: [ main ]
     paths:
       - requirements.txt
+      - docker/requirements.lock
+      - scripts/liboqs.lock
+      - scripts/build_liboqs.sh
       - docker/Dockerfile.base
       - .github/workflows/base-image.yml
   workflow_dispatch:

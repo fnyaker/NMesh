@@ -117,6 +117,13 @@ from `permissions: {}`, granting each job its own; `tests/test_workflows_pinned.
 refuses a tag reference or a missing `permissions: {}`. A new action goes in by
 SHA with its version as a comment (`@<sha> # v4.4.0`); Dependabot moves the pin.
 
+`audit.yml` runs `pip-audit` over `docker/requirements.lock`, the hash-locked set
+the base image installs, on every change and every Monday.
+`tests/test_liboqs_lock.py` holds `scripts/liboqs.lock`, `requirements.txt`
+and that lock together, and runs `scripts/build_liboqs.sh` offline against a
+moved tag and a tampered archive; `NMESH_NETWORK_TESTS=1` also checks the
+locked digest against the archive GitHub serves today.
+
 ### `[gwN] node down: Not properly terminated`
 
 This is **not** a test failure and not flaky infrastructure. It means a

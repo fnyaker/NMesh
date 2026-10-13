@@ -27,3 +27,7 @@ nodes following GitHub pick up through the updater.
   `requirements.txt`, the base image and the workflow actions.
 - Every workflow action is pinned to a full commit SHA, and each workflow starts
   with no token permission, granting each job only what it uses.
+- liboqs is compiled only from the commit and archive digest in
+  `scripts/liboqs.lock`, and a node with no liboqs refuses to start rather than
+  let the wrapper fetch one; the base image installs a hash-locked package set
+  (`docker/requirements.lock`) that `pip-audit` checks every week.

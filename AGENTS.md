@@ -155,6 +155,12 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
     the job for hours).
 - Adding a runtime dependency = an explicit justification in the PR + an update
   to this list. When in doubt: reimplement on the stdlib.
+- **What is fetched is proven, not named.** liboqs is compiled from the commit
+  and archive digest in `scripts/liboqs.lock` (`scripts/build_liboqs.sh`), and
+  the wrapper is never allowed to fetch it itself (`src/liboqs_guard.py`). The
+  base image installs `docker/requirements.lock` under `--require-hashes`, and
+  `.github/workflows/audit.yml` checks that set against known advisories every
+  week. A version bump moves the lock, its hashes and its digest together.
 
 ## Contribution discipline
 
