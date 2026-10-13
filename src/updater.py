@@ -32,7 +32,8 @@ release** today, so a GitHub account compromise is a code-execution path into
 every node that accepts an update. What limits it:
 
   - the repository is **pinned** (``NMESH_UPDATE_REPO`` exists for forks, but a
-    peer cannot choose it — nothing on the mesh reaches this module);
+    peer cannot choose it — nothing on the mesh reaches this module — and a
+    value GitHub could not name falls back to the pinned one);
   - an update from GitHub is **never automatic** — a human confirms a named
     version, and a branch (which moves) is refused if it no longer carries the
     version that was confirmed;
@@ -113,8 +114,19 @@ class PreflightError(UpdateError):
     again. The node is still on the version it was running."""
 
 
+# GitHub's own rules for an account and a repository name. The value is
+# spliced into three hosts' URLs, so anything else — a ``/``, ``..``, ``?`` or
+# ``#`` — would make it ask an endpoint nobody chose.
+_REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}")
+
+
 def repo() -> str:
-    return os.environ.get("NMESH_UPDATE_REPO") or DEFAULT_REPO
+    """The repository updates come from. An override GitHub could not have
+    named counts as not set, the way a bad ``update_branch`` does."""
+    raw = os.environ.get("NMESH_UPDATE_REPO")
+    if raw and _REPO_RE.fullmatch(raw) and raw.split("/", 1)[1] not in (".", ".."):
+        return raw
+    return DEFAULT_REPO
 
 
 def update_branch(config_path=None) -> str:

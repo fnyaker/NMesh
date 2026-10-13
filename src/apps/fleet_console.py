@@ -164,6 +164,7 @@ class LocalConsole:
         # the fingerprint, compared below on the live socket.
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         return http.client.HTTPSConnection(host, console.port, timeout=timeout,
                                            context=context)
 

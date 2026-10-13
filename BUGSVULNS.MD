@@ -3599,3 +3599,81 @@ packets and 80 kB a second, against 8 and 0.8 idle — ~2 600 packets a second a
 (`mlo.loaded_bounds`, budget `mlo.FAST_PROBE_BUDGET`), and the accord makes
 every peer follow: the same twenty leaves cost 400 packets and 35 kB a second,
 every bundle still active.
+
+## 87 — medium — Uploading over a file through Fleet made it world-readable
+
+> **Status — fixed.** Tests: `tests/test_fleet_files.py::TestUploads`. Found by
+> CodeQL (`py/overly-permissive-file`).
+
+**Where** — `src/apps/fleet_files.py`: `Upload.finish`.
+
+**What happens** — an upload is assembled in a `0600` temporary and set to
+`0644` before the rename, whatever it replaces. Pushing a new version of a key
+or of a config holding a secret over a `0600` original left it readable by
+every account on the machine.
+
+**Fixed** — a replaced regular file keeps its own permission bits (setuid,
+setgid and sticky dropped); only a new file is `0644`.
+
+## 88 — low — `NMESH_UPDATE_REPO` was spliced into URLs unchecked
+
+> **Status — fixed.** Tests: `tests/test_updater.py::TestGuards`. Found by
+> CodeQL (`py/partial-ssrf`).
+
+**Where** — `src/updater.py`: `repo()`.
+
+**What happens** — the override goes into `api.github.com/repos/…`,
+`raw.githubusercontent.com/…` and `codeload.github.com/…` as it is, so a value
+carrying `/`, `..`, `?` or `#` asked an endpoint other than a repository's.
+Only whoever sets the node's environment can set it, so this is a guard
+against a mistake more than an attacker.
+
+**Fixed** — a value that is not `owner/name` by GitHub's rules falls back to
+the pinned repository, as a bad `update_branch` already did.
+
+## 89 — low — The MCP stdio bridge followed any URL scheme with the token
+
+> **Status — fixed.** Tests: `tests/test_mcp.py::TestTheStdioBridgeEndpoint`.
+> Found by CodeQL (`py/full-ssrf`).
+
+**Where** — `scripts/nmesh_mcp_stdio.py`.
+
+**What happens** — `NMESH_MCP_URL` went to `urlopen` unchecked, which also
+speaks `file:` and `ftp:`; a misconfigured client would read a local file as
+the "server's" answer, or send its bearer token over FTP.
+
+**Fixed** — anything but an `http(s)://` address with a host is refused before
+the first line is read.
+
+## 90 — low — Three TLS clients relied on the library's default floor
+
+> **Status — fixed.** Tests: `tests/test_tls_floor.py`. Found by CodeQL
+> (`py/insecure-protocol`).
+
+**Where** — `src/node.py` (public address discovery),
+`src/apps/fleet_portainer.py`, `src/apps/fleet_console.py`.
+
+**What happens** — these contexts set no minimum version, so TLS 1.0 and 1.1
+were refused only as long as the interpreter and the OpenSSL policy refused
+them. The console and `nmeshctl` already set TLS 1.2.
+
+**Fixed** — every context sets `TLSv1_2`, and the test fails on a context
+built anywhere in `src/` or `scripts/` without it.
+
+## 91 — medium — The first-run console password stays in the service log
+
+> **Status — open.** Found by CodeQL (`py/clear-text-logging-sensitive-data`).
+
+**Where** — `scripts/nmesh_node.py` prints `console.generated_password`;
+`install.sh` tells the operator to read it from the service log.
+
+**What happens** — under systemd, runit or `docker logs` the line is kept by
+the logger, readable by whoever reads the journal (`adm`, `systemd-journal`,
+the Docker group), for as long as the journal keeps it. The password stays
+valid until somebody changes it, which nothing asks them to do.
+
+**What it would take** — write a generated password to a `0600` file in the
+state directory instead of stdout when stdout is not a terminal, print its
+path, and delete it on the first successful login or password change; update
+`install.sh`, the Docker guide and the setup guide. It changes how a first
+start is done, so it is left to a decision.

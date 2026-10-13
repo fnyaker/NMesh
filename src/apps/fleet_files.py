@@ -213,6 +213,21 @@ def make_dir(parent: str, name: str) -> str:
     return path
 
 
+def _mode_for(path: str) -> int:
+    """The permissions a file put at ``path`` gets.
+
+    A replaced file keeps its own, so uploading over a key or a config never
+    makes it readable by more people than before; setuid, setgid and sticky are
+    not carried over to content that did not have them. A new file is 0644."""
+    try:
+        held = os.lstat(path)
+    except OSError:
+        return 0o644
+    if stat.S_ISREG(held.st_mode):
+        return stat.S_IMODE(held.st_mode) & 0o777
+    return 0o644
+
+
 class Upload:
     """A file arriving in slices, held in a temporary file until it is whole.
 
@@ -267,7 +282,7 @@ class Upload:
         except OSError:
             pass
         try:
-            os.chmod(self.temp, 0o644)
+            os.chmod(self.temp, _mode_for(self.path))
             os.replace(self.temp, self.path)
         except OSError as exc:
             self.abort()

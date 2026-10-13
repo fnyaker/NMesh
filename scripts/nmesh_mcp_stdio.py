@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 MAX_LINE = 1024 * 1024        # what the server takes in one request
@@ -60,6 +61,17 @@ def forward(url: str, token: str, line: bytes):
         return _error(_ident(line), "the node answered something that is not JSON")
 
 
+def endpoint_ok(url: str) -> bool:
+    """An HTTP(S) address with a host, and nothing else. ``urlopen`` also
+    speaks ``file:`` and ``ftp:``, and the bearer token goes wherever this
+    points."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+
 def _ident(line: bytes):
     try:
         message = json.loads(line)
@@ -71,6 +83,10 @@ def _ident(line: bytes):
 def main() -> int:
     url = os.environ.get("NMESH_MCP_URL", "http://127.0.0.1:8790/mcp")
     token = os.environ.get("NMESH_MCP_TOKEN", "")
+    if not endpoint_ok(url):
+        print("NMESH_MCP_URL must be an http:// or https:// address, like "
+              "http://127.0.0.1:8790/mcp", file=sys.stderr)
+        return 2
     if not token:
         print("NMESH_MCP_TOKEN is not set — copy it from the node's console "
               "(Apps → Internal API)", file=sys.stderr)

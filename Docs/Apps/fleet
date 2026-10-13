@@ -625,7 +625,7 @@ Four operations, and deliberately only four for now: **list**, **download**,
 | what may be transferred | **regular files only**. Reading `/dev/zero` never ends and a fifo blocks whoever opens it — neither is a file transfer |
 | a listing | capped at `MAX_ENTRIES` (500) and says how many it left out; directories first, then names, decided in the node so every front end agrees. A directory with more than `MAX_SCAN` (10,000) names is *counted* rather than read: sorting cannot start until every name is in memory |
 | a download | pulled in `READ_SLICE` (32 KiB) slices at explicit offsets, so a slice that goes missing is re-asked for rather than a transfer restarted |
-| an upload | pushed in `WRITE_SLICE` (24 KiB) slices into a **temporary file beside its target**, renamed into place only when it is whole — an interrupted transfer never half-replaces the file it was meant to update. Out-of-order slices end it |
+| an upload | pushed in `WRITE_SLICE` (24 KiB) slices into a **temporary file beside its target**, renamed into place only when it is whole — an interrupted transfer never half-replaces the file it was meant to update. A replaced file keeps its permissions (without setuid, setgid or sticky), so an upload never widens who can read it; a new one is `0644`. Out-of-order slices end it |
 | the ceiling | `MAX_TRANSFER`, 32 MiB either way. This is a file manager, not a way to stream a disk image through a web page |
 | an abandoned upload | reaped after `UPLOAD_IDLE` (5 min), and dropped at once if the `shell` right is taken back |
 
