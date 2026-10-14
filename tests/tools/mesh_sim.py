@@ -85,6 +85,12 @@ async def worker(src: str) -> None:
             return node._e2e_attempt.get(NodeID.from_hex(req["to"]))
         if op == "got":
             return bytes.fromhex(req["payload"]) in got[req["i"]]
+        if op == "blackhole":
+            async def drop(*_args, **_kwargs):
+                return None
+            node._forward_packet = drop       # joins, gossips, answers for itself,
+            node._reroute_looped = drop       # and relays nothing for anybody else
+            return True
         if op == "kill":
             await node.stop()
             return True
@@ -207,6 +213,13 @@ async def parent(args) -> None:
     wall0 = time.monotonic()
 
     alive = list(range(len(nodes)))
+    if args.blackhole:
+        bad = rnd.sample(alive, int(len(alive) * args.blackhole))
+        await asyncio.gather(*[nodes[g][0].call(op="blackhole", i=nodes[g][1]) for g in bad])
+        alive = [g for g in alive if g not in set(bad)]      # honest senders and receivers only
+        print(f"{len(bad)} relays now drop everything they should forward; "
+              f"waiting {args.heal}s", flush=True)
+        await asyncio.sleep(args.heal)
     if args.kill:
         dead = rnd.sample(alive, int(len(alive) * args.kill))
         await asyncio.gather(*[nodes[d][0].call(op="kill", i=nodes[d][1]) for d in dead])
@@ -244,7 +257,9 @@ async def parent(args) -> None:
           f"{c3[1] - c2[1]} of them relayed, workers used {cores:.2f} cores", flush=True)
     ok = sorted(r for r in results if r is not None)
     fast = sum(1 for r in ok if r < 1.0)
-    print(f"{'killed ' + str(args.kill) if args.kill else 'healthy'}: first contacts {len(ok)}/{args.pairs} within {args.wait:.0f}s, "
+    label = (f"killed {args.kill}" if args.kill else
+             f"blackhole {args.blackhole}" if args.blackhole else "healthy")
+    print(f"{label}: first contacts {len(ok)}/{args.pairs} within {args.wait:.0f}s, "
           f"<1s: {fast}, median {ok[len(ok) // 2] if ok else float('nan'):.2f}s, "
           f"p90 {ok[int(len(ok) * .9)] if ok else float('nan'):.2f}s, max {ok[-1] if ok else float('nan'):.1f}s | "
           f"needed a retry: {sum(retried)}/{args.pairs} | "
@@ -266,6 +281,8 @@ if __name__ == "__main__":
     ap.add_argument("--settle", type=float, default=20.0)
     ap.add_argument("--heal", type=float, default=15.0)
     ap.add_argument("--kill", type=float, default=0.0)
+    ap.add_argument("--blackhole", type=float, default=0.0,
+                    help="fraction of nodes that stay in the mesh and relay nothing")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--profile", type=int, default=0, metavar="N",
                     help="print the top N functions of the first worker while the pairs run")

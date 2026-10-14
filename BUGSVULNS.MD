@@ -3914,3 +3914,35 @@ callback.
 against a running node produced none. That points at the link being ended from
 inside the node rather than at a hostile client, but the cause was not
 confirmed. The only reproduction is the 200-node start-up of BUGSVULNS 100.
+
+## 102 — medium — Relays that take packets and drop them cost a fifth of first contacts at 20 %
+
+> **Status — open.** Measured, and one remedy tried and refused (below).
+
+**Where** — `src/node.py`: the relay path (`_forward_packet`, `_reroute_looped`),
+`_route_outbound`, the E2E handshake retry.
+
+**What happens** — a node that stays in the mesh, answers for itself and relays
+nothing for anybody else is a black hole, and a mesh with a share of them loses
+first contacts in proportion. On 100 nodes over eight processes, 60 to 80 first
+contacts between honest nodes (`tests/tools/mesh_sim.py --blackhole`, loop
+lateness under 200 ms): with none 58 of 60 arrive within 12 s; with 10 %, 54 of
+60; with 20 %, between 39 and 54 of 60 across runs (194 of 240 within 8 s over
+three seeds); with 30 %, 37 to 39 of 60. The sender had to retry for 15 to 40 %
+of them, and a retry takes the same greedy walk again.
+
+**Tried, not kept** — a retry that leaves by the next candidate instead of the
+best, and starts after 0.75 s instead of 5 s. At 20 % it delivered 188 of 240
+against 194 (noise) and needed 35 retries against 52. A black hole that is not
+the first hop is not avoided by changing the first hop, and the answer has to
+come back through relays too.
+
+**Needs** — something that does not rely on the relays a first contact happens
+to cross: acquiring a direct link by lookup and dial before the first blind
+forward, or sending the first handshake over two disjoint paths, or a hop-by-hop
+acknowledgement a relay cannot fake. Each costs traffic and must be measured at
+the same sizes. An authenticated peer can already be charged for what it is seen
+doing (`reputation.py`); a relay that silently drops is exactly what that cannot
+see, so this is the case the measured paths in `routed.py` exist for, and what
+they cover for a first contact is the open question.
+
