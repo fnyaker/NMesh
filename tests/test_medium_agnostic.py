@@ -47,7 +47,7 @@ SRC = ROOT / "src"
 # are relative to `src/`.
 IMPLEMENTATIONS = {
     # the media themselves
-    "transports/tcp.py", "transports/udp.py", "transports/spool.py",
+    "transports/tcp.py", "transports/udp.py", "transports/spool.py", "transports/veil.py",
     # the abstraction: the contract, the registry, and the checked accessor
     "transports/contract.py", "transports/manager.py", "transports/medium.py",
     # store-and-forward primitives — the container the spool medium reads and

@@ -635,6 +635,37 @@ over it.
   matters). It lived here as `_wait_closed_bounded` until a second caller needed
   it and the connector was found still awaiting bare — see `gotchas.md` §1.
 
+## Veil: TCP with nothing recognisable on the wire (`transports/veil.py`)
+
+`tcp://` opens with a fixed pattern — the listener speaks first, and its first
+packet carries the version byte and a destination of twenty `0xff` bytes
+(BUGSVULNS 107). A censor needs no cryptanalysis to match that, and a prober
+confirms it by connecting. `veil://` is the same stream with that removed:
+
+* **The dialler speaks first**: `salt(16) | tag(16) | ChaCha20(padding)`, where
+  `tag` is an HMAC of the salt and the current minute under the circle's key and
+  the padding is 0–512 random bytes behind a two-byte length. Both directions'
+  stream keys come from HKDF over the key and the salt. After the hello, the
+  ordinary TCP framing runs inside the stream, so lengths are hidden as well.
+* **A listener answers only a hello that proves the key.** A wrong tag, a salt
+  already seen (only proved hellos are remembered, `MAX_SEEN`, so the table
+  cannot be filled by someone without the key), a minute outside
+  `CLOCK_WINDOW` either side, or a truncated hello gets no byte back: the
+  connection is read and discarded for 10–40 s and closed. The tag comparison
+  does not exit early on a match. Connections that have not proved the key —
+  from accept until proved or closed — are held to `MAX_SILENT`; past that, a
+  new one is closed at once.
+* **The key is a setting of the medium** (`key`, at least 12 characters), the
+  same on every node of a circle, read at each hello so a change applies to the
+  next one. It is a network-wide secret: whoever holds it can recognise the
+  traffic, so it hides the mesh from a censor outside the circle, not from the
+  circle. The node-to-node authentication and encryption run inside, unchanged.
+
+It is `TCPTransport` with a cipher between the socket and the framing
+(`_SealedReader`, `_SealedWriter`), so every TCP setting applies. What it does
+not do: hide the traffic's timing and volume, or look like a protocol (it looks
+like nothing), which some networks block for that reason alone.
+
 ## UDP (`transports/udp.py`)
 
 UDP is connectionless and unreliable → a **reliability layer**:

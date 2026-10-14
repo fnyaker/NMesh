@@ -121,9 +121,9 @@ await node.start("mine://address")
 await node.join("mine://other_address", code)
 ```
 
-The node ships with `tcp`, `udp` and `spool`; `scripts/nmesh_node.py` builds its
+The node ships with `tcp`, `udp`, `veil` (TCP that is random bytes to anyone without its key, see `Docs/Architecture/transports.md`) and `spool`; `scripts/nmesh_node.py` builds its
 manager from `src/transports/registry.py` (`register_all`), which is the single
-place those three are declared.
+place those are declared.
 
 ---
 

@@ -128,6 +128,13 @@ def _as_listen(raw: str) -> str:
     return value
 
 
+def _as_veil_listen(raw: str) -> str:
+    value = raw.strip()
+    if value.startswith("veil://"):
+        value = value[len("veil://"):]
+    return _as_listen(value)
+
+
 def _as_host(raw: str) -> str:
     value = raw.strip()
     if not _HOST_RE.match(value):
@@ -338,6 +345,9 @@ SETTINGS = {
                         "Slowest this node can be probed before it stops "
                         "believing the link (kept under the medium's own "
                         "timeout whatever is agreed)"),
+    "veil":            (_as_veil_listen, None, True,
+                        "Address to also listen on as veil:// (TCP that looks "
+                        "like random bytes); needs veil.key"),
     "spool":           (_as_path, None, True,
                         "Directory used as a store-and-forward link"),
     "console_host":    (_as_host, "127.0.0.1", True,

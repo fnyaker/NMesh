@@ -151,6 +151,14 @@ class TestHostileFiles:
             values, problems = config.parse(blob.decode("utf-8", "replace"))
             assert isinstance(values, dict) and isinstance(problems, list)
 
+    def test_a_veil_address_is_a_host_and_a_port_with_or_without_its_scheme(self):
+        for text in ("192.0.2.1:9100", "veil://192.0.2.1:9100"):
+            values, problems = config.parse(f"veil = {text}\n")
+            assert values["veil"] == "192.0.2.1:9100" and not problems
+        for bad in ("nothing", "192.0.2.1:0", "192.0.2.1:99999", "a b:9"):
+            values, problems = config.parse(f"veil = {bad}\n")
+            assert "veil" not in values and problems
+
     def test_a_null_byte_in_a_path_is_refused(self):
         values, problems = config.parse("spool = /tmp/a\0b\n")
         assert "spool" not in values and problems

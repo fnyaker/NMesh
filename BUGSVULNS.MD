@@ -4067,7 +4067,11 @@ that described a LAN-reachable node while listening on `127.0.0.1` now listen on
 
 ## 107 — medium — The TCP link opens with a fixed, recognisable pattern
 
-> **Status — open.** Measured on a listening node; no remedy chosen yet.
+> **Status — mitigated.** `veil://` (`src/transports/veil.py`) is a TCP medium
+> with no fixed bytes and a listener that answers only a hello proving a shared
+> key. `tcp://` itself still opens as described; a node that must not be
+> recognised listens on `veil://`. The key is network-wide, and the timing and
+> volume of the traffic are not hidden.
 
 **Where** — `src/transports/tcp.py`, `src/packet.py` (`HEADER_FORMAT`), the
 first frame a node sends on an accepted link.
