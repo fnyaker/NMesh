@@ -4095,3 +4095,49 @@ key proves itself so a prober gets nothing back, with padding on the lengths. It
 is a transport (`BaseTransport`), so the core does not change; the packet header
 inside it can stay as it is. A listener that answers a wrong first message with
 nothing is the part that defeats active probing.
+
+## 108 — high — Every lookup answered through a relay ended in a direct link, so the mesh became a full mesh
+
+> **Status — fixed** (soft limit, and links spread over distance). Tests:
+> `tests/test_routing_stability.py::TestALookupDoesNotBuyALinkPastTheSoftLimit`,
+> `TestFingers`.
+
+**Where** — `src/node.py`: `_route_outbound` → `_maybe_upgrade_path`;
+`_maintain_neighbors`.
+
+**What happens** — any routed packet sent through a relay asked for a direct link
+to its destination, and a lookup (`FIND_NODE`, and the `FOUND_NODE` that answers
+it) is a routed packet. Every lookup therefore ended in a handshake with the node
+it asked about. Measured on real nodes spread over eight processes, 90 s after
+start: 40 nodes held 24 links each (of 39 possible), 100 nodes held 57, and the
+traffic of a mesh with nothing to say grew with it, 5.1 then 17.9 packets per
+second per node, 19.8 at 240 nodes with the simulator itself saturated (loop
+lateness 1 s, 7.4 of 8 cores). A node holds at most `_MAX_PEERS` = 128 links, so
+at the sizes the project is for each node would sit at that limit and spend its
+time on post-quantum handshakes (about 22 kB each way) with nodes it asked one
+question. It was also why routing looked fine at these sizes: the mesh was
+nearly complete.
+
+**Fixed** — two parts, measured together.
+
+* Past `_UPGRADE_LINK_SOFT` links, a lookup no longer buys a direct link unless
+  the node asked about is nearer than the least near of the three neighbours
+  held; what people say to each other still does.
+* Without those links the greedy forwarding had nothing to hold on to, so links
+  are now spread over distance on purpose (`_finger_candidates`): each distance
+  band that has nodes in it gets `_FINGER_LINKS` links, filled from the routing
+  table `_FINGER_DIALS` bands per maintenance cycle, farthest first.
+
+On 240 nodes over eight processes (not saturated: loop lateness at the 99th
+percentile 4 to 13 ms): 2.9 to 3.5 packets per second per node at rest (from
+19.8), 0.7 cores for the whole mesh (from 7.4), about 25 to 30 links per node
+(from 56 at 100 nodes). With the soft limit alone, 87 to 94 first contacts of 100
+arrived; with the links spread over distance, 90 to 92 over four seeds, and 86 to 96 once a node that had just refused was no longer offered again before its back-off ended. Run to run the same seed moves by five or more, so these are ranges, not a ranking.
+
+**Still open** — about one first contact in fourteen is still lost on 240 nodes
+with nothing killed; the undelivered ones mostly end at a node holding one to
+five links (`mesh_sim.py --explain`). A rule that looked up the target at a
+local minimum of the distance was tried and measured no better (91 of 100 on
+the seed that gave 91). And there is nothing larger than 240 nodes to measure on this
+machine: the simulator needs more cores than the 8 it has once the mesh is
+chatty, and at rest it is the first number to check again.

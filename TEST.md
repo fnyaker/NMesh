@@ -275,6 +275,7 @@ tests/
 ├── test_routing_stability.py                          — routing regressions:
 │     the size of a FOUND_NODE, acquiring a route outside the receive loop,
 │     the return path learned from traffic, bounded teardown, a first
+│     links spread over distance and a lookup that stops buying links, a first
 │     handshake carried by two neighbours (and by one only when it has one,
 │     or a direct link to the target)
 ├── test_e2e.py / test_data.py                         — E2E encryption

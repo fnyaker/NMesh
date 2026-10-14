@@ -475,6 +475,8 @@ _GOSSIP_FANOUT         = 6
 # the node runs. Failed identities back off independently so dead addresses do
 # not turn maintenance into a dial storm.
 _NEIGHBOR_TARGET          = 5
+_FINGER_LINKS             = 2      # links wanted in each distance band that has nodes in it
+_FINGER_DIALS             = 4      # bands filled per maintenance cycle
 # Floor of live maintained links. Below it the node is *searching*: it runs a
 # discovery cycle every _NEIGHBOR_REFRESH. At or above it the neighbourhood is
 # considered joined and the cycle stays quiet — a node that keeps looking up its
@@ -892,6 +894,7 @@ _CONN_HOLE_SUSTAIN  = 180.0
 _MANUAL_HOLE_MAX    = 32       # bounded table of manual-punch targets
 _UPGRADE_COOLDOWN      = 60.0  # min seconds between direct-link attempts per target
 _UPGRADE_MAX_TRACKED   = 256   # bounded per-target cooldown table
+_UPGRADE_LINK_SOFT     = 24    # links past which a lookup no longer buys a direct one
 
 # Two-step connect exchange blocks
 _CONN_BLOCK_VERSION = 2
@@ -1048,6 +1051,8 @@ __all__ = [
     "_NEIGHBOR_RETRY_MIN",
     "_NEIGHBOR_RETRY_TRACKED",
     "_NEIGHBOR_TARGET",
+    "_FINGER_LINKS",
+    "_FINGER_DIALS",
     "_NEIGHBOR_WATCH_TRACKED",
     "_OFFER_MAX",
     "_OFFER_RATE_MAX",
@@ -1200,5 +1205,6 @@ __all__ = [
     "_TARPIT_MIN",
     "_UPGRADE_COOLDOWN",
     "_UPGRADE_MAX_TRACKED",
+    "_UPGRADE_LINK_SOFT",
     "_is_ip_address",
 ]

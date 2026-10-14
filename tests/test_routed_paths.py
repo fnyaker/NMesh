@@ -617,7 +617,7 @@ class TestWhatARoutedPacketBuys:
     async def _route(self, node, kind):
         from src.packet import Packet
         upgraded, interest = [], []
-        node._maybe_upgrade_path = upgraded.append
+        node._maybe_upgrade_path = lambda target, conversation=True: upgraded.append(target)
         node._note_path_interest = interest.append
         await node._route_outbound(Packet.create(kind, node.id.raw, TARGET.raw, b"x"))
         return upgraded, interest

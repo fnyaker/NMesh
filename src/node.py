@@ -3290,6 +3290,43 @@ class MeshNode:
         ids.sort(key=self._id.distance)
         return ids
 
+    def _finger_candidates(self) -> list[NodeID]:
+        """Identities that would give this node a link in a distance band it
+        holds too few in.
+
+        A band is the bit length of the XOR distance to us: half the id space is
+        in the farthest, a quarter in the next, and so on down to the few nodes
+        nearest us. Greedy forwarding picks the neighbour nearest the target, and
+        it only makes progress when every band that has nodes in it has a link —
+        otherwise a packet reaches the node nearest the target *among our
+        neighbours* and stops. Links bought by lookups are not spread that way:
+        they are wherever the questions went.
+
+        One identity per short band, the one seen most recently, at most
+        `_FINGER_DIALS` of them, farthest band first (the one a wrong guess
+        costs the most hops in)."""
+        now = time.monotonic()
+        linked = {p.authenticated_id for p in self._authenticated_peers()}
+        held: dict[int, int] = {}
+        for node_id in linked:
+            band = self._id.distance(node_id).bit_length()
+            held[band] = held.get(band, 0) + 1
+        best: dict[int, NodeEntry] = {}
+        for entry in self._routing.all_entries():
+            if entry.node_id in linked or entry.node_id == self._id \
+                    or self._routing.is_silent(entry):
+                continue
+            # One that just refused us is not offered again until its back-off
+            # is over, or a band with one unwilling node in it is never filled.
+            if now < self._neighbor_retry.get(entry.node_id, (0, 0.0))[1]:
+                continue
+            band = self._id.distance(entry.node_id).bit_length()
+            if held.get(band, 0) >= _FINGER_LINKS:
+                continue
+            if band not in best or entry.last_seen > best[band].last_seen:
+                best[band] = entry
+        return [best[band].node_id for band in sorted(best, reverse=True)[:_FINGER_DIALS]]
+
     def _neighbor_slots(self) -> list[NodeID]:
         """The maintained set: the `_NEIGHBOR_FLOOR` XOR-nearest live links.
 
@@ -3436,7 +3473,8 @@ class MeshNode:
         live = self._live_neighbors()
         searching = force or len(live) < _NEIGHBOR_FLOOR
         promotions = self._neighbor_promotions()
-        if not searching and not promotions:
+        fingers = self._finger_candidates()
+        if not searching and not promotions and not fingers:
             return
 
         if searching and self._authenticated_peers():
@@ -3450,7 +3488,7 @@ class MeshNode:
 
         now = time.monotonic()
         live_ids = {p.authenticated_id for p in self._authenticated_peers()}
-        desired = list(promotions)
+        desired = list(promotions) + fingers
         if searching:
             desired += [entry.node_id for entry in
                         self._routing.get_closest(self._id, _NEIGHBOR_TARGET)]
@@ -3873,13 +3911,22 @@ class MeshNode:
             await asyncio.sleep(_AUTH_POLL_INTERVAL)
         return None
 
-    def _maybe_upgrade_path(self, target: NodeID) -> None:
+    def _maybe_upgrade_path(self, target: NodeID, conversation: bool = True) -> None:
         """Fire-and-forget attempt to turn a relayed path into a direct link
         (direct connect first, hole punch as fallback — both inside
         _ensure_route_to). Rate-limited per target so a chatty flow doesn't
         turn into a connect/punch storm."""
         if target == self._id or target in self._pending_connections:
             return
+        # Past a soft number of links, only a node that would join the set of
+        # nearest neighbours is worth a direct link for the sake of a lookup:
+        # every lookup answered through a relay otherwise ends in a dial, and a
+        # mesh where each node dials each node it asks about is a full mesh.
+        # What people say to each other still gets its direct link.
+        if not conversation and len(self._peers) >= _UPGRADE_LINK_SOFT:
+            cutoff = self._neighbor_cutoff()
+            if cutoff is None or self._id.distance(target) >= cutoff:
+                return
         now = time.monotonic()
         last = self._upgrade_last.get(target)
         if last is not None and now - last < _UPGRADE_COOLDOWN:
@@ -4568,7 +4615,8 @@ class MeshNode:
                 # share that relay come to hold a link of their own.
                 known = self._routing.get(target)
                 if known is None or not self._routing.is_silent(known):
-                    self._maybe_upgrade_path(target)
+                    self._maybe_upgrade_path(
+                        target, conversation=packet.type in _CONVERSATION_TYPES)
                 # …and for a conversation, whether or not that ever works,
                 # start measuring the ways through the mesh to it. An upgrade
                 # is an optimisation and may be impossible; a second *routed*

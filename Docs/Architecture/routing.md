@@ -407,6 +407,28 @@ then in a loop), but what it does depends on what we already hold:
 - `force=True` (join/`bootstrap`) imposes a full searching cycle whatever we
   already hold: a fresh table has to fill up.
 
+### Links are spread over distance, and a lookup does not buy one (`_finger_candidates`, `_UPGRADE_LINK_SOFT`)
+
+Greedy forwarding picks the neighbour nearest the target, and only makes
+progress when every distance band that has nodes in it holds a link; otherwise a
+packet reaches the node nearest the target *among our neighbours* and stops. A
+band is the bit length of the XOR distance to us.
+
+* **Spread.** In the quiet regime too, each cycle dials the most recently seen
+  identity of up to `_FINGER_DIALS` bands that hold fewer than `_FINGER_LINKS`
+  links, farthest band first. An identity in its retry back-off
+  (`_neighbor_retry`) is skipped, or a band with one unwilling node in it is
+  never filled. A hostile routing table costs one bounded cycle.
+* **No link by lookup.** `_maybe_upgrade_path` used to run for every routed
+  packet sent through a relay, so every lookup ended in a handshake with the
+  node it asked about and the mesh became a full mesh (BUGSVULNS 108). Past
+  `_UPGRADE_LINK_SOFT` links, a packet that is not a conversation only buys a
+  direct link to a node nearer than the least near of the maintained
+  neighbours.
+
+At rest on 240 nodes: about 3 packets per second per node and 25 to 30 links,
+against 20 packets per second and a full mesh before.
+
 ### Promoting a node seen in transit
 
 The maintained set (`_neighbor_slots`) = the `_NEIGHBOR_FLOOR` nearest live

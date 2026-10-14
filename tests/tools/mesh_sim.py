@@ -94,6 +94,13 @@ async def worker(src: str) -> None:
         if op == "kill":
             await node.stop()
             return True
+        if op == "explain":
+            target = NodeID(bytes.fromhex(req["to"]))
+            linked = {p.authenticated_id for p in node._peers if p.session is not None and p.authenticated_id}
+            return {"links": len(linked), "knows": node._routing.contains(target),
+                    "direct": target in linked,
+                    "nearest_gap": min((target.distance(i) for i in linked), default=None) is not None
+                    and min(target.distance(i) for i in linked) >= target.distance(node.id)}
         if op == "links":
             return len({p.authenticated_id for p in node._peers if p.session is not None and p.authenticated_id})
         if op == "prof_start":
@@ -207,6 +214,10 @@ async def parent(args) -> None:
     print(f"idle: {(c1[0] - c0[0]) / args.settle / len(nodes):.1f} packets/s/node sent, "
           f"{(c1[1] - c0[1]) / args.settle / len(nodes):.2f} relayed for others, "
           f"workers used {idle_cores:.2f} cores", flush=True)
+    held = sorted(await asyncio.gather(*[nodes[g][0].call(op="links", i=nodes[g][1])
+                                         for g in range(len(nodes))]))
+    print(f"links per node (distinct nodes): min {held[0]}, median {held[len(held) // 2]}, "
+          f"mean {sum(held) / len(held):.1f}, max {held[-1]}", flush=True)
     await asyncio.gather(*[w.call(op="lag") for w in workers])      # reset
     c2 = await counters()
     cpu0 = sum(_cpu_seconds(w.proc.pid) for w in workers)
@@ -248,6 +259,10 @@ async def parent(args) -> None:
         last = await nodes[a][0].call(op="attempt", i=nodes[a][1], to=nodes[b][2])
         retried.append(last is not None and last != first)
         results.append(got)
+        if got is None and args.explain:
+            sender = await nodes[a][0].call(op="explain", i=nodes[a][1], to=nodes[b][2])
+            receiver = await nodes[b][0].call(op="explain", i=nodes[b][1], to=nodes[a][2])
+            print(f"  undelivered: sender {sender}, receiver {receiver}", flush=True)
     lags = await asyncio.gather(*[w.call(op="lag") for w in workers])
     if args.profile:
         print((await workers[0].call(op="prof_stop", top=args.profile)).strip(), flush=True)
@@ -284,6 +299,8 @@ if __name__ == "__main__":
     ap.add_argument("--blackhole", type=float, default=0.0,
                     help="fraction of nodes that stay in the mesh and relay nothing")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--explain", action="store_true",
+                    help="say what the two ends of each undelivered first contact looked like")
     ap.add_argument("--profile", type=int, default=0, metavar="N",
                     help="print the top N functions of the first worker while the pairs run")
     args = ap.parse_args()
