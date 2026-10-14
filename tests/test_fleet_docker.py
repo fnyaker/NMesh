@@ -517,3 +517,72 @@ class TestReachingTheSocket:
             assert "no docker daemon" in str(failure.value)
         finally:
             os.environ.pop("DOCKER_HOST", None)
+
+
+# ---------------------------------------------------------------------------
+# Usage, volumes, networks, image removal
+# ---------------------------------------------------------------------------
+
+class TestWhatTheDaemonReportsAboutUse:
+    def test_a_share_is_the_container_cpu_over_the_machines(self):
+        raw = {"cpu_stats": {"cpu_usage": {"total_usage": 300}, "system_cpu_usage": 2000,
+                             "online_cpus": 4},
+               "precpu_stats": {"cpu_usage": {"total_usage": 100}, "system_cpu_usage": 1000},
+               "memory_stats": {"usage": 5000, "limit": 9000, "stats": {"inactive_file": 1000}}}
+        assert docker.sample(raw) == {"cpu": 80.0, "memory": 4000, "limit": 9000}
+
+    @pytest.mark.parametrize("raw", [None, [], "x", {}, {"cpu_stats": []},
+                                     {"cpu_stats": {"cpu_usage": {"total_usage": "a"}}},
+                                     {"memory_stats": {"usage": True, "stats": []}},
+                                     {"cpu_stats": {"cpu_usage": {"total_usage": 9}, "system_cpu_usage": 1,
+                                                    "online_cpus": 10**9}}])
+    def test_whatever_the_daemon_sends_there_is_a_bounded_answer(self, raw):
+        out = docker.sample(raw)
+        assert set(out) == {"cpu", "memory", "limit"}
+        assert all(isinstance(value, (int, float)) and value >= 0 for value in out.values())
+
+    async def test_a_container_that_cannot_be_read_costs_only_itself(self):
+        row = b'[{"Id":"a1","State":"running"},{"Id":"b2","State":"running"},{"Id":"c3","State":"exited"}]'
+        daemon = _Daemon([_answer(row), _answer(b'{"message":"gone"}', status=404),
+                          _answer(b'{"memory_stats":{"usage":7}}')])
+        await daemon.start()
+        try:
+            found = await docker.stats()
+        finally:
+            await daemon.stop()
+        assert len(found) == 1 and set(found) <= {"a1", "b2"}
+
+    async def test_volumes_and_networks_are_read_whatever_their_shape(self):
+        daemon = _Daemon([_answer(b'{"Volumes":[{"Name":"data","Driver":"local"},7,null]}'),
+                          _answer(b'[{"Id":"n1","Name":"bridge","Driver":"bridge",'
+                                  b'"IPAM":{"Config":[{"Subnet":"192.0.2.0/24"}]},"Containers":{"x":{}}},'
+                                  b'{"Name":1,"IPAM":7,"Containers":[]}, 3]')])
+        await daemon.start()
+        try:
+            volumes, networks = await docker.volumes(), await docker.networks()
+        finally:
+            await daemon.stop()
+        assert [v["name"] for v in volumes] == ["data"]
+        assert networks[0]["subnet"] == "192.0.2.0/24" and networks[0]["attached"] == 1
+        assert networks[1]["subnet"] == "" and networks[1]["attached"] == 0
+
+    @pytest.mark.parametrize("image", [None, 5, "", "a/../../containers/x", "a b", "a?force=1",
+                                       "-x", "a\nb", "x" * 300])
+    async def test_an_image_that_is_not_one_never_reaches_the_socket(self, image):
+        daemon = _Daemon([_answer(b"[]")])
+        await daemon.start()
+        try:
+            with pytest.raises(docker.DockerError):
+                await docker.remove_image(image)
+            assert daemon.requests == []
+        finally:
+            await daemon.stop()
+
+    async def test_an_image_is_removed_by_the_name_it_was_given(self):
+        daemon = _Daemon([_answer(b"[]")])
+        await daemon.start()
+        try:
+            assert await docker.remove_image("ghcr.io/o/i:1") == {"image": "ghcr.io/o/i:1"}
+            assert daemon.requests[0][0].startswith("DELETE /v1.41/images/ghcr.io/o/i:1 ")
+        finally:
+            await daemon.stop()

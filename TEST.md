@@ -392,7 +392,7 @@ tests/
 │     the tail when a program outruns the link, and a held read answers on the
 │     byte, returns at once when there is backlog, gives up rather than parking
 │     for ever, and does not wait at all for a session nobody opened
-├── test_fleet_docker.py                               — docker and Portainer: what
+├── test_fleet_docker.py                               — docker and Portainer (usage samples, volumes, networks and image removal included, with hostile daemon answers): what
 │     may reach a socket or an argv (a name that is not a name is refused, never
 │     escaped; a container is *built* from a validated shape rather than
 │     forwarded, so `Privileged` cannot ride in; a bind mount is two absolute
