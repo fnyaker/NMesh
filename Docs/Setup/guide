@@ -124,9 +124,20 @@ recompiling. `start.sh` also looks at the prefixes `install.sh` points it at
 (`OQS_REUSE_FROM`, a `:`-separated list): the installer's home, their old user
 installation, `/opt/nmesh`.
 
-Reuse is never decided on a version number or a file name: the wrapper actually
-**loads** the candidate library and both required algorithms answer, or we
-recompile. After the copy, the check is run again **at the destination**. A
+Reuse is never decided on a version number or a file name: the candidate must
+carry **`nmesh-liboqs.lock`**, the stamp `scripts/build_liboqs.sh` writes beside
+every build it proved, matching the lock in this tree; it must belong to this
+account or to root and be writable by no group and no one else (the stamp is a
+file like any other); and the wrapper must actually **load** it with both
+required algorithms answering. After the copy, the check is run again **at the
+destination**.
+
+A library already in the prefix with no current stamp — every one built before
+the source was checked — is **rebuilt** at the next start: beside the old one,
+swapped in only once the new one loads, so a node that cannot rebuild (no
+network, no compiler) keeps what it has, says so, and tries again next time.
+A library the system provides (a distribution's package, Homebrew) carries no
+stamp and needs none. A
 wrapper version bump changes the cache key and therefore forces a real rebuild —
 wrapper and library must stay paired.
 

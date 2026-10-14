@@ -154,3 +154,32 @@ def test_the_locked_archive_is_the_one_github_serves(tmp_path):
     with urllib.request.urlopen(url, timeout=60) as response:
         body = response.read(64 * 1024 * 1024)
     assert hashlib.sha256(body).hexdigest() == _lock()["LIBOQS_TARBALL_SHA256"]
+
+
+class TestTheBuildStamps:
+    def _proven_git(self, sandbox):
+        _tool(sandbox, "git", 'case "$1" in\n'
+              '  clone) for last; do :; done; mkdir -p "$last";;\n'
+              f'  -C) echo {_lock()["LIBOQS_COMMIT"]};;\n'
+              "esac\n")
+
+    def test_a_proven_build_leaves_the_lock_it_was_proven_against(self, sandbox):
+        self._proven_git(sandbox)
+        _tool(sandbox, "cmake", "exit 0\n")
+        _tool(sandbox, "grep", f'exec {shutil.which("grep")} "$@"\n')
+        (sandbox / "prefix").mkdir()
+        result = _run(sandbox)
+        assert result.returncode == 0, result.stderr
+        stamp = (sandbox / "prefix" / "nmesh-liboqs.lock").read_text()
+        assert f"LIBOQS_COMMIT={_lock()['LIBOQS_COMMIT']}" in stamp
+        assert f"LIBOQS_TARBALL_SHA256={_lock()['LIBOQS_TARBALL_SHA256']}" in stamp
+
+    def test_a_refused_build_leaves_none(self, sandbox):
+        _tool(sandbox, "git", 'case "$1" in\n'
+              '  clone) for last; do :; done; mkdir -p "$last";;\n'
+              '  -C) echo ' + "f" * 40 + ';;\n'
+              "esac\n")
+        _tool(sandbox, "cmake", "exit 0\n")
+        (sandbox / "prefix").mkdir()
+        assert _run(sandbox).returncode != 0
+        assert not (sandbox / "prefix" / "nmesh-liboqs.lock").exists()

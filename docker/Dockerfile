@@ -43,7 +43,7 @@ COPY scripts/ ./scripts/
 # sends runs `install.sh` there (which in turn runs `start.sh`) — see
 # Docs/Apps/fleet. Without these the payload cannot be built at all: "no NMesh
 # tree at /app".
-COPY start.sh install.sh pyproject.toml requirements.txt ./
+COPY start.sh install.sh pyproject.toml requirements.txt LICENSE ./
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

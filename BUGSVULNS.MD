@@ -4208,3 +4208,21 @@ more than the rest: handshakes and the lookups of every new node (29 KiB/s
 per node at 30 nodes, measured earlier). Both ends of a link still
 probe it; one probe each way would halve the rest (the quality estimates of each
 side come from its own probes, so that is not free).
+## 111 — medium — Two builds raced to publish the base image, and the older won
+
+> **Status — fixed.** Tests: `tests/test_workflows_pinned.py`
+> (`test_what_publishes_latest_does_it_one_run_at_a_time`).
+
+**Where** — `.github/workflows/base-image.yml`; the `docker` job of `ci.yml`
+pushes the application image's `:latest` the same way.
+
+**What happens** — merging two PRs that both touched the base image a minute
+apart started two builds. The one from the older commit finished second, so
+`nmesh-base:latest` went back to a build from before liboqs was compiled from a
+checked source, without `/opt/liboqs`; every application build after it failed
+on the missing directory. Nothing in the image says which commit it came from,
+so the only symptom was that later builds broke.
+
+**Fixed** — both publishers run in a concurrency group that never cancels a run
+in progress, so they finish in the order they were queued and the newest commit
+publishes last. The base was republished from `main` by hand.

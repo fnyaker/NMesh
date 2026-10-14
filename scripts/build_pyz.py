@@ -25,6 +25,8 @@ def build(output: str) -> None:
         # nmesh_node becomes the archive's entry point.
         shutil.copy(os.path.join(ROOT, "scripts", "nmesh_node.py"),
                     os.path.join(work, "__main__.py"))
+        # The GPL travels with the program, in every form it is handed over.
+        shutil.copy(os.path.join(ROOT, "LICENSE"), os.path.join(work, "LICENSE"))
         zipapp.create_archive(
             work, target=output, interpreter="/usr/bin/env python3",
         )
