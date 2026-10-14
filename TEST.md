@@ -287,6 +287,9 @@ tests/
 ├── test_loop_backtrack.py                             — a routed packet that
 │     comes back round a cycle leaves by another neighbour, and what that may
 │     cost is bounded (replays, fanout, the book)
+├── test_link_prune.py — idle links closed (structure, links in use, bundles, relay and
+│     probe links, nodes whose leaf we are, redialled links kept), told with
+│     LINK_RELEASE and not chased, bounded; the link budget's bounds
 ├── test_neighborhood.py — the maintained neighbourhood, including the leaf set
 │     (searching until the nearest known nodes are all linked, quiet after, bounded,
 │     not kept searching by a node nobody can reach)

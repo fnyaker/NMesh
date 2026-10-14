@@ -106,7 +106,7 @@ async def test_quiet_once_the_floor_is_reached(monkeypatch):
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     monkeypatch.setattr(node, "kad_lookup", fake_lookup)
     monkeypatch.setattr(node, "_finger_candidates", lambda: [])    # its own rule, tested apart
-    monkeypatch.setattr(src.node, "_LEAF_SIZE", 0)                  # so is the leaf set
+    node._leaf_size = 0                                      # so is the leaf set
     await node._maintain_neighbors()
     assert attempted == []
     assert looked_up == []
@@ -151,7 +151,7 @@ async def test_losing_a_slot_resumes_the_search(monkeypatch):
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     monkeypatch.setattr(node, "kad_lookup", lambda *a, **k: asyncio.sleep(0))
     monkeypatch.setattr(node, "_finger_candidates", lambda: [])
-    monkeypatch.setattr(src.node, "_LEAF_SIZE", 0)
+    node._leaf_size = 0
 
     await node._maintain_neighbors()
     assert attempted == []
@@ -406,7 +406,7 @@ async def test_a_quiet_node_still_fills_a_distance_band_it_has_no_link_in(monkey
 
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     monkeypatch.setattr(node, "kad_lookup", fake_lookup)
-    monkeypatch.setattr(src.node, "_LEAF_SIZE", 0)
+    node._leaf_size = 0
     await node._maintain_neighbors()
     assert attempted == [far]
     assert looked_up == [], "filling a band is not searching"

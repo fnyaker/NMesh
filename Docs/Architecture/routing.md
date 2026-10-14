@@ -445,6 +445,33 @@ band is the bit length of the XOR distance to us.
 At rest on 240 nodes: about 3 packets per second per node and 25 to 30 links,
 against 20 packets per second and a full mesh before.
 
+### Links nobody needs are closed (`_prune_idle_links`, `LINK_RELEASE`)
+
+An open link costs a probe each way every twenty seconds, and nothing used to
+close one. On 1000 nodes the idle traffic of a node was 36 links and 3.6 packets
+per second, all `PING` and `PONG` (BUGSVULNS 110). What a node holds for good is
+its structure: the leaf set (`leaf_size`, the nearest nodes) and `finger_links`
+links in each band of distance, the oldest. The others are closed after
+`link_idle_minutes` without a conversation on them (`peer.last_used`, touched by
+`DATA` and the E2E handshake, sent, received or relayed; keepalives and lookups
+do not count), two per keepalive sweep.
+
+Left alone: a node we hold several links to (a bundle), relay-only and probe
+links, the last `max(_NEIGHBOR_FLOOR, leaf_size)` links, a node whose leaf set
+we probably belong to (fewer than `leaf_size` nodes in our table nearer to it
+than we are), and a node that redialled after we closed (`peer.peer_wants`,
+remembered `_PEER_WANTS_TTL` in `_idle_closed`, bounded). A closed link is not
+chased by the side that closed it, and a peer that announced `linkrelease` is
+sent `LINK_RELEASE` first so that it does not chase it either. Without that
+message the far end saw a loss, redialled, and the pair cycled: measured as
+0.05 handshakes per second per node, 5 KiB/s against 0.4 before pruning.
+
+The three numbers are on the energy and performance bar (`power.py`): from four
+near neighbours, one link per band and two idle minutes at the frugal end, to
+twelve, three and never closing at the other. Measured at rest on 1000 nodes,
+after the settling time: 15 links per node and 1.7 packets per second (0.22
+KiB/s), against 28 to 36 and 3.6 (0.38 KiB/s).
+
 ### Promoting a node seen in transit
 
 The maintained set (`_neighbor_slots`) = the `_NEIGHBOR_FLOOR` nearest live

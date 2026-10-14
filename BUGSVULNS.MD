@@ -4183,3 +4183,28 @@ crypto stubbed (`--fast`): the true 8 nearest linked 98 % of the time (from
 simulated node). Hostile nodes inserting near ids to hold a victim in the
 searching regime are bounded by `_LEAF_GIVE_UP` and the back-off, but were not
 tried.
+
+## 110 — medium — Every link stayed open for ever, and keeping them open was the whole traffic of an idle node
+
+> **Status — fixed.** Tests: `tests/test_link_prune.py`.
+
+**Where** — `src/node.py`: nothing closed a link that nobody used.
+
+**What happens** — a node on 1000 nodes held 28 to 36 links (the leaf set and
+two links per band of distance, plus every link a conversation or a lookup had
+ever opened) and, with nothing to say, sent 3.6 packets per second and 0.38 KiB/s
+to keep them alive: `PING` and `PONG`, nothing else. The energy and performance
+bar moved the cadence of those probes and not the number of links.
+
+**Fixed** — `_prune_idle_links` (see `routing.md`), the three numbers on the
+bar, and `LINK_RELEASE`. A first version without the message closed links the
+far end then redialled, which cycled: 0.05 handshakes per second per node and
+5 KiB/s, ten times worse than doing nothing. At rest after the settling time on
+1000 nodes: 15 links per node, 1.7 packets per second, 0.22 KiB/s, 99 % of the
+true 8 nearest linked, 100 of 100 first contacts.
+
+**Still open** — the first minutes after a start (the settling time) still cost
+more than the rest: handshakes and the lookups of every new node (29 KiB/s
+per node at 30 nodes, measured earlier). Both ends of a link still
+probe it; one probe each way would halve the rest (the quality estimates of each
+side come from its own probes, so that is not free).

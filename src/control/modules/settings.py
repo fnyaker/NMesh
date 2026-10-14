@@ -59,7 +59,7 @@ LIVE_GROUPS = (_KEEPALIVE, _MLO, tuple(_UPDATES), _FROM_FILE,
                ("punch_keepalive",), ("lan_discovery",),
                ("transport_balance",), ("dynamic_address",),
                ("mlo_always",), ("pseudo",), ("no_abuse_gossip",),
-               ("route_hold_minutes",))
+               ("route_hold_minutes",), ("leaf_size", "finger_links", "link_idle_minutes"))
 
 
 async def apply_live(node, values: dict, changed) -> tuple[dict, list]:
@@ -104,6 +104,10 @@ async def apply_live(node, values: dict, changed) -> tuple[dict, list]:
     if "route_hold_minutes" in changed:
         await attempt("route_hold_minutes",
                       lambda: node.set_route_hold(values["route_hold_minutes"] * 60))
+    if changed & {"leaf_size", "finger_links", "link_idle_minutes"}:
+        await attempt("link budget", lambda: node.set_link_budget(
+            leaf_size=values["leaf_size"], finger_links=values["finger_links"],
+            idle_minutes=values["link_idle_minutes"]))
     if "dynamic_address" in changed:
         await attempt("dynamic_address",
                       lambda: node.set_dynamic_address(values["dynamic_address"]))

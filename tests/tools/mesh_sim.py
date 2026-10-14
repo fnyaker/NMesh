@@ -135,6 +135,25 @@ async def worker(src: str, fast: bool = False) -> None:
             buf = io.StringIO()
             pstats.Stats(prof[0], stream=buf).sort_stats("tottime").print_stats(req.get("top", 14))
             return buf.getvalue()
+        if op == "budget":
+            for n in nodes:
+                n.set_link_budget(leaf_size=req["leaf"], finger_links=req["finger"], idle_minutes=req["idle"])
+            return True
+        if op == "trace_start":
+            from src.node import MESSAGE_NAMES
+            for n in nodes:
+                if n._running:
+                    n.trace.start(seconds=req["seconds"], events=1000, names=MESSAGE_NAMES)
+            return True
+        if op == "trace_totals":
+            out = {}
+            for n in nodes:
+                for (direction, kind), (cnt, nbytes) in n.trace._totals.items():
+                    if direction == "out":
+                        row = out.setdefault(n.trace.name(kind), [0, 0])
+                        row[0] += cnt
+                        row[1] += nbytes
+            return out
         if op == "counters":
             live = [n for n in nodes if n._running]
             return {"out": sum(n._metrics.total.pkts_out for n in live),
@@ -228,6 +247,9 @@ async def parent(args) -> None:
         rows = await asyncio.gather(*[w.call(op="counters") for w in workers])
         return sum(r["out"] for r in rows), sum(r["relayed"] for r in rows)
 
+    if args.link_budget:
+        leaf, finger, idle = (int(x) for x in args.link_budget.split(","))
+        await asyncio.gather(*[w.call(op="budget", leaf=leaf, finger=finger, idle=idle) for w in workers])
     c0 = await counters()
     idle_cpu0 = sum(_cpu_seconds(w.proc.pid) for w in workers)
     await asyncio.sleep(args.settle)
@@ -240,6 +262,22 @@ async def parent(args) -> None:
                                          for g in range(len(nodes))]))
     print(f"links per node (distinct nodes): min {held[0]}, median {held[len(held) // 2]}, "
           f"mean {sum(held) / len(held):.1f}, max {held[-1]}", flush=True)
+    if args.rest_window:
+        await asyncio.gather(*[w.call(op="trace_start", seconds=args.rest_window + 10) for w in workers])
+        await asyncio.sleep(args.rest_window)
+        rows: dict = {}
+        for part in await asyncio.gather(*[w.call(op="trace_totals") for w in workers]):
+            for name, (cnt, size) in part.items():
+                row = rows.setdefault(name, [0, 0])
+                row[0] += cnt
+                row[1] += size
+        per = len(nodes) * args.rest_window
+        print(f"at rest, per node per second ({args.rest_window:.0f} s window): "
+              f"{sum(r[0] for r in rows.values()) / per:.2f} packets, "
+              f"{sum(r[1] for r in rows.values()) / per / 1024:.2f} KiB", flush=True)
+        for name, (cnt, size) in sorted(rows.items(), key=lambda kv: -kv[1][1])[:10]:
+            print(f"  {name:20s} {cnt / per:6.2f}/s  {size / max(cnt, 1):7.0f} B each  "
+                  f"{size / per / 1024:6.2f} KiB/s", flush=True)
     await asyncio.gather(*[w.call(op="lag") for w in workers])      # reset
     c2 = await counters()
     cpu0 = sum(_cpu_seconds(w.proc.pid) for w in workers)
@@ -316,6 +354,10 @@ async def parent(args) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--rest-window", type=float, default=0.0,
+                    help="after settling, count what each node sends, by message type, for this many seconds")
+    ap.add_argument("--link-budget", default="", metavar="LEAF,FINGER,IDLE_MIN",
+                    help="set the nodes' permanent-link budget before the settling time (e.g. 8,1,1)")
     ap.add_argument("--worker", action="store_true")
     ap.add_argument("--fast", action="store_true",
                     help="stub the post-quantum crypto (same sizes, no cost): routing at sizes the real thing cannot reach")
