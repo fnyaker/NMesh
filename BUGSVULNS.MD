@@ -4064,3 +4064,30 @@ a concrete host has that one, a loopback listener has none. Two existing tests
 that described a LAN-reachable node while listening on `127.0.0.1` now listen on
 `0.0.0.0`, which is what their story meant.
 
+
+## 107 — medium — The TCP link opens with a fixed, recognisable pattern
+
+> **Status — open.** Measured on a listening node; no remedy chosen yet.
+
+**Where** — `src/transports/tcp.py`, `src/packet.py` (`HEADER_FORMAT`), the
+first frame a node sends on an accepted link.
+
+**What happens** — connecting to a node's listener and saying nothing, the node
+speaks first: a length prefix, then a packet header in the clear (version byte,
+type, TTL 64, the 20-byte source id, and a destination of twenty `0xff` bytes).
+Over 336 bytes the byte entropy is 5.8 bits, against close to 8 for an
+encrypted stream. A censor does not need to break anything: a rule on "server
+speaks first, `0xff` run at offset 25" finds every listener, and an active
+prober that connects and listens confirms it. This is the property that
+protocols built against national firewalls (obfs4, Shadowsocks, Snowflake,
+meek, REALITY) spend their effort removing, and a mesh meant to resist
+disruption inherits the problem at its edge: the links between nodes in
+different networks are the ones a censor sees.
+
+**Needs** — a transport that wraps TCP in a stream with no fixed bytes: keyed by
+something the dialler already holds (the join ticket carries a key for the
+listener it names), uniform-looking from the first byte, silent until the right
+key proves itself so a prober gets nothing back, with padding on the lengths. It
+is a transport (`BaseTransport`), so the core does not change; the packet header
+inside it can stay as it is. A listener that answers a wrong first message with
+nothing is the part that defeats active probing.
