@@ -3946,3 +3946,30 @@ doing (`reputation.py`); a relay that silently drops is exactly what that cannot
 see, so this is the case the measured paths in `routed.py` exist for, and what
 they cover for a first contact is the open question.
 
+## 103 — low — A fleet route given a `node` that was not text answered with the interpreter's own words
+
+> **Status — fixed.** Tests: `tests/test_console_fleet.py::TestANodeThatIsNotText`.
+> Found by `tests/tools/api_fuzz.py`, signed in, on a throwaway node.
+
+**Where** — `src/webconsole.py`: `_handle_fleet_post`, the first lines and the
+last `except`.
+
+**What happens** — `node` is read once, `data.get("node") or data.get("id")`, and
+never checked to be text. An object or a list there reached a dictionary lookup
+further down and came back as `503 {"error": "unhashable type: 'dict'"}` on
+`update`, `stacks` and `mkdir`. The node did not fall over, and the route needs a
+session; what it gave an operator was the name of an internal type and no way to
+act on it.
+
+**Fixed** — a `node` that is not text is a `400 bad node id`, whichever route
+and whichever of the two spellings; a `TypeError`, `AttributeError`, `KeyError`
+or `IndexError` that gets past the checks is written to the log and answered with
+a sentence that says nothing about the code.
+
+**Checked and fine** — all 60 API routes refuse a request without a session
+(401); across about 3 100 hostile requests (truncated, binary, deeply nested and
+oversized JSON, wrong types, control characters, 300 kB strings) the console
+answered 400, 404 or 413 or a refusal, and the node answered afterwards.
+`POST /api/fleet/invite` for a node that does not answer waits up to
+`_INVITE_WAIT` for the answer by design.
+

@@ -58,6 +58,7 @@ from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
 from .apps.fleet_docker import DockerError
 from . import console_feed
+from . import faults
 from .http_headers import SECURITY_HEADERS
 from .apps.fleet_console import (APPS_HEADER, FULL_HEADER, GOVERN_HEADER,
                                  REPLAY_HEADER)
@@ -2338,6 +2339,9 @@ def _make_handler(console: WebConsole):
             data = data or {}
             node = data.get("node") or data.get("id") or ""
             action = path.rsplit("/", 1)[1]
+            if not isinstance(node, str):
+                self._json(400, {"error": "bad node id"})
+                return
             try:
                 if action == "enrol":
                     ok = fleet.enrol(node, data.get("caps"), data.get("label", ""))
@@ -2472,6 +2476,12 @@ def _make_handler(console: WebConsole):
                 self._json(502, {"error": str(exc)[:200]})
             except ValueError:
                 self._json(400, {"error": "bad request"})
+            except (TypeError, AttributeError, KeyError, IndexError) as exc:
+                # A value of the wrong shape got further than it should. What
+                # went wrong is for the log: the interpreter's own words about
+                # its internals are nothing an operator can act on.
+                faults.note(f"fleet console {action}", exc)
+                self._json(503, {"error": "that request could not be carried out"})
             except Exception as exc:
                 self._json(503, {"error": str(exc)[:200]})
 

@@ -117,6 +117,19 @@ packets sent and relayed, and the **lateness of the slowest worker's event loop*
 Past a loop lag p99 of a few hundred milliseconds the figures describe the
 machine. It is a measurement tool, not a test: nothing in `pytest` runs it.
 
+### Hostile requests at the console's API
+
+`tests/tools/api_fuzz.py` signs in to a **throwaway** node and sends every route
+the page's scripts call: first with no session (each must refuse), then with
+truncated, binary, deeply nested and oversized bodies and values of the wrong
+type. It reports a 5xx or a dropped connection, a route that answers without a
+session, and the node not answering afterwards. A relay's `502 {"error": …}` is
+a refusal and is counted as one.
+
+```bash
+python tests/tools/api_fuzz.py https://127.0.0.1:8787 <password> --rounds 3
+```
+
 ---
 
 ## CI
