@@ -3889,7 +3889,10 @@ number to look at before the mesh is asked to be larger.
 
 ## 101 — low — An accepted link closed before the greeting raised out of the accept callback
 
-> **Status — open.**
+> **Status — fixed.** Tests: `tests/test_node.py::TestAnAcceptedLinkThatClosesBeforeTheGreeting`
+> (a far end that lets go before our first words; both tests fail with the guard
+> removed). What triggered it on the 200-node start-up was not confirmed, so the
+> test stands in for the far end.
 
 **Where** — `src/node.py`: `_on_new_transport`, the `peer.send` of the
 capabilities and the challenge; reached from `src/transports/tcp.py`
@@ -3902,6 +3905,10 @@ a traceback. Seen three times while 200 in-process nodes dialled each other at
 start-up (mutual dials). The node did not fall over, and what happens to
 the peer already appended to `_peers` was not followed. The charter's line is
 that no input should get an unhandled exception out of a receive path.
+
+**Fixed** — the `CHALLENGE` send is guarded like the capabilities one beside it:
+a failure ends the link through `_drop_failed_peer` instead of leaving the accept
+callback.
 
 **Not reproduced by a raw client** — 3984 connections opened and closed at once
 against a running node produced none. That points at the link being ended from

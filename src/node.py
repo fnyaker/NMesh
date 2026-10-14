@@ -4763,7 +4763,13 @@ class MeshNode:
         peer.pending_challenge = challenge
         packet = Packet.create(CHALLENGE, self._id.raw,
                                NodeID(b"\xff" * 20).raw, challenge)
-        await peer.send(packet)
+        try:
+            await peer.send(packet)
+        except Exception as exc:
+            # The far end let go between the accept and the greeting. This runs
+            # in the transport's accept callback, which has nobody to hand an
+            # exception to.
+            self._drop_failed_peer(peer, exc)
 
     def _end_double_accept(self, peer: _Peer) -> None:
         """Both ends of this link accepted it: each challenged, each waits for
