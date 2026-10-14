@@ -483,6 +483,21 @@ scope. Add yours.
   suite hung. The close had been the only thing ending it. → Before removing an
   exit from a loop, find what else that exit was the bound for, and test the
   loop with a medium that never waits.
+- **`ls a b` used as "does either exist".** A probe for a library in `lib` or
+  `lib64` listed both; `ls` fails when either is missing, so a library in `lib`
+  alone was never seen and the rebuild it was meant to trigger never ran. The
+  end-to-end scenario caught it; the unit tests had not been written yet. → In
+  shell, test existence with `[ -e ]` per path, and write the unit test for a
+  probe with each of its branches before the scenario that relies on it.
+- **A test edited from memory of it.** A replacement was written for a cache
+  test the agent had not opened, and matched nothing; the half of the edit that
+  did apply left the suite red for a reason that looked like the code's. →
+  Read the test before writing its replacement, every time.
+- **A path read relative to the current directory in a script that is
+  sourced.** `start.sh` read `scripts/liboqs.lock` relative to wherever it had
+  `cd`'d, which under the test harness was `/usr/bin`; every stamp then looked
+  wrong. → A file that decides trust is read from the script's own tree
+  (`BASH_SOURCE`), never from the current directory.
 - **A rate called "at rest" that was a mesh still settling.** About 30 packets
   per second per node was published as idle traffic; it was taken 25 s after
   start, with searches and handshakes still running, and the same mesh sent

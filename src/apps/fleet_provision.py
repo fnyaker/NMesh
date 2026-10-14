@@ -60,7 +60,7 @@ from .fleet_ssh import SshCredentials, SshError
 # `install.sh` is not optional here: the bootstrap hands the whole install over
 # to it rather than reimplementing one, so a payload without it installs nothing.
 PAYLOAD_INCLUDE = ("src", "scripts", "start.sh", "install.sh",
-                   "requirements.txt", "pyproject.toml")
+                   "requirements.txt", "pyproject.toml", "LICENSE")
 PAYLOAD_EXCLUDE_DIRS = {"__pycache__", ".git", ".venv", "data", "tests"}
 MAX_PAYLOAD = 16 * 1024 * 1024        # refuse to push an implausible tree
 # What a failed run keeps of the target's own output. Enough to see the error a

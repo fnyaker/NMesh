@@ -24,6 +24,10 @@
 # this file with NMESH_START_LIB=1 to exercise them without installing anything.
 set -euo pipefail
 cd "$(dirname "$0")"
+# The tree this script belongs to, whoever sourced it from wherever: the files
+# that decide which liboqs is trusted are read from here, never from the
+# current directory.
+NMESH_TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── colours ──────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -384,9 +388,9 @@ available_mem_mb() {
 pq_lib_on_disk() {
     # The node's own test (src/liboqs_guard.py), loaded by path: importing the
     # package would import the wrapper, which is the thing being protected.
-    python - >/dev/null 2>&1 <<'PYEOF'
+    python - "$NMESH_TREE/src/liboqs_guard.py" >/dev/null 2>&1 <<'PYEOF'
 import importlib.util, sys
-spec = importlib.util.spec_from_file_location("liboqs_guard", "src/liboqs_guard.py")
+spec = importlib.util.spec_from_file_location("liboqs_guard", sys.argv[1])
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 sys.exit(0 if guard.library_on_disk() else 1)
@@ -418,6 +422,86 @@ liboqs_usable_at() (
     pq_ready
 )
 
+# ── which liboqs was proven ───────────────────────────────────────────────────
+# `scripts/build_liboqs.sh` writes `nmesh-liboqs.lock` beside every build: the
+# release, commit and archive digest it checked the source against. A library
+# in a prefix without the current one was built before sources were checked
+# (BUGSVULNS 92, 93), or from another lock, and is neither reused nor kept.
+# A library the system provides (a distribution's package, Homebrew) carries
+# no stamp and needs none: its packager signed it.
+lock_identity() {
+    grep -E '^LIBOQS_(VERSION|COMMIT|TARBALL_SHA256)=' "$1" 2>/dev/null | sort
+}
+
+liboqs_in_prefix() {
+    local found
+    for found in "$1"/lib/liboqs.* "$1"/lib64/liboqs.*; do
+        [ -e "$found" ] && return 0
+    done
+    return 1
+}
+
+liboqs_proven_at() {
+    [ -f "$1/nmesh-liboqs.lock" ] || return 1
+    [ "$(lock_identity "$1/nmesh-liboqs.lock")" = "$(lock_identity "$NMESH_TREE/scripts/liboqs.lock")" ]
+}
+
+# A copy that another account could have rewritten since it was stamped is no
+# better than an unstamped one: the stamp is a file like any other. Owned by
+# this account or by root, and writable by neither group nor others.
+liboqs_writable_by_others() {
+    [ -n "$(find "$1" -maxdepth 3 ! -type l \( -perm -0002 -o -perm -0020 \) -print 2>/dev/null | head -n 1)" ] \
+        && return 0
+    [ -n "$(find "$1" -maxdepth 3 ! -user "$(id -u)" ! -user 0 -print 2>/dev/null | head -n 1)" ]
+}
+
+liboqs_unproven_at() {
+    liboqs_in_prefix "$1" && ! liboqs_proven_at "$1"
+}
+
+# One job per core OOM-kills the build on machines with many cores but little
+# RAM (~1.5 GB per compile unit) — cap jobs by available RAM.
+liboqs_build_jobs() {
+    local jobs mem
+    jobs="$(cpu_count)"
+    mem="$(available_mem_mb || true)"
+    if [ -n "${mem:-}" ] && [ "$mem" -gt 0 ]; then
+        mem=$(( mem / 1500 ))
+        [ "$mem" -ge 1 ] || mem=1
+        [ "$mem" -lt "$jobs" ] && jobs="$mem"
+    fi
+    echo "$jobs"
+}
+
+build_liboqs_into() {
+    local prefix="$1" jobs build_dir
+    jobs="$(liboqs_build_jobs)"
+    info "Building liboqs with $jobs parallel job(s) (capped by available RAM)…"
+    build_dir="${LIBOQS_BUILD_DIR:-$(node_home)/_oqs_build}"
+    LIBOQS_BUILD_DIR="$build_dir" bash "$NMESH_TREE/scripts/build_liboqs.sh" "$prefix" "$jobs" || return 1
+    rm -rf "$build_dir"
+}
+
+# A library built before its source was checked is rebuilt next to it and
+# swapped in only once the new one answers. A node that cannot rebuild — no
+# network, no compiler — keeps what it has and says so: a node with no crypto
+# at all is the one outcome worse than this.
+replace_unproven_liboqs() {
+    local next="$OQS_PREFIX.next" old="$OQS_PREFIX.unproven"
+    warn "the liboqs in $OQS_PREFIX was built before its source was checked — rebuilding it from scripts/liboqs.lock"
+    rm -rf "$next"
+    if build_liboqs_into "$next" && liboqs_usable_at "$next" && liboqs_proven_at "$next"; then
+        rm -rf "$old"
+        mv "$OQS_PREFIX" "$old" && mv "$next" "$OQS_PREFIX" && rm -rf "$old"
+        ok "liboqs rebuilt from a checked source"
+        cache_liboqs "$OQS_PY_VER"
+        return 0
+    fi
+    rm -rf "$next"
+    warn "could not rebuild liboqs — keeping the one built before sources were checked; this node will try again at its next start"
+    return 1
+}
+
 # Where a built liboqs is kept so the *next* install does not rebuild it. Keyed
 # by the wrapper version: a wrapper bump must recompile, since the two have to
 # stay in lockstep around the crypto.
@@ -440,11 +524,13 @@ cache_liboqs() {
     cache="$(liboqs_cache_dir "${1:-}")"
     [ "$cache" != "$OQS_PREFIX" ] || return 0
     mkdir -p "$cache" 2>/dev/null || return 0
+    liboqs_proven_at "$OQS_PREFIX" || return 0
     for part in lib lib64 include; do
         [ -d "$OQS_PREFIX/$part" ] || continue
         rm -rf "$cache/$part" 2>/dev/null || true
         cp -a "$OQS_PREFIX/$part" "$cache/" 2>/dev/null || return 0
     done
+    cp "$OQS_PREFIX/nmesh-liboqs.lock" "$cache/" 2>/dev/null || return 0
     # The library is not a secret and the next install may run as someone else.
     chmod -R a+rX "$cache" 2>/dev/null || true
     return 0
@@ -474,6 +560,8 @@ adopt_liboqs() {
     local candidate
     while read -r candidate; do
         [ -n "$candidate" ] || continue
+        liboqs_proven_at "$candidate" || continue
+        liboqs_writable_by_others "$candidate" && continue
         liboqs_usable_at "$candidate" || continue
         mkdir -p "$OQS_PREFIX"
         # lib on most systems, lib64 on Fedora/openSUSE — copy whichever exist,
@@ -484,6 +572,7 @@ adopt_liboqs() {
             [ -d "$candidate/$part" ] || continue
             cp -a "$candidate/$part" "$OQS_PREFIX/" 2>/dev/null && copied=true
         done
+        cp "$candidate/nmesh-liboqs.lock" "$OQS_PREFIX/" 2>/dev/null || copied=false
         [ "$copied" = true ] || continue
         # Copying is not proof: re-check *at the destination* before believing
         # it — named explicitly rather than through the ambient
@@ -702,7 +791,8 @@ OQS_PREFIX="${OQS_INSTALL_PATH:-$(node_home)/_oqs}"
 # would be built in one place and looked for in another.
 export OQS_INSTALL_PATH="$OQS_PREFIX"
 
-if pq_ready && crypto_ready && python -c "import pytest, pytest_asyncio" >/dev/null 2>&1; then
+if pq_ready && ! liboqs_unproven_at "$OQS_PREFIX" && crypto_ready \
+   && python -c "import pytest, pytest_asyncio" >/dev/null 2>&1; then
     ok "Dependencies already installed (fast start)"
 else
     info "Installing Python dependencies…"
@@ -772,11 +862,14 @@ else
         brew list liboqs &>/dev/null || brew install liboqs || true
     fi
 
-    # The wrapper version decides which liboqs release we need — both for
-    # reusing one and for building it, so it is resolved before either.
+    # The wrapper version keys the cache, for reusing a build and for keeping
+    # one, so it is resolved before either.
+    OQS_PY_VER=$(python -c "import importlib.metadata as m; print(m.version('liboqs-python'))") \
+        || fail "liboqs-python is not installed"
+    if liboqs_unproven_at "$OQS_PREFIX"; then
+        replace_unproven_liboqs || true
+    fi
     if ! pq_ready; then
-        OQS_PY_VER=$(python -c "import importlib.metadata as m; print(m.version('liboqs-python'))") \
-            || fail "liboqs-python is not installed"
         if adopt_liboqs "$OQS_PY_VER"; then
             ok "Reused the liboqs already built in $ADOPTED_FROM (no recompile)"
         fi
@@ -787,23 +880,7 @@ else
         # stay in lockstep — a mismatched wrapper/library pair around the
         # crypto is not acceptable, even when it happens to load.
         info "Building liboqs from source, verified against scripts/liboqs.lock (one-time — a few minutes)…"
-
-        # One job per core OOM-kills the build on machines with many cores but
-        # little RAM (~1.5 GB per compile unit) — cap jobs by available RAM.
-        BUILD_JOBS="$(cpu_count)"
-        MEM_MB="$(available_mem_mb || true)"
-        if [ -n "${MEM_MB:-}" ] && [ "$MEM_MB" -gt 0 ]; then
-            MEM_JOBS=$(( MEM_MB / 1500 ))
-            [ "$MEM_JOBS" -ge 1 ] || MEM_JOBS=1
-            if [ "$MEM_JOBS" -lt "$BUILD_JOBS" ]; then BUILD_JOBS="$MEM_JOBS"; fi
-        fi
-        info "Building liboqs with $BUILD_JOBS parallel job(s) (capped by available RAM)…"
-
-        BUILD_DIR="${LIBOQS_BUILD_DIR:-$(node_home)/_oqs_build}"
-        LIBOQS_BUILD_DIR="$BUILD_DIR" bash ./scripts/build_liboqs.sh "$OQS_PREFIX" "$BUILD_JOBS" \
-            || fail "liboqs could not be built (see output above)"
-        # The install lives in $OQS_PREFIX — the build tree is dead weight.
-        rm -rf "$BUILD_DIR"
+        build_liboqs_into "$OQS_PREFIX" || fail "liboqs could not be built (see output above)"
         # Keep a copy so the next install — another prefix, another node on this
         # machine — reuses it instead of spending these minutes again.
         cache_liboqs "$OQS_PY_VER"

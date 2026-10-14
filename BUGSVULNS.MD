@@ -4143,3 +4143,23 @@ where a node holds no link (93 of 100 on average over four seeds, the same as
 without, for 4 to 6 packets per second per node at rest instead of 2.4 to 4.4). And there is nothing larger than 240 nodes to measure on this
 machine: the simulator needs more cores than the 8 it has once the mesh is
 chatty, and at rest it is the first number to check again.
+
+## 109 — medium — Two builds raced to publish the base image, and the older won
+
+> **Status — fixed.** Tests: `tests/test_workflows_pinned.py`
+> (`test_what_publishes_latest_does_it_one_run_at_a_time`).
+
+**Where** — `.github/workflows/base-image.yml`; the `docker` job of `ci.yml`
+pushes the application image's `:latest` the same way.
+
+**What happens** — merging two PRs that both touched the base image a minute
+apart started two builds. The one from the older commit finished second, so
+`nmesh-base:latest` went back to a build from before liboqs was compiled from a
+checked source, without `/opt/liboqs`; every application build after it failed
+on the missing directory. Nothing in the image says which commit it came from,
+so the only symptom was that later builds broke.
+
+**Fixed** — both publishers run in a concurrency group that never cancels a run
+in progress, so they finish in the order they were queued and the newest commit
+publishes last. The base was republished from `main` by hand.
+

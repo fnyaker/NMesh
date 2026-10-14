@@ -353,3 +353,16 @@ docker/           relay-node image and compose file
 Docs/             guides (setup, transports, console, connector, packets)
 tests/            unit tests + tests/integration (real nodes)
 ```
+
+## License
+
+NMesh is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License, version 3, as published by the Free
+Software Foundation. It is distributed in the hope that it will be useful, but
+**without any warranty**; see [`LICENSE`](LICENSE) for the full text.
+
+The tree ships its license wherever it goes — the updater, Fleet's
+provisioning payload, the Docker image and the zipapp all carry `LICENSE`.
+Its two runtime dependencies are compatible with it: `liboqs-python` and
+liboqs are MIT, `cryptography` is Apache-2.0 or BSD.
+
