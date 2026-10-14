@@ -1640,3 +1640,14 @@ def test_the_topology_legend_waits_for_a_link_to_explain():
     painter = console.CONSOLE_PAGE_JS.split("function paintFirstRun(state){", 1)[1]
     painter = painter.split("\n}\n", 1)[0]
     assert 'legend.hidden = !card.hidden' in painter
+
+
+def test_every_tab_has_a_name_even_when_its_label_is_hidden():
+    """On a phone the label under an icon is hidden, and a button with no text
+    has no name for a screen reader."""
+    from src.webassets import console
+    tabs = re.findall(r'<button role="tab"[^>]*data-label=[^>]*>', console.INDEX_HTML)
+    assert len(tabs) >= 4
+    for tab in tabs:
+        label = re.search(r'data-label="([^"]+)"', tab).group(1)
+        assert f'aria-label="{label}"' in tab

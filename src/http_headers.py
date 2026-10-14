@@ -23,7 +23,7 @@ SECURITY_HEADERS = {
     # The terminal's clipboard is the page's own, so it stays allowed to self.
     "Permissions-Policy": (
         "camera=(), microphone=(), geolocation=(), usb=(), serial=(), "
-        "bluetooth=(), hid=(), payment=(), display-capture=(), "
+        "hid=(), payment=(), display-capture=(), "
         "clipboard-read=(self), clipboard-write=(self)"
     ),
     # Nothing served here is for another site to open, embed or read.

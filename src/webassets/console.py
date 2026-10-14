@@ -46,10 +46,10 @@ INDEX_HTML = """<!doctype html>
     <a class="brand" href="/"><span class="mark" aria-hidden="true">NM</span>
       <span><b>NMesh</b><span>Console</span></span></a>
     <nav id="nav" class="nav" role="tablist" aria-label="Console sections">
-      <button role="tab" data-tab="overview" data-label="Overview" aria-controls="panel-overview" aria-selected="true"><span class="lbl">Overview</span></button>
-      <button role="tab" data-tab="network" data-label="Network" aria-controls="panel-network" aria-selected="false"><span class="lbl">Network</span><span id="nav-peers" class="tail"></span></button>
-      <button role="tab" data-tab="apps" data-label="Apps" aria-controls="panel-apps" aria-selected="false"><span class="lbl">Apps</span></button>
-      <button role="tab" data-tab="settings" data-label="Settings" aria-controls="panel-settings" aria-selected="false"><span class="lbl">Settings</span></button>
+      <button role="tab" data-tab="overview" data-label="Overview" aria-label="Overview" aria-controls="panel-overview" aria-selected="true"><span class="lbl">Overview</span></button>
+      <button role="tab" data-tab="network" data-label="Network" aria-label="Network" aria-controls="panel-network" aria-selected="false"><span class="lbl">Network</span><span id="nav-peers" class="tail"></span></button>
+      <button role="tab" data-tab="apps" data-label="Apps" aria-label="Apps" aria-controls="panel-apps" aria-selected="false"><span class="lbl">Apps</span></button>
+      <button role="tab" data-tab="settings" data-label="Settings" aria-label="Settings" aria-controls="panel-settings" aria-selected="false"><span class="lbl">Settings</span></button>
       <p class="eyebrow nav-label">Applications</p>
       <div id="app-links"></div>
     </nav>
@@ -654,10 +654,8 @@ INDEX_HTML = """<!doctype html>
           <div class="card-head"><div class="grow"><h2>What this node is called</h2>
             <div class="sub">A name you choose, beside the id you cannot</div></div></div>
           <div class="card-body">
-            <p class="muted small">The id below is this node's identity: it comes from its
-              signing key and never changes. The name is only a label — it is signed and
-              gossiped so nobody can put it on somebody else's node, but names are not
-              unique, so the id is what you check before you trust anything.</p>
+            <p class="muted small">The id is this node's identity and never changes. A
+              name is only a label, and not unique: check the id before you trust anything.</p>
             <div class="form-grid">
               <label class="field"><span>Name</span>
                 <input id="pseudo-input" type="text" maxlength="50" autocomplete="off"

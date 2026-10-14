@@ -696,7 +696,7 @@ skeleton. A spinner with no end is a bug report nobody can act on.
 - **One header policy** for the console and chat's server
   (`src/http_headers.py`): the CSP above, `nosniff`, no referrer, `no-store`,
   a `Permissions-Policy` refusing camera, microphone, location, USB, serial,
-  Bluetooth, HID, payment and screen capture (the terminal keeps its own
+  HID, payment and screen capture (the terminal keeps its own
   clipboard), and cross-origin isolation (`COOP`/`CORP` same-origin, `COEP`
   `require-corp`). The `Server` line says `nmesh-console` and nothing about the
   interpreter. **No HSTS, on purpose**: on a self-signed certificate it turns the
