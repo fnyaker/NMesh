@@ -3973,3 +3973,33 @@ answered 400, 404 or 413 or a refusal, and the node answered afterwards.
 `POST /api/fleet/invite` for a node that does not answer waits up to
 `_INVITE_WAIT` for the answer by design.
 
+## 104 — high — One silent connection stopped the console for everybody
+
+> **Status — fixed.** Tests: `tests/test_http_server.py` (the silent client
+> fails with the handshake back in `accept()`; the ceiling fails with the
+> semaphore removed). Found by `tests/tools/api_fuzz.py` leaving a traceback in
+> the log, then followed up by hand.
+
+**Where** — `src/webconsole.py`: the server's creation; the same default
+`ThreadingHTTPServer` in `src/apps/chat_web.py` and `src/apps/mcp.py`.
+
+**What happens** — the console wraps its *listening* socket for TLS, and a
+wrapped listening socket handshakes inside `accept()`. `ThreadingHTTPServer`
+accepts in one thread, so a client that connects to the port and sends nothing
+holds that thread: every other request, a signed-in operator's included, waited
+behind it. It was not let go after 130 s, and the handlers set no timeout, so it
+was the client's choice when. No credential is needed. The console binds to
+loopback by default, and `--console-host 0.0.0.0` is the documented way to
+reach it from another machine.
+
+Two lesser faults came with it. Connections were not bounded: a thread each, for
+anyone who could connect. And a client that reset a connection made the default
+`handle_error` write a traceback of about 1.4 kB to stderr: 500 resets, 723 kB of
+log, with no password involved.
+
+**Fixed** — `HardenedServer` (`src/http_server.py`), used by all three servers:
+the handshake is the connection's own (`do_handshake_on_connect=False`), handlers
+set `timeout = CONNECTION_TIMEOUT` (30 s), at most `MAX_CONNECTIONS` (256) are
+served at once and a further one is closed before it costs a thread, and a client
+that hung up is not logged. A client whose hello arrives three seconds late is
+served; one that never speaks is closed at the timeout.

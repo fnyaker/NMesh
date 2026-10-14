@@ -267,6 +267,8 @@ docker run --rm -v "$PWD:/app" -w /app ghcr.io/fnyaker/nmesh-base:latest pytest 
 tests/
 ├── test_packet.py / test_crypto.py / test_cert.py     — primitives
 ├── test_node.py / test_routing.py / test_handshake.py — node & routing
+├── test_http_server.py                                — the console against a client that
+│     connects and says nothing, that connects in numbers, or hangs up mid-request
 ├── test_loop_backtrack.py                             — a routed packet that
 │     comes back round a cycle leaves by another neighbour, and what that may
 │     cost is bounded (replays, fanout, the book)
