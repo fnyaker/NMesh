@@ -3166,21 +3166,29 @@ class MeshNode:
 
         Identities keep the order they were first seen in, so a list on a
         screen does not reshuffle itself because two links swapped rank."""
-        best: dict[NodeID, tuple[float, _Peer]] = {}
+        best: dict[NodeID, _Peer] = {}
+        scores: dict[NodeID, float] = {}
         order: list[NodeID] = []
         for peer in self._peers:
             if (peer is exclude or peer.authenticated_id is None
                     or peer.session is None):
                 continue
             node_id = peer.authenticated_id
-            score = self._link_score(peer)
             held = best.get(node_id)
             if held is None:
                 order.append(node_id)
-                best[node_id] = (score, peer)
-            elif score > held[0]:
-                best[node_id] = (score, peer)
-        return [best[node_id][1] for node_id in order]
+                best[node_id] = peer
+                continue
+            # A score only ever settles a choice between two links to one
+            # identity, and this runs for every routed packet over every link:
+            # scoring each link as it is met was most of what forwarding cost.
+            if node_id not in scores:
+                scores[node_id] = self._link_score(held)
+            score = self._link_score(peer)
+            if score > scores[node_id]:
+                best[node_id] = peer
+                scores[node_id] = score
+        return [best[node_id] for node_id in order]
 
     # -- redundant links --------------------------------------------------
     #

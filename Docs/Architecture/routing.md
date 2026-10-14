@@ -127,6 +127,17 @@ This is not a progress rule. "Forward only to a node closer than this one" would
 break chains, where the next hop is farther by definition; what a node adds is
 memory of where it already sent a packet.
 
+### What a routed packet costs at each hop
+
+`_authenticated_peers` (one live link per identity, the best of them) runs for
+every routed packet. A link's score decides only between two links to the **same**
+identity, so the score is computed only when a second link to an identity shows
+up; scoring every link on every call was most of the CPU forwarding used. On 120
+nodes over eight processes the profile of one worker went from 32 s to 2.4 s in
+that function, and the workers' CPU at rest fell by about 16 % (three alternating
+runs, noisy). An idle node at that size sends about 30 packets a second and uses
+about a twentieth of a core.
+
 ### A return path learned from traffic (`_route_hints`)
 
 XOR proximity is only a **hypothesis** about an overlay we have not finished

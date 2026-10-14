@@ -34,7 +34,7 @@ async def worker(src: str) -> None:
     from src.tcp_transport import TCPServer, TCPTransport
     from src.transport_manager import TransportManager
 
-    nodes, got, lags = [], [], []
+    nodes, got, lags, prof = [], [], [], []
 
     async def monitor():
         while True:
@@ -90,6 +90,16 @@ async def worker(src: str) -> None:
             return True
         if op == "links":
             return len({p.authenticated_id for p in node._peers if p.session is not None and p.authenticated_id})
+        if op == "prof_start":
+            import cProfile
+            prof.append(cProfile.Profile()); prof[0].enable()
+            return True
+        if op == "prof_stop":
+            import io, pstats
+            prof[0].disable()
+            buf = io.StringIO()
+            pstats.Stats(prof[0], stream=buf).sort_stats("tottime").print_stats(req.get("top", 14))
+            return buf.getvalue()
         if op == "counters":
             live = [n for n in nodes if n._running]
             return {"out": sum(n._metrics.total.pkts_out for n in live),
@@ -112,6 +122,16 @@ async def worker(src: str) -> None:
 
 
 # ---------------------------------------------------------------- parent ----
+
+def _cpu_seconds(pid: int) -> float:
+    """User plus system time the process has used, from /proc (Linux)."""
+    try:
+        with open(f"/proc/{pid}/stat") as handle:
+            fields = handle.read().rsplit(")", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, ValueError):
+        return 0.0
+
 
 class Worker:
     def __init__(self, proc):
@@ -174,12 +194,17 @@ async def parent(args) -> None:
         return sum(r["out"] for r in rows), sum(r["relayed"] for r in rows)
 
     c0 = await counters()
+    idle_cpu0 = sum(_cpu_seconds(w.proc.pid) for w in workers)
     await asyncio.sleep(args.settle)
     c1 = await counters()
+    idle_cores = (sum(_cpu_seconds(w.proc.pid) for w in workers) - idle_cpu0) / args.settle
     print(f"idle: {(c1[0] - c0[0]) / args.settle / len(nodes):.1f} packets/s/node sent, "
-          f"{(c1[1] - c0[1]) / args.settle / len(nodes):.2f} relayed for others", flush=True)
+          f"{(c1[1] - c0[1]) / args.settle / len(nodes):.2f} relayed for others, "
+          f"workers used {idle_cores:.2f} cores", flush=True)
     await asyncio.gather(*[w.call(op="lag") for w in workers])      # reset
     c2 = await counters()
+    cpu0 = sum(_cpu_seconds(w.proc.pid) for w in workers)
+    wall0 = time.monotonic()
 
     alive = list(range(len(nodes)))
     if args.kill:
@@ -189,6 +214,8 @@ async def parent(args) -> None:
         print(f"killed {len(dead)} nodes, {len(alive)} left; waiting {args.heal}s", flush=True)
         await asyncio.sleep(args.heal)
 
+    if args.profile:
+        await workers[0].call(op="prof_start")
     results, retried = [], []
     for _ in range(args.pairs):
         for _try in range(1000):
@@ -209,9 +236,12 @@ async def parent(args) -> None:
         retried.append(last is not None and last != first)
         results.append(got)
     lags = await asyncio.gather(*[w.call(op="lag") for w in workers])
+    if args.profile:
+        print((await workers[0].call(op="prof_stop", top=args.profile)).strip(), flush=True)
     c3 = await counters()
+    cores = (sum(_cpu_seconds(w.proc.pid) for w in workers) - cpu0) / (time.monotonic() - wall0)
     print(f"during the {args.pairs} first contacts: {c3[0] - c2[0]} packets sent in all, "
-          f"{c3[1] - c2[1]} of them relayed", flush=True)
+          f"{c3[1] - c2[1]} of them relayed, workers used {cores:.2f} cores", flush=True)
     ok = sorted(r for r in results if r is not None)
     fast = sum(1 for r in ok if r < 1.0)
     print(f"{'killed ' + str(args.kill) if args.kill else 'healthy'}: first contacts {len(ok)}/{args.pairs} within {args.wait:.0f}s, "
@@ -237,5 +267,7 @@ if __name__ == "__main__":
     ap.add_argument("--heal", type=float, default=15.0)
     ap.add_argument("--kill", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--profile", type=int, default=0, metavar="N",
+                    help="print the top N functions of the first worker while the pairs run")
     args = ap.parse_args()
     asyncio.run(worker(args.src) if args.worker else parent(args))
