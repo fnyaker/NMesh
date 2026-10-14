@@ -4003,3 +4003,11 @@ set `timeout = CONNECTION_TIMEOUT` (30 s), at most `MAX_CONNECTIONS` (256) are
 served at once and a further one is closed before it costs a thread, and a client
 that hung up is not logged. A client whose hello arrives three seconds late is
 served; one that never speaks is closed at the timeout.
+
+**The first fix was not enough** — with only the total bound, one client opening
+256 requests it never finishes (a byte every few seconds keeps the timeout from
+firing) took every slot and the console refused everybody, which is a different
+way to the same outage. `MAX_PER_ADDRESS` (32) bounds one address; measured
+against a real node, 300 attempts from one address left 32 open and a request
+from another machine was served. An attacker with many addresses is not stopped
+by this, and the console is not meant to face one.

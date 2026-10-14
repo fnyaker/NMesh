@@ -96,6 +96,37 @@ class TestManyClients:
             await node.stop()
 
 
+class TestOneClientCannotTakeEverySlot:
+    async def test_the_others_are_still_served(self, monkeypatch):
+        """The whole point of a per-address bound: the total ceiling alone turns
+        one client's unfinished requests into the console being down."""
+        import http.client
+        import ssl
+        monkeypatch.setattr(http_server, "MAX_PER_ADDRESS", 3)
+        node, console = await _tls_console()
+        held = [_silent(console) for _ in range(3)]
+        try:
+            await asyncio.sleep(0.3)
+            extra = _silent(console)             # a fourth from the same address
+            assert await asyncio.to_thread(_closed_within, extra, 3.0)
+            extra.close()
+
+            def from_another_address():
+                ctx = ssl._create_unverified_context()
+                conn = http.client.HTTPSConnection(
+                    "127.0.0.1", console.port, timeout=5, context=ctx,
+                    source_address=("127.0.0.2", 0))
+                conn.request("GET", "/")
+                return conn.getresponse().status
+            status = await asyncio.wait_for(asyncio.to_thread(from_another_address), 6)
+            assert status == 200
+        finally:
+            for sock in held:
+                sock.close()
+            console.stop()
+            await node.stop()
+
+
 class TestAClientThatHangsUp:
     def _raise(self, server, exc):
         try:

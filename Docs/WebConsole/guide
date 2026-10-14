@@ -705,8 +705,10 @@ skeleton. A spinner with no end is a bug report nobody can act on.
   connection's own thread, **not in the accepting one** — a listening socket
   wrapped for TLS handshakes inside `accept()`, so a client that connected and
   said nothing used to stop the console for everybody until it hung up. A
-  connection silent for 30 s is closed, at most 256 are served at once (past
-  that a new one is closed before it costs a thread), and a client that hangs up
+  connection silent for 30 s is closed, at most 256 are served at once, and no
+  one address holds more than 32 of them (past either, a new connection is closed
+  before it costs a thread; the total alone let one client's unfinished requests
+  take every slot), and a client that hangs up
   mid-request is not written to stderr (one traceback of about 1.4 kB per
   connection, for whoever cared to reset them).
 - The HTTP server runs in a dedicated thread and **marshals** every interaction
