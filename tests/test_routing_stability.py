@@ -950,3 +950,146 @@ class TestAnIdThatNeverAnswers:
 
 async def _empty():
     return []
+
+
+# ---------------------------------------------------------------------------
+# 5 — A first contact leaves by two neighbours
+# ---------------------------------------------------------------------------
+
+class TestAFirstHandshakeTakesTwoWays:
+    async def _founder(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._cert_store.add(node._identity.self_signed_cert())
+        node._cert_store.add_root(node.id)
+        return node
+
+    async def test_a_second_neighbour_carries_the_same_packet(self):
+        from src.node import E2E_HANDSHAKE
+        node = await self._founder()
+        target = NodeID(os.urandom(20))
+        links = [await _attach(node, NodeID(os.urandom(20))) for _ in range(3)]
+        await node._initiate_e2e_handshake(target)
+        seen = [[p for p in fake.sent if p.type == E2E_HANDSHAKE] for _, fake in links]
+        carriers = [sent for sent in seen if sent]
+        assert len(carriers) == 2, "exactly two neighbours carry it"
+        assert carriers[0][0].msg_id == carriers[1][0].msg_id
+
+    async def test_a_direct_link_to_the_target_is_not_duplicated(self):
+        from src.node import E2E_HANDSHAKE
+        node = await self._founder()
+        target = NodeID(os.urandom(20))
+        _, direct = await _attach(node, target)
+        _, other = await _attach(node, NodeID(os.urandom(20)))
+        await node._initiate_e2e_handshake(target)
+        assert [p.type for p in direct.sent if p.type == E2E_HANDSHAKE] == [E2E_HANDSHAKE]
+        assert not [p for p in other.sent if p.type == E2E_HANDSHAKE]
+
+    async def test_one_neighbour_alone_still_gets_it_once(self):
+        from src.node import E2E_HANDSHAKE
+        node = await self._founder()
+        _, fake = await _attach(node, NodeID(os.urandom(20)))
+        await node._initiate_e2e_handshake(NodeID(os.urandom(20)))
+        assert len([p for p in fake.sent if p.type == E2E_HANDSHAKE]) == 1
+
+
+# ---------------------------------------------------------------------------
+# 6 — Links are spread over distance, and a lookup does not buy one by itself
+# ---------------------------------------------------------------------------
+
+def _at(node: MeshNode, band: int, low: int = 0) -> NodeID:
+    """An id whose XOR distance to ``node`` has exactly ``band`` bits."""
+    value = int.from_bytes(node.id.raw, "big") ^ ((1 << (band - 1)) | low)
+    return NodeID(value.to_bytes(20, "big"))
+
+
+class TestALookupDoesNotBuyALinkPastTheSoftLimit:
+    async def _crowded(self, monkeypatch, links=3):
+        import src.node as nodemod
+        monkeypatch.setattr(nodemod, "_UPGRADE_LINK_SOFT", links)
+        node = MeshNode(transport_manager=make_manager())
+        for band in (4, 5, 6):                     # the three nearest links
+            await _attach(node, _at(node, band))
+        asked = []
+
+        async def fake_ensure(target, timeout=5.0):
+            asked.append(target)
+        monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
+        return node, asked
+
+    async def test_a_far_node_asked_about_stays_a_relayed_one(self, monkeypatch):
+        node, asked = await self._crowded(monkeypatch)
+        node._maybe_upgrade_path(_at(node, 150), conversation=False)
+        await asyncio.sleep(0.05)
+        assert asked == []
+
+    async def test_a_node_nearer_than_the_worst_neighbour_still_gets_one(self, monkeypatch):
+        node, asked = await self._crowded(monkeypatch)
+        target = _at(node, 3)
+        node._maybe_upgrade_path(target, conversation=False)
+        await asyncio.sleep(0.05)
+        assert asked == [target]
+
+    async def test_a_conversation_always_does(self, monkeypatch):
+        node, asked = await self._crowded(monkeypatch)
+        target = _at(node, 150)
+        node._maybe_upgrade_path(target, conversation=True)
+        await asyncio.sleep(0.05)
+        assert asked == [target]
+
+    async def test_below_the_limit_nothing_changes(self, monkeypatch):
+        node, asked = await self._crowded(monkeypatch, links=10)
+        target = _at(node, 150)
+        node._maybe_upgrade_path(target, conversation=False)
+        await asyncio.sleep(0.05)
+        assert asked == [target]
+
+
+class TestFingers:
+    def _node_knowing(self, bands):
+        node = MeshNode(transport_manager=make_manager())
+        known = {}
+        for band, count in bands.items():
+            for low in range(count):
+                node_id = _at(node, band, low)
+                node._routing.add(node_id, [f"tcp://192.0.2.{band % 250 + 1}:{9000 + low}"], None)
+                known.setdefault(band, []).append(node_id)
+        return node, known
+
+    async def test_each_short_band_is_offered_once_farthest_first(self):
+        node, known = self._node_knowing({159: 5, 158: 5, 150: 5, 100: 5, 20: 5, 3: 2})
+        got = node._finger_candidates()
+        bands = [node._id.distance(i).bit_length() for i in got]
+        assert bands == sorted(bands, reverse=True)
+        assert len(got) == len(set(bands)) == min(4, 6)
+        assert bands[0] == 159
+
+    async def test_a_band_with_enough_links_is_left_alone(self):
+        node, known = self._node_knowing({159: 5, 158: 5})
+        await _attach(node, known[159][0])
+        await _attach(node, known[159][1])
+        got = node._finger_candidates()
+        assert [node._id.distance(i).bit_length() for i in got] == [158]
+
+    async def test_a_node_already_linked_is_not_offered(self):
+        node, known = self._node_knowing({159: 1})
+        await _attach(node, known[159][0])
+        assert node._finger_candidates() == []
+
+    async def test_an_empty_table_offers_nothing(self):
+        node = MeshNode(transport_manager=make_manager())
+        assert node._finger_candidates() == []
+
+    async def test_a_hostile_table_costs_a_bounded_cycle(self):
+        node, _ = self._node_knowing({band: 3 for band in range(1, 160)})
+        assert len(node._finger_candidates()) <= 4
+
+    async def test_one_that_just_refused_is_not_offered_again_until_its_back_off_ends(self):
+        import time
+        node, known = self._node_knowing({159: 3})
+        refused = max(known[159], key=lambda i: node._routing.get(i).last_seen)
+        assert node._finger_candidates() == [refused], "the most recently seen leads"
+        node._neighbor_retry[refused] = (1, time.monotonic() + 60)
+        got = node._finger_candidates()
+        assert len(got) == 1 and got[0] != refused, "the band is still filled, by another"
+        node._neighbor_retry[refused] = (1, time.monotonic() - 1)
+        assert node._finger_candidates() == [refused]

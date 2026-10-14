@@ -1217,6 +1217,12 @@ per container verb: that would be twenty entries in the dispatch table for one
 capability, and the capability is the gate. An operation that is not in the table
 is refused by name.
 
+The reads a Docker panel needs beyond the container list are operations too:
+`stats` (CPU share and memory of up to `MAX_STATS` running containers, sampled
+side by side and shown when they arrive), `volumes`, `networks`, and
+`remove_image` (a name that is not an image, or that contains `..` because it
+becomes part of a request path, never reaches the socket).
+
 **No new mesh packet type**: everything travels in `DATA`, section
 `builtin_id("fleet")`. The node's management plane is untouched.
 

@@ -430,6 +430,9 @@ async def main() -> None:
                     help="answer LAN relay-discovery beacons (be findable as a "
                          "relay by joiners on the same network)")
     ap.add_argument("--spool", default=None, help="also listen on a spool:// directory (store-and-forward)")
+    ap.add_argument("--veil", default=None, metavar="HOST:PORT",
+                    help="also listen as veil:// — TCP with nothing recognisable "
+                         "on the wire; set the shared key as veil.key in the config file")
     ap.add_argument("--console-host", default=None)
     ap.add_argument("--console-port", type=int, default=None)
     ap.add_argument("--connector-port", type=int, default=None,
@@ -503,6 +506,11 @@ async def main() -> None:
     listen_uris = [f"tcp://{listen_addr}"]
     if args.spool:
         listen_uris.append(f"spool://{args.spool}")
+    if args.veil:
+        if len(str(mgr.setting("veil", "key") or "")) >= 12:
+            listen_uris.append(f"veil://{args.veil.removeprefix('veil://')}")
+        else:
+            print("  Veil          : not listening — set veil.key (12 characters or more) in the config file")
     await node.start(listen_uris)
     # Discover public IP before printing so advertised URIs include it
     pub_ip = await node.discover_public_ip()
@@ -628,6 +636,8 @@ async def main() -> None:
         print(f"  Public IP     : {pub_ip}   (self-discovered)")
     for uri in node.advertised_uris():
         print(f"  Advertised    : {uri}")
+    if args.veil and f"veil://{args.veil.removeprefix('veil://')}" in listen_uris:
+        print(f"  Veil link     : veil://{args.veil.removeprefix('veil://')}   (no fixed bytes on the wire)")
     if args.spool:
         print(f"  Spool link    : spool://{args.spool}   (store-and-forward)")
     if args.udp is not None and not args.no_udp:

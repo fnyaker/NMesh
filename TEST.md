@@ -97,6 +97,41 @@ Among other things they check:
 
 ---
 
+## Measuring routing at scale
+
+A few hundred post-quantum nodes in one Python process are CPU-bound, and every
+timer in that process is then wrong: a result taken there says what the machine
+could do, not what the mesh does. `tests/tools/mesh_sim.py` runs the nodes over
+several processes (real TCP on loopback between all of them) and drives them
+from one:
+
+```bash
+python tests/tools/mesh_sim.py --procs 8 --nodes 120 --pairs 100 --wait 12
+python tests/tools/mesh_sim.py --procs 8 --nodes 120 --kill 0.3      # then heal
+```
+
+Each of `--pairs` random pairs that share no link is sent one first message. It
+prints how many arrived, how many needed the sender to retry (read from the
+sender's own handshake book, so it does not depend on the wall clock), the
+packets sent and relayed, and the **lateness of the slowest worker's event loop**.
+Past a loop lag p99 of a few hundred milliseconds the figures describe the
+machine. It is a measurement tool, not a test: nothing in `pytest` runs it.
+
+### Hostile requests at the console's API
+
+`tests/tools/api_fuzz.py` signs in to a **throwaway** node and sends every route
+the page's scripts call: first with no session (each must refuse), then with
+truncated, binary, deeply nested and oversized bodies and values of the wrong
+type. It reports a 5xx or a dropped connection, a route that answers without a
+session, and the node not answering afterwards. A relay's `502 {"error": …}` is
+a refusal and is counted as one.
+
+```bash
+python tests/tools/api_fuzz.py https://127.0.0.1:8787 <password> --rounds 3
+```
+
+---
+
 ## CI
 
 GitHub CI (`.github/workflows/ci.yml`) runs the unit tests and then the
@@ -232,9 +267,17 @@ docker run --rm -v "$PWD:/app" -w /app ghcr.io/fnyaker/nmesh-base:latest pytest 
 tests/
 ├── test_packet.py / test_crypto.py / test_cert.py     — primitives
 ├── test_node.py / test_routing.py / test_handshake.py — node & routing
+├── test_http_server.py                                — the console against a client that
+│     connects and says nothing, that connects in numbers, or hangs up mid-request
+├── test_loop_backtrack.py                             — a routed packet that
+│     comes back round a cycle leaves by another neighbour, and what that may
+│     cost is bounded (replays, fanout, the book)
 ├── test_routing_stability.py                          — routing regressions:
 │     the size of a FOUND_NODE, acquiring a route outside the receive loop,
-│     the return path learned from traffic, bounded teardown
+│     the return path learned from traffic, bounded teardown, a first
+│     links spread over distance and a lookup that stops buying links, a first
+│     handshake carried by two neighbours (and by one only when it has one,
+│     or a direct link to the target)
 ├── test_e2e.py / test_data.py                         — E2E encryption
 ├── test_invite*.py / test_cert_store.py               — invitations & trust,
 │     including the **rendezvous** that lets one reach a node with no address of
@@ -352,7 +395,12 @@ tests/
 │     the tail when a program outruns the link, and a held read answers on the
 │     byte, returns at once when there is backlog, gives up rather than parking
 │     for ever, and does not wait at all for a session nobody opened
-├── test_fleet_docker.py                               — docker and Portainer: what
+├── test_veil.py                                       — `veil://`: packets cross both ways;
+│     the wire has no repeated bytes and near-maximal entropy in both
+│     directions; a prober (nothing, HTTP, noise, zeros, 0xff) gets no byte; a
+│     wrong key, a replayed hello and a hello outside the clock window are not
+│     answered; the edge of the window is; unproved connections are bounded
+├── test_fleet_docker.py                               — docker and Portainer (usage samples, volumes, networks and image removal included, with hostile daemon answers): what
 │     may reach a socket or an argv (a name that is not a name is refused, never
 │     escaped; a container is *built* from a validated shape rather than
 │     forwarded, so `Privileged` cannot ride in; a bind mount is two absolute

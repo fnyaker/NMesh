@@ -27,6 +27,7 @@ from .manager import TransportManager
 BUILT_IN = (
     ("tcp", "tcp", "TCPTransport", "TCPServer"),
     ("udp", "udp", "UDPTransport", "UDPServer"),
+    ("veil", "veil", "VeilTransport", "VeilServer"),
     ("spool", "spool", "SpoolTransport", "SpoolServer"),
 )
 

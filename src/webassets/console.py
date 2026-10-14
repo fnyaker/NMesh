@@ -46,10 +46,10 @@ INDEX_HTML = """<!doctype html>
     <a class="brand" href="/"><span class="mark" aria-hidden="true">NM</span>
       <span><b>NMesh</b><span>Console</span></span></a>
     <nav id="nav" class="nav" role="tablist" aria-label="Console sections">
-      <button role="tab" data-tab="overview" data-label="Overview" aria-controls="panel-overview" aria-selected="true"><span class="lbl">Overview</span></button>
-      <button role="tab" data-tab="network" data-label="Network" aria-controls="panel-network" aria-selected="false"><span class="lbl">Network</span><span id="nav-peers" class="tail"></span></button>
-      <button role="tab" data-tab="apps" data-label="Apps" aria-controls="panel-apps" aria-selected="false"><span class="lbl">Apps</span></button>
-      <button role="tab" data-tab="settings" data-label="Settings" aria-controls="panel-settings" aria-selected="false"><span class="lbl">Settings</span></button>
+      <button role="tab" data-tab="overview" data-label="Overview" aria-label="Overview" aria-controls="panel-overview" aria-selected="true"><span class="lbl">Overview</span></button>
+      <button role="tab" data-tab="network" data-label="Network" aria-label="Network" aria-controls="panel-network" aria-selected="false"><span class="lbl">Network</span><span id="nav-peers" class="tail"></span></button>
+      <button role="tab" data-tab="apps" data-label="Apps" aria-label="Apps" aria-controls="panel-apps" aria-selected="false"><span class="lbl">Apps</span></button>
+      <button role="tab" data-tab="settings" data-label="Settings" aria-label="Settings" aria-controls="panel-settings" aria-selected="false"><span class="lbl">Settings</span></button>
       <p class="eyebrow nav-label">Applications</p>
       <div id="app-links"></div>
     </nav>
@@ -164,11 +164,12 @@ INDEX_HTML = """<!doctype html>
           <div class="card-body">
             <svg id="graph" class="mesh-graph clickable" viewBox="0 0 420 250" role="img"
                  aria-label="Connected nodes — click to open the full map"></svg>
-            <p class="tiny muted">A line is an authenticated direct link: amber while it
+            <details id="map-legend-text" class="tiny muted"><summary>What the lines mean</summary>
+              <p>A line is an authenticated direct link: amber while it
               loses probes, red and dashed once it is failing, doubled when MLO bundles
               it, dotted beside it while MLO looks for a second link. A faint dashed
               line is a session routed through a first hop — anything deeper is opaque
-              to this node by design.</p>
+              to this node by design.</p></details>
           </div>
         </article>
       </div>
@@ -653,10 +654,8 @@ INDEX_HTML = """<!doctype html>
           <div class="card-head"><div class="grow"><h2>What this node is called</h2>
             <div class="sub">A name you choose, beside the id you cannot</div></div></div>
           <div class="card-body">
-            <p class="muted small">The id below is this node's identity: it comes from its
-              signing key and never changes. The name is only a label — it is signed and
-              gossiped so nobody can put it on somebody else's node, but names are not
-              unique, so the id is what you check before you trust anything.</p>
+            <p class="muted small">The id is this node's identity and never changes. A
+              name is only a label, and not unique: check the id before you trust anything.</p>
             <div class="form-grid">
               <label class="field"><span>Name</span>
                 <input id="pseudo-input" type="text" maxlength="50" autocomplete="off"
@@ -1758,26 +1757,24 @@ function paintFirstRun(state){
   const card = $("first-run");
   if(!card) return;
   card.hidden = (state.node_count || 0) > 0;
+  const legend = $("map-legend-text");
+  if(legend) legend.hidden = !card.hidden;
   if(card.hidden) return;
   const standing = (state.trust || {}).standing;
   const joined = standing === "member" || standing === "root";
   $("first-run-title").textContent = joined
     ? "Nothing is connected right now"
-    : "This node is not in a network yet";
+    : "Join a network, or start one";
   $("first-run-sub").textContent = joined
     ? "This node can prove who it is — it has nobody to prove it to"
-    : "There are two ways in, and either one is fine";
+    : "";
   const steps = joined ? [
     "Add an address for a node you know, under Network → Add a node.",
     "Or leave it: an address this node already knows is redialled on its own, "
       + "and a link that comes back fills this page in.",
   ] : [
-    "Joining a network somebody else runs: ask them for a join ticket, then "
-      + "paste it under Network → Add a node.",
-    "Starting one here: create a join ticket on that same page and give it to "
-      + "the node you want to bring in. Whoever admits the first node becomes "
-      + "the network's root.",
-    "Either way, this page fills itself in as soon as a link authenticates.",
+    "Join: paste a join ticket from a member under Network → Add a node.",
+    "Start: create a ticket on that page and give it to the first node you bring in.",
   ];
   // Through setHTML: this repaints on the cadence, and assigning innerHTML on a
   // timer replaces the list under the reader's finger and drops any selection.
@@ -3042,11 +3039,8 @@ const STANDING_TEXT = {
                 + "from a node that is still a member.",
             level: "danger"},
   none:    {label: "Not a member of any network",
-            head: "This node has not joined a network.",
-            what: "It can prove nothing to anybody, so every link it tries is refused "
-                + "without a word — which looks exactly like a network fault. Use a "
-                + "join ticket from a member, or issue one here to start a network of "
-                + "your own.",
+            head: "Not in a network.",
+            what: "Every link is refused until it joins one or starts its own.",
             level: "danger"},
 };
 // The two broken standings, plus the deadline that has stopped being a
@@ -4815,7 +4809,11 @@ function ticketRoutes(data){
     ? "directly, on this network only" : "directly, from anywhere");
   if(data.relay_uri) routes.push("through another node, when that fails");
   if(!routes.length) return "";
-  return "It works " + routes.join(", and ") + ".";
+  const untried = data.uri && data.confirmed === false
+    ? " Nobody has connected to this node yet, so the address is untried: if the "
+      + "other machine cannot reach it, check that its port is open here."
+    : "";
+  return "It works " + routes.join(", and ") + "." + untried;
 }
 
 $("tk-make").addEventListener("click", (event) => withBusy(event.target, async () => {

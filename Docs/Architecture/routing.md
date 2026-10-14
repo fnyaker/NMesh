@@ -106,6 +106,59 @@ control plane** — `FIND_NODE`/`FOUND_NODE`, `STORE`/`FIND_VALUE`/`FOUND_VALUE`
 `PING`/`PONG` (per-link keepalive), the punch signalling, and catalogue gossip
 (re-stamped at every hop).
 
+### A copy that comes back round a cycle is sent another way (`_reroute_looped`)
+
+Excluding only the link a packet arrived on does not stop a cycle: relay A sends
+to B, B to C, and C — whose nearest neighbour other than B is A — back to A. The
+replay table used to drop that second visit, and with it the only copy alive.
+
+`_forward_packet` now notes, per packet (`_fwd_book`, keyed by the replay key,
+`_FWD_BOOK_MAX` entries, oldest out), the identities the packet arrived from and
+the ones it left to. A duplicate that arrives over an identity **not yet seen
+for that packet** is forwarded once more, to the XOR-nearest neighbour that is
+neither in the arrived set nor in the tried set. Three bounds keep this from
+being an amplifier: a duplicate over an identity already seen is a replay and is
+dropped as before; a packet leaves a node by at most `_ROUTE_SEND_FANOUT`
+distinct neighbours; and each duplicate buys at most one forward, which is what
+sending the packet fresh would have cost. Packets addressed to this node, TTL 1
+packets and packets this node never forwarded are dropped exactly as before.
+
+This is not a progress rule. "Forward only to a node closer than this one" would
+break chains, where the next hop is farther by definition; what a node adds is
+memory of where it already sent a packet.
+
+### What a routed packet costs at each hop
+
+`_authenticated_peers` (one live link per identity, the best of them) runs for
+every routed packet. A link's score decides only between two links to the **same**
+identity, so the score is computed only when a second link to an identity shows
+up; scoring every link on every call was most of the CPU forwarding used. On 120
+nodes over eight processes the profile of one worker went from 32 s to 2.4 s in
+that function, and the workers' CPU fell by about 16 % (three alternating runs,
+noisy), measured while the mesh was still settling, 30 to 70 s after it was
+built.
+
+What a node costs once the mesh has settled is a different, much smaller figure.
+At 30 nodes with about 20 links each, two minutes after the last join, an idle
+node sends about two packets a second, all of them keepalives (0.2 KiB/s). The
+first minutes cost far more: 29 KiB/s per node, of which about 19 are `FOUND_NODE`
+answers (26 kB each, a post-quantum certificate chain per entry) and about 10 are
+handshakes. A figure called "at rest" has to say how long after the last join it
+was taken.
+
+### A first handshake leaves by two neighbours (`_initiate_e2e_handshake`)
+
+A first contact crosses relays this node has never measured, and a relay that
+takes packets and drops them looks like any other until it has failed. So the
+E2E handshake, and only it, is sent to a second neighbour as well, whenever the
+first is not the target. Both copies carry the same `msg_id`; whichever arrives
+second is dropped as a replay by the far end (`_is_seen`), and the relays on the
+way see two independent walks. A direct link to the target gets the one copy.
+Measured on 100 nodes with 20 % relays dropping everything: 209 of 240 first
+contacts within 8 s against 192, and 16 retries against 64 (BUGSVULNS 102). It
+makes a bad relay cost a copy instead of `_E2E_RETRY_INTERVAL`; it does not find
+the relay.
+
 ### A return path learned from traffic (`_route_hints`)
 
 XOR proximity is only a **hypothesis** about an overlay we have not finished
@@ -353,6 +406,28 @@ then in a loop), but what it does depends on what we already hold:
   links (`_drop_failed_peer`, keepalive) restarts the search immediately.
 - `force=True` (join/`bootstrap`) imposes a full searching cycle whatever we
   already hold: a fresh table has to fill up.
+
+### Links are spread over distance, and a lookup does not buy one (`_finger_candidates`, `_UPGRADE_LINK_SOFT`)
+
+Greedy forwarding picks the neighbour nearest the target, and only makes
+progress when every distance band that has nodes in it holds a link; otherwise a
+packet reaches the node nearest the target *among our neighbours* and stops. A
+band is the bit length of the XOR distance to us.
+
+* **Spread.** In the quiet regime too, each cycle dials the most recently seen
+  identity of up to `_FINGER_DIALS` bands that hold fewer than `_FINGER_LINKS`
+  links, farthest band first. An identity in its retry back-off
+  (`_neighbor_retry`) is skipped, or a band with one unwilling node in it is
+  never filled. A hostile routing table costs one bounded cycle.
+* **No link by lookup.** `_maybe_upgrade_path` used to run for every routed
+  packet sent through a relay, so every lookup ended in a handshake with the
+  node it asked about and the mesh became a full mesh (BUGSVULNS 108). Past
+  `_UPGRADE_LINK_SOFT` links, a packet that is not a conversation only buys a
+  direct link to a node nearer than the least near of the maintained
+  neighbours.
+
+At rest on 240 nodes: about 3 packets per second per node and 25 to 30 links,
+against 20 packets per second and a full mesh before.
 
 ### Promoting a node seen in transit
 

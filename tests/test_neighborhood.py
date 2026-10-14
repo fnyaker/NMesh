@@ -105,6 +105,7 @@ async def test_quiet_once_the_floor_is_reached(monkeypatch):
 
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     monkeypatch.setattr(node, "kad_lookup", fake_lookup)
+    monkeypatch.setattr(node, "_finger_candidates", lambda: [])    # its own rule, tested apart
     await node._maintain_neighbors()
     assert attempted == []
     assert looked_up == []
@@ -148,6 +149,7 @@ async def test_losing_a_slot_resumes_the_search(monkeypatch):
 
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     monkeypatch.setattr(node, "kad_lookup", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(node, "_finger_candidates", lambda: [])
 
     await node._maintain_neighbors()
     assert attempted == []
@@ -380,4 +382,29 @@ async def test_keepalive_rearms_the_search_when_short(monkeypatch):
     node._neighbor_wakeup.clear()
     await _run_keepalive_once(node, monkeypatch, 1)
     assert node._neighbor_wakeup.is_set()
+    await node.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_node_still_fills_a_distance_band_it_has_no_link_in(monkeypatch):
+    node = MeshNode(transport_manager=make_manager())
+    for _ in range(_NEIGHBOR_FLOOR):
+        await _attach_peer(node, _id_at_distance(node, 8))
+    far = _id_at_distance(node, 4)
+    node._routing.add(far, ["fake://far"], b"k")
+    attempted, looked_up = [], []
+
+    async def fake_ensure(node_id, timeout=5.0):
+        attempted.append(node_id)
+        return None
+
+    async def fake_lookup(*args, **kwargs):
+        looked_up.append(args)
+        return []
+
+    monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
+    monkeypatch.setattr(node, "kad_lookup", fake_lookup)
+    await node._maintain_neighbors()
+    assert attempted == [far]
+    assert looked_up == [], "filling a band is not searching"
     await node.stop()

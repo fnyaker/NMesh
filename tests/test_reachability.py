@@ -106,7 +106,7 @@ class TestNodeReachability:
         m = TransportManager()
         m.register("tcp", TCPTransport, TCPServer)
         node = MeshNode(transport_manager=m)
-        await node.start(["tcp://127.0.0.1:0"])
+        await node.start(["tcp://0.0.0.0:0"])
         try:
             node._local_ips = ["192.168.1.5"]
             node._extra_addrs = ["1.1.1.1"]
@@ -153,7 +153,7 @@ class TestNodeReachability:
         m = TransportManager()
         m.register("tcp", TCPTransport, TCPServer)
         node = MeshNode(transport_manager=m)
-        await node.start(["tcp://127.0.0.1:0"])
+        await node.start(["tcp://0.0.0.0:0"])
         try:
             node._local_ips = ["192.168.1.5"]
             node._extra_addrs = ["1.1.1.1"]

@@ -40,10 +40,11 @@ import json
 import secrets
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 from .. import app_api, faults
+from ..http_server import CONNECTION_TIMEOUT, HardenedServer
 from ..version import __version__
 
 DEFAULT_HOST = "127.0.0.1"
@@ -235,7 +236,7 @@ class McpApp:
         self._store = store            # (get, put) over this app's drawer
         self._log = log
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._server: ThreadingHTTPServer | None = None
+        self._server: HardenedServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._tools: dict = {}
@@ -317,7 +318,7 @@ class McpApp:
     async def _serve(self) -> None:
         try:
             server = await asyncio.to_thread(
-                ThreadingHTTPServer, (self.host, self.port), _handler_for(self))
+                HardenedServer, (self.host, self.port), _handler_for(self))
         except OSError as exc:
             # A port somebody else holds must not take the node down with it:
             # the app runs, says why it serves nothing, and can be pointed
@@ -540,6 +541,7 @@ def _local_origin(origin: str) -> bool:
 
 def _handler_for(app: McpApp):
     class Handler(BaseHTTPRequestHandler):
+        timeout = CONNECTION_TIMEOUT
         server_version = "nmesh-mcp"
         sys_version = ""
         timeout = _SOCKET_TIMEOUT

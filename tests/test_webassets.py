@@ -1630,3 +1630,24 @@ def test_a_page_follows_the_node_exactly_as_far_as_it_granted():
     rule = js.split("const local = (path) =>", 1)[1].split(";", 1)[0]
     assert "CONTEXT.caps.includes(grant)" in rule
     assert "caps: []," in js.split("const CONTEXT = {", 1)[1][:600]
+
+
+def test_the_topology_legend_waits_for_a_link_to_explain():
+    """Under a graph with one dot on it, six lines on what lines mean is a
+    wall of text; the first-run painter hides it until a node is linked."""
+    from src.webassets import console
+    assert 'id="map-legend-text"' in console.INDEX_HTML
+    painter = console.CONSOLE_PAGE_JS.split("function paintFirstRun(state){", 1)[1]
+    painter = painter.split("\n}\n", 1)[0]
+    assert 'legend.hidden = !card.hidden' in painter
+
+
+def test_every_tab_has_a_name_even_when_its_label_is_hidden():
+    """On a phone the label under an icon is hidden, and a button with no text
+    has no name for a screen reader."""
+    from src.webassets import console
+    tabs = re.findall(r'<button role="tab"[^>]*data-label=[^>]*>', console.INDEX_HTML)
+    assert len(tabs) >= 4
+    for tab in tabs:
+        label = re.search(r'data-label="([^"]+)"', tab).group(1)
+        assert f'aria-label="{label}"' in tab

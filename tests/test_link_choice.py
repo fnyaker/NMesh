@@ -134,6 +134,42 @@ class TestPickingTheLink:
         assert chosen[0].remote_addr == "fake://a:2"    # the better of the two
 
 
+class TestScoringOnlyWhatIsBeingCompared:
+    """`_authenticated_peers` runs for every routed packet. Scoring every link
+    on every call was most of what forwarding cost, and a score only ever settles
+    a choice between two links to one identity."""
+
+    def test_a_node_with_one_link_each_is_scored_not_at_all(self, monkeypatch):
+        node = _node()
+        for i in range(1, 8):
+            _link(node, NodeID(bytes([i]) * 20), f"fake://h{i}:1", rtt_ms=10, pings=9, pongs=9)
+        calls = []
+        monkeypatch.setattr(node, "_link_score", lambda peer: calls.append(peer) or 1.0)
+        assert len(node._authenticated_peers()) == 7
+        assert calls == []
+
+    def test_only_the_identity_with_two_links_is_scored(self, monkeypatch):
+        node = _node()
+        single = NodeID(b"\x01" * 20)
+        _link(node, single, "fake://a:1", rtt_ms=10, pings=9, pongs=9)
+        twice = NodeID(b"\x02" * 20)
+        slow = _link(node, twice, "fake://b:1", rtt_ms=200, pings=9, pongs=9)
+        quick = _link(node, twice, "fake://b:2", rtt_ms=5, pings=9, pongs=9)
+        scored = []
+        real = node._link_score
+        monkeypatch.setattr(node, "_link_score", lambda peer: scored.append(peer) or real(peer))
+        chosen = node._authenticated_peers()
+        assert {p.authenticated_id: p for p in chosen}[twice] is quick
+        assert set(map(id, scored)) == {id(slow), id(quick)}
+
+    def test_a_tie_keeps_the_link_opened_first(self):
+        """Replaced only by a strictly better one, as before."""
+        node = _node()
+        first = _link(node, TARGET, "fake://a:1", rtt_ms=10, pings=9, pongs=9)
+        _link(node, TARGET, "fake://a:1", rtt_ms=10, pings=9, pongs=9)
+        assert node._authenticated_peers() == [first]
+
+
 class TestSteering:
     def test_a_lossy_incumbent_is_worth_leaving(self):
         """Steering exists to move off a bad link; if loss did not count there,

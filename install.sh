@@ -128,7 +128,7 @@ detect_init() {
     # with no systemd behind it, and every call then fails with "Failed to
     # connect to bus". /run/systemd/system is the documented test for a booted
     # systemd, so use that.
-    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    if command -v systemctl >/dev/null 2>&1 && [ -d "${NMESH_SYSTEMD_RUN_DIR:-/run/systemd/system}" ]; then
         if is_root || [ "${NMESH_FORCE_SYSTEM:-}" = 1 ]; then
             echo "systemd-system"
         elif systemctl --user show-environment >/dev/null 2>&1; then

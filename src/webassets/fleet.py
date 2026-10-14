@@ -178,6 +178,14 @@ FLEET_HTML = """<!doctype html>
         </div>
       </details>
 
+      <details class="card"><summary>Volumes</summary>
+        <div class="card-body"><div id="dk-volumes" class="stack"></div></div>
+      </details>
+
+      <details class="card"><summary>Networks</summary>
+        <div class="card-body"><div id="dk-networks" class="stack"></div></div>
+      </details>
+
       <details class="card"><summary>Portainer</summary>
         <div class="card-body">
           <p class="muted small">A stack Portainer owns is updated <b>through</b> Portainer —
@@ -1447,7 +1455,7 @@ function nodeGroupsDialog(id){
 // can tell from a hang.
 
 const DK = {node:"", overview:null, stacks:[], containers:[], images:[],
-            portainer:[], busy:false};
+            volumes:[], networks:[], stats:{}, portainer:[], busy:false};
 
 function dockerNodes(){
   return (ST.managed || []).filter((node) => (node.caps || []).includes("docker"));
@@ -1471,11 +1479,21 @@ async function dockerLoad(){
     DK.stacks = stacks.items || [];
     DK.containers = containers.items || [];
     setMessage("dk-msg", "");
+    dockerSample();
   }catch(error){
     DK.overview = null; DK.stacks = []; DK.containers = [];
     setMessage("dk-msg", String(error.message || error), true);
   }finally{ DK.busy = false; }
   paintDocker();
+}
+// Usage figures take about a second a container to read, so the list is shown
+// first and they join it when they arrive.
+async function dockerSample(){
+  const node = DK.node;
+  try{
+    const answer = await dockerCall("stats");
+    if(node === DK.node){ DK.stats = answer.info || {}; paintDocker(); }
+  }catch(_){ /* the list stands without them */ }
 }
 // Which stacks *Update* also brings up on that node. Read from the ledger, not
 // from the checkbox: it is a choice this console remembers about a machine, and
@@ -1519,11 +1537,14 @@ function stackRow(stack){
 }
 function containerRow(entry){
   const running = entry.state === "running";
+  const use = DK.stats[entry.id];
   return '<div class="row wrap">' +
     '<b class="grow truncate">' + esc(entry.name || shortId(entry.id)) + "</b>" +
     '<span class="muted small truncate">' + esc(entry.image) + "</span>" +
     (entry.project ? badge(entry.project) : "") +
     badge(entry.state || "?", running ? "ok" : "warn") +
+    (use ? '<span class="mono tiny muted">' + use.cpu.toFixed(1) + "% · " +
+      fmtBytes(use.memory) + "</span>" : "") +
     (entry.ports.length ? '<span class="mono tiny muted">' +
       esc(entry.ports.join(" ")) + "</span>" : "") +
     '<span class="btn-row">' +
@@ -1559,8 +1580,20 @@ function paintDocker(){
   setHTML("dk-images", DK.images.map((image) =>
     '<div class="row"><b class="grow truncate mono">' +
     esc((image.tags[0] || image.id).slice(0, 80)) + "</b>" +
-    '<span class="muted small">' + fmtBytes(image.size) + "</span></div>").join("") ||
+    '<span class="muted small">' + fmtBytes(image.size) + "</span>" +
+    '<button class="sm danger" data-img-rm="' + esc(image.tags[0] || image.id) +
+      '">Remove</button></div>').join("") ||
     '<p class="muted small">Nothing read yet.</p>');
+  setHTML("dk-volumes", DK.volumes.map((volume) =>
+    '<div class="row"><b class="grow truncate mono">' + esc(volume.name.slice(0, 64)) + "</b>" +
+    '<span class="muted small">' + esc(volume.driver) + "</span></div>").join("") ||
+    '<p class="muted small">No volume, or not read yet.</p>');
+  setHTML("dk-networks", DK.networks.map((network) =>
+    '<div class="row wrap"><b class="grow truncate">' + esc(network.name) + "</b>" +
+    '<span class="muted small">' + esc(network.driver) + "</span>" +
+    (network.subnet ? '<span class="mono tiny muted">' + esc(network.subnet) + "</span>" : "") +
+    badge(plural(network.attached, "container"))  + "</div>").join("") ||
+    '<p class="muted small">No network, or not read yet.</p>');
   setHTML("pt-stacks", DK.portainer.map(portainerRow).join("") ||
     '<p class="muted small">Nothing read from Portainer yet.</p>');
 }
@@ -1806,6 +1839,18 @@ document.body.addEventListener("click", async (event) => {
       await dockerLoad();
     });
   }
+  if(data.imgRm){
+    const agreed = await confirmAction({title:"Remove this image?",
+      body:'<p class="muted small">The daemon refuses while a container uses it.</p>',
+      confirmLabel:"Remove", danger:true});
+    if(!agreed) return;
+    return withBusy(button, async () => {
+      try{ await dockerCall("remove_image", {image:data.imgRm}); }
+      catch(error){ toast(String(error.message || error), "danger"); }
+      try{ DK.images = (await dockerCall("images")).items || []; }catch(_){ /* kept */ }
+      paintDocker();
+    });
+  }
   if(data.ctLogs) return dockerLogs(data.ctLogs);
   if(data.ctAct){
     if(data.ctAct === "remove"){
@@ -1924,7 +1969,7 @@ $("ssh-key").addEventListener("change", paintKeys);
 $("group-new").addEventListener("click", () => groupDialog(""));
 $("dk-node").addEventListener("change", () => {
   DK.node = $("dk-node").value;
-  DK.images = []; DK.portainer = [];
+  DK.images = []; DK.volumes = []; DK.networks = []; DK.stats = {}; DK.portainer = [];
   dockerLoad();
 });
 $("dk-refresh").addEventListener("click", (event) => withBusy(event.target, async () => {
@@ -1932,6 +1977,8 @@ $("dk-refresh").addEventListener("click", (event) => withBusy(event.target, asyn
   // The two lists nothing else needs: read on demand rather than on every
   // refresh of the panel.
   try{ DK.images = (await dockerCall("images")).items || []; }catch(_){ DK.images = []; }
+  try{ DK.volumes = (await dockerCall("volumes")).items || []; }catch(_){ DK.volumes = []; }
+  try{ DK.networks = (await dockerCall("networks")).items || []; }catch(_){ DK.networks = []; }
   if(DK.overview && DK.overview.portainer){
     try{ DK.portainer = (await dockerCall("portainer_stacks")).items || []; }
     catch(_){ DK.portainer = []; }
