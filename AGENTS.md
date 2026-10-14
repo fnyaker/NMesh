@@ -483,6 +483,11 @@ scope. Add yours.
   suite hung. The close had been the only thing ending it. → Before removing an
   exit from a loop, find what else that exit was the bound for, and test the
   loop with a medium that never waits.
+- **A rate called "at rest" that was a mesh still settling.** About 30 packets
+  per second per node was published as idle traffic; it was taken 25 s after
+  start, with searches and handshakes still running, and the same mesh sent
+  under 2 packets per second (about 0.2 KiB/s, pings only) after 150 s. →
+  Measure at two settling times, publish the later one, and state the time.
 
 ### Running the tests (read this before trusting "green")
 
@@ -723,11 +728,3 @@ running tree declare the same version the updater correctly reports
 fixes failed to reach a node following it. Bump `src/version.py` **and**
 `pyproject.toml` together (`tests/test_updater.py` asserts they agree) before
 expecting a branch to be offered.
-### A rate called "at rest" that was a mesh still settling
-
-A figure of about 30 packets per second per node was published as the idle
-traffic of the mesh. It had been taken 25 s after start, while neighbour
-searches and handshakes were still running; after 150 s the same mesh sent
-under 2 packets per second per node (about 0.2 KiB/s, pings only). Before a
-figure is called "at rest", measure at two settling times and publish the later
-one, with the time stated.

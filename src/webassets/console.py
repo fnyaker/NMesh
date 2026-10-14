@@ -164,11 +164,12 @@ INDEX_HTML = """<!doctype html>
           <div class="card-body">
             <svg id="graph" class="mesh-graph clickable" viewBox="0 0 420 250" role="img"
                  aria-label="Connected nodes — click to open the full map"></svg>
-            <p id="map-legend-text" class="tiny muted">A line is an authenticated direct link: amber while it
+            <details id="map-legend-text" class="tiny muted"><summary>What the lines mean</summary>
+              <p>A line is an authenticated direct link: amber while it
               loses probes, red and dashed once it is failing, doubled when MLO bundles
               it, dotted beside it while MLO looks for a second link. A faint dashed
               line is a session routed through a first hop — anything deeper is opaque
-              to this node by design.</p>
+              to this node by design.</p></details>
           </div>
         </article>
       </div>
