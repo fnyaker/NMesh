@@ -672,7 +672,9 @@ skeleton. A spinner with no end is a bug report nobody can act on.
 
 ## Security model
 
-- **TLS**, self-signed (ECDSA P-256), fingerprint printed at startup.
+- **TLS**, self-signed (ECDSA P-256), fingerprint printed at startup. TLS 1.2 is
+  offered only with ECDHE and an AEAD (AES-GCM, ChaCha20-Poly1305): the CBC suites
+  are not; TLS 1.3 is as the library has it (`tests/test_http_server.py`).
 - **Password** generated on the first run, stored only as a **salted scrypt
   hash** (`console.cred`, mode 0600). In the clear on disk only while a
   generated one waits to be read (`console.first-password`, 0600, gone at the

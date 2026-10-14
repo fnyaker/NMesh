@@ -173,3 +173,43 @@ def test_every_handler_sets_a_timeout():
     for name in ("webconsole.py", "apps/chat_web.py", "apps/mcp.py"):
         text = (root / name).read_text(encoding="utf-8")
         assert "timeout = CONNECTION_TIMEOUT" in text, name
+
+
+class TestTheCiphersOffered:
+    async def _handshake(self, console, version, ciphers):
+        import ssl
+
+        def connect():
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            ctx.minimum_version = ctx.maximum_version = version
+            if ciphers:
+                ctx.set_ciphers(ciphers)
+            with socket.create_connection(("127.0.0.1", console.port), timeout=5) as raw:
+                with ctx.wrap_socket(raw) as tls:
+                    return tls.cipher()[0]
+        return await asyncio.to_thread(connect)
+
+    async def test_tls_1_2_offers_forward_secrecy_with_an_aead_and_nothing_else(self):
+        import ssl
+        node, console = await _tls_console()
+        try:
+            assert "GCM" in await self._handshake(console, ssl.TLSVersion.TLSv1_2,
+                                                  "ECDHE+AESGCM")
+            for weak in ("AES256-SHA", "ECDHE+AES256+SHA", "AES128-SHA256", "AES256-GCM-SHA384"):
+                with pytest.raises(ssl.SSLError):
+                    await self._handshake(console, ssl.TLSVersion.TLSv1_2,
+                                          weak + ":@SECLEVEL=0")
+        finally:
+            console.stop()
+            await node.stop()
+
+    async def test_tls_1_3_is_still_served(self):
+        import ssl
+        node, console = await _tls_console()
+        try:
+            assert await self._handshake(console, ssl.TLSVersion.TLSv1_3, None)
+        finally:
+            console.stop()
+            await node.stop()

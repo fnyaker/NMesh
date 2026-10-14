@@ -470,6 +470,9 @@ class WebConsole:
         cert_pem, key_pem, loaded = self._load_or_create_cert()
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        # TLS 1.2 only with forward secrecy and an AEAD: the CBC suites a default
+        # context still offers add nothing a browser needs. TLS 1.3 is unaffected.
+        ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
         # load_cert_chain needs files; use a temp dir only if we have no state dir.
         import tempfile
         d = self._state_dir or tempfile.mkdtemp(prefix="nmesh-console-")
