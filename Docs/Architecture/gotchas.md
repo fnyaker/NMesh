@@ -1319,6 +1319,30 @@ it is the poisoning of §5 seen from the other side. Test:
 `tests/test_nat_relay_fixes.py::TestE2ERetriedAttempts`.
 **A retry must never invalidate the answer to what it is retrying.**
 
+### 12. A first handshake that goes round in a circle is lost with its only copy
+Seen on real nodes in one process, then on 120 spread over eight: the first
+message between two nodes that share no link is sometimes late by one or two
+retry intervals (5, 10, 15 s), or is not delivered at all. The trace shows why.
+`_forward_packet` sends to the XOR-nearest neighbour except the one the packet
+came from, and nothing else stops a cycle: relay A sent it to B, B to C, and C —
+whose nearest neighbour other than B was A — back to A, where the replay table
+dropped it. The route that A's background acquisition then learned made the
+*next* attempt arrive in milliseconds, and the only thing between the two was the
+5 s wait.
+
+Fixed by `_reroute_looped` (see `routing.md`): a duplicate that comes in over a
+link the packet had not used here is sent down a neighbour it had not taken.
+
+Two things that did not work, kept because each looked right:
+- **A shorter handshake retry** (0.75 s doubling to 5 s). It does not touch the
+  cause, and the figure that first seemed to confirm it came from the next point.
+- **Measuring at 100 and 200 nodes in one process.** The event loop ran hundreds
+  of milliseconds late and the retries came every 8 s instead of 5: the failures
+  were the simulator's CPU. `tests/tools/mesh_sim.py` spreads the nodes over
+  processes and prints the loop's lateness beside the result; trust a figure
+  only where that lateness is small.
+
+
 ## Hole punching (see also `transports.md`)
 
 - **Do not delete `_punch_pending` when the peer's UDP address is unknown** (a

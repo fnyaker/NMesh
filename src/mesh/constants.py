@@ -544,6 +544,11 @@ _LOSS_BURST_TRACKED       = 16
 _LOSS_BURST_COOLDOWN      = 60.0
 _ROUTE_SEND_FANOUT        = 5
 _ROUTE_HINT_MAX           = 256
+# Routed packets this node has passed on and how: the links each arrived on and
+# the links it went down, so a copy that comes back round a cycle can be sent a
+# different way instead of being dropped. Per packet the sets stop at
+# `_ROUTE_SEND_FANOUT`, which is also the most a replay can buy.
+_FWD_BOOK_MAX             = 4096
 _ROUTE_HINT_TTL           = 120.0
 # Measuring a routed path instead of assuming it (see `routed.py`).
 #
@@ -1149,6 +1154,7 @@ __all__ = [
     "_REVOKE_RATE_WINDOW",
     "_REVOKE_SYNC_MAX",
     "_ROUTABLE_TYPES",
+    "_FWD_BOOK_MAX",
     "_ROUTE_HINT_MAX",
     "_ROUTE_HINT_TTL",
     "_ROUTE_SEND_FANOUT",

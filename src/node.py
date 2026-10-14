@@ -583,6 +583,8 @@ class MeshNode:
         # path that provably carried a packet; no remote relay identities are
         # inferred from this local observation.
         self._route_hints: OrderedDict[NodeID, tuple[NodeID, float]] = OrderedDict()
+        # replay key -> (identities the packet arrived from, identities it left to)
+        self._fwd_book: OrderedDict[int, tuple[list[bytes], list[bytes]]] = OrderedDict()
         # …and what that guess is being replaced by: first hops we have
         # actually probed end to end. See `routed.py`.
         self._paths = routed.PathBook()
@@ -7525,7 +7527,56 @@ class MeshNode:
         not a place to spend a false positive."""
         return self._seen_msgs.add(key)
 
-    async def _forward_packet(self, from_peer: _Peer, packet: Packet) -> None:
+    def _note_forwarded(self, key: int | None, arrived: _Peer, sent_to: _Peer) -> None:
+        """Remember which way a routed packet went, bounded, so a copy that
+        comes back can be sent another way (`_reroute_looped`)."""
+        if key is None or arrived.authenticated_id is None \
+                or sent_to.authenticated_id is None:
+            return
+        entry = self._fwd_book.get(key)
+        if entry is None:
+            while len(self._fwd_book) >= _FWD_BOOK_MAX:
+                self._fwd_book.popitem(last=False)
+            entry = ([], [])
+            self._fwd_book[key] = entry
+        for held, peer in ((entry[0], arrived), (entry[1], sent_to)):
+            raw = peer.authenticated_id.raw
+            if raw not in held and len(held) <= _ROUTE_SEND_FANOUT:
+                held.append(raw)
+
+    async def _reroute_looped(self, peer: _Peer, packet: Packet, key: int) -> None:
+        """A routed packet we already passed on has come back to us, over a link
+        it had not crossed here before: it went round a cycle. Send this copy
+        down a neighbour the first one did not take, rather than dropping the only
+        copy that is still alive.
+
+        Bounded three ways: a copy over a link it already used here is a replay
+        and is dropped as always; a packet leaves by at most
+        `_ROUTE_SEND_FANOUT` distinct neighbours from this node; and a copy is
+        forwarded once per duplicate received, so a replay buys no more than the
+        same packet sent fresh would."""
+        entry = self._fwd_book.get(key)
+        if entry is None or packet.ttl <= 1 or peer.authenticated_id is None:
+            return
+        arrived, tried = entry
+        via = peer.authenticated_id.raw
+        if via in arrived or len(tried) >= _ROUTE_SEND_FANOUT \
+                or len(arrived) > _ROUTE_SEND_FANOUT:
+            return
+        arrived.append(via)
+        skip = set(arrived) | set(tried)
+        target = NodeID(packet.dst_id)
+        pool = [p for p in self._authenticated_peers(exclude=peer)
+                if p.authenticated_id.raw not in skip]
+        pool.sort(key=lambda p: target.distance(p.authenticated_id))
+        sent = await self._send_to_candidates(
+            packet, pool[:_ROUTE_SEND_FANOUT], decrement=True)
+        if sent is not None and sent.authenticated_id is not None:
+            tried.append(sent.authenticated_id.raw)
+            self._metrics.total.on_relay(_HEADER_BYTES + len(packet.payload))
+
+    async def _forward_packet(self, from_peer: _Peer, packet: Packet,
+                              key: int | None = None) -> None:
         if packet.ttl <= 1:
             return
         target = NodeID(packet.dst_id)
@@ -7541,6 +7592,7 @@ class MeshNode:
             # were not ours, and it is one integer pair on a path that has just
             # done a routing decision and a write.
             self._metrics.total.on_relay(_HEADER_BYTES + len(packet.payload))
+            self._note_forwarded(key, from_peer, peer)
             return
         # No live relay. Acquiring one takes seconds and must not happen here:
         # this runs in from_peer's receive loop, so an inline lookup/dial froze
@@ -7585,13 +7637,15 @@ class MeshNode:
             if key is None:
                 return
             if self._is_seen(key):
+                if packet.dst_id != self._id.raw and packet.dst_id != _BROADCAST_ID:
+                    await self._reroute_looped(peer, packet, key)
                 return
             # Past the gates the packet is well-formed, fresh, and came off an
             # authenticated link: record that link as a path back to its source
             # so the reply follows the way the request came.
             self._learn_reverse_path(peer, packet)
             if packet.dst_id != self._id.raw and packet.dst_id != _BROADCAST_ID:
-                await self._forward_packet(peer, packet)
+                await self._forward_packet(peer, packet, key)
                 return
         # One dict lookup and a set test, and only for a peer that has actually
         # announced something — this is the whole hot-path cost of rule C1. A

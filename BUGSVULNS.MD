@@ -3836,10 +3836,12 @@ builds and then cannot import. The test written for exactly this failed on
 packages, so the running image no longer carries pip. Unit and integration
 suites pass on 3.14; CI's interpreter is now 3.14 (`TEST.md`, `AGENTS.md`).
 
-## 100 — high — Past a few dozen nodes, a first message to a node nobody links to goes round in a circle
+## 100 — high — A routed packet that went round a cycle was dropped with its only copy
 
-> **Status — open.** Measured, not fixed. A shorter retry was tried and
-> measured, and does not help (see below).
+> **Status — mitigated.** Tests: `tests/test_loop_backtrack.py`. Measured on
+> 120 nodes over eight processes (`tests/tools/mesh_sim.py`): of 300 first
+> contacts, 256 arrived within 12 s before and 285 after; the sender had to
+> retry 45 times before and 15 after. Not measured past 120 nodes.
 
 **Where** — `src/node.py`: `_forward_packet`, `_route_candidates`, and the
 replay drop in `_handle_packet`.
@@ -3854,25 +3856,36 @@ often takes a route that the first one's background acquisition has since
 learned. A strict "forward only to a node closer than this one" rule is not the
 answer: on a chain the next hop is farther by definition (`routing.md`).
 
-**Reproduce** — N real `MeshNode`s on loopback in one process (TCP only), each
-newcomer joining through two random earlier members; wait 30 s; from random
-pairs that share no link send one message each and wait up to 20 s. Delivered in
-20 s: 40 nodes, 34–40 of 40, with some at exactly 5, 10 or 15 s; 100 nodes, 57
-of 60, median 1.7 s; 200 nodes, 23 of 30, median 10 s, and the same pairs fail
-run after run. Every failure is a first contact; once an end-to-end session
-exists the same pair answers in about 10 ms.
+**Reproduce** — N real `MeshNode`s on loopback (TCP only), each newcomer joining
+through two random earlier members; wait for gossip to settle; from random pairs
+that share no link send one message each and wait. At 30 nodes (event loop late
+by under 100 ms) 491 of 500 first contacts arrive within 8 s, about 2 % wait one
+or two retry intervals (5, 10 or 15 s). At 120 nodes spread over eight processes
+15 % of 300 do not arrive in 12 s. Every failure is a first contact; once an
+end-to-end session exists the same pair answers in about 10 ms.
 
-**Tried** — a handshake retry of 0.75 s doubling to 5 s instead of a flat 5 s.
-At 200 nodes it delivered 19 of 30 (median 12 s) against 23 of 30: a retry sends
-the same packet down the same greedy walk. Not kept.
+**Withdrawn** — an earlier version of this entry quoted 100 and 200 nodes
+(median 1.7 s and 10 s, 23 of 30 delivered). Those were taken in **one**
+process, whose event loop was hundreds of milliseconds late (retries arrived
+every 8 s instead of 5): they measured the simulator's CPU, not the routing.
 
-**Needs** — a decision, not a patch. The candidates are: backtracking on a
-replay seen from a different link (a bounded per-packet set of first hops
-already tried, so a hostile replay buys at most `_ROUTE_SEND_FANOUT` forwards),
-or acquiring the route with a lookup **before** the first blind forward when no
+**Tried, not kept** — a handshake retry of 0.75 s doubling to 5 s instead of a
+flat 5 s: no difference at 30 or 40 nodes.
+
+**Fixed** — `_reroute_looped`: a duplicate arriving over an identity the packet
+had not used at this node is sent to the nearest neighbour it had neither come
+from nor gone to. A duplicate over an identity already seen is a replay and is
+dropped as before; a packet leaves a node by at most `_ROUTE_SEND_FANOUT`
+neighbours; the book that remembers is bounded (`_FWD_BOOK_MAX`). The cost,
+measured on 120 nodes: 31.5 against 32.6 packets per second per node at rest,
+and 27 336 against 25 447 packets relayed during 100 first contacts.
+
+**Still open** — a first contact still goes out blind, so it can wander before
+it arrives; acquiring the route with a lookup before the first forward when no
 measured path exists, or sending the first handshake over two disjoint first
-hops. Each touches what the charter calls anti-amplification and must be
-measured against a hostile replayer.
+hops, would shorten that. Nothing was measured above 120 nodes, and the idle
+traffic itself (about 32 packets per second per node at 120 nodes) is the next
+number to look at before the mesh is asked to be larger.
 
 ## 101 — low — An accepted link closed before the greeting raised out of the accept callback
 

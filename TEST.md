@@ -97,6 +97,28 @@ Among other things they check:
 
 ---
 
+## Measuring routing at scale
+
+A few hundred post-quantum nodes in one Python process are CPU-bound, and every
+timer in that process is then wrong: a result taken there says what the machine
+could do, not what the mesh does. `tests/tools/mesh_sim.py` runs the nodes over
+several processes (real TCP on loopback between all of them) and drives them
+from one:
+
+```bash
+python tests/tools/mesh_sim.py --procs 8 --nodes 120 --pairs 100 --wait 12
+python tests/tools/mesh_sim.py --procs 8 --nodes 120 --kill 0.3      # then heal
+```
+
+Each of `--pairs` random pairs that share no link is sent one first message. It
+prints how many arrived, how many needed the sender to retry (read from the
+sender's own handshake book, so it does not depend on the wall clock), the
+packets sent and relayed, and the **lateness of the slowest worker's event loop**.
+Past a loop lag p99 of a few hundred milliseconds the figures describe the
+machine. It is a measurement tool, not a test: nothing in `pytest` runs it.
+
+---
+
 ## CI
 
 GitHub CI (`.github/workflows/ci.yml`) runs the unit tests and then the
@@ -232,6 +254,9 @@ docker run --rm -v "$PWD:/app" -w /app ghcr.io/fnyaker/nmesh-base:latest pytest 
 tests/
 ├── test_packet.py / test_crypto.py / test_cert.py     — primitives
 ├── test_node.py / test_routing.py / test_handshake.py — node & routing
+├── test_loop_backtrack.py                             — a routed packet that
+│     comes back round a cycle leaves by another neighbour, and what that may
+│     cost is bounded (replays, fanout, the book)
 ├── test_routing_stability.py                          — routing regressions:
 │     the size of a FOUND_NODE, acquiring a route outside the receive loop,
 │     the return path learned from traffic, bounded teardown

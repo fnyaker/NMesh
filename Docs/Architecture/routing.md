@@ -106,6 +106,27 @@ control plane** — `FIND_NODE`/`FOUND_NODE`, `STORE`/`FIND_VALUE`/`FOUND_VALUE`
 `PING`/`PONG` (per-link keepalive), the punch signalling, and catalogue gossip
 (re-stamped at every hop).
 
+### A copy that comes back round a cycle is sent another way (`_reroute_looped`)
+
+Excluding only the link a packet arrived on does not stop a cycle: relay A sends
+to B, B to C, and C — whose nearest neighbour other than B is A — back to A. The
+replay table used to drop that second visit, and with it the only copy alive.
+
+`_forward_packet` now notes, per packet (`_fwd_book`, keyed by the replay key,
+`_FWD_BOOK_MAX` entries, oldest out), the identities the packet arrived from and
+the ones it left to. A duplicate that arrives over an identity **not yet seen
+for that packet** is forwarded once more, to the XOR-nearest neighbour that is
+neither in the arrived set nor in the tried set. Three bounds keep this from
+being an amplifier: a duplicate over an identity already seen is a replay and is
+dropped as before; a packet leaves a node by at most `_ROUTE_SEND_FANOUT`
+distinct neighbours; and each duplicate buys at most one forward, which is what
+sending the packet fresh would have cost. Packets addressed to this node, TTL 1
+packets and packets this node never forwarded are dropped exactly as before.
+
+This is not a progress rule. "Forward only to a node closer than this one" would
+break chains, where the next hop is farther by definition; what a node adds is
+memory of where it already sent a packet.
+
 ### A return path learned from traffic (`_route_hints`)
 
 XOR proximity is only a **hypothesis** about an overlay we have not finished
