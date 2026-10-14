@@ -3877,15 +3877,17 @@ had not used at this node is sent to the nearest neighbour it had neither come
 from nor gone to. A duplicate over an identity already seen is a replay and is
 dropped as before; a packet leaves a node by at most `_ROUTE_SEND_FANOUT`
 neighbours; the book that remembers is bounded (`_FWD_BOOK_MAX`). The cost,
-measured on 120 nodes: 31.5 against 32.6 packets per second per node at rest,
-and 27 336 against 25 447 packets relayed during 100 first contacts.
+measured on 120 nodes while the mesh was settling: 31.5 against 32.6 packets per
+second per node, and 27 336 against 25 447 packets relayed during 100 first
+contacts.
 
 **Still open** — a first contact still goes out blind, so it can wander before
 it arrives; acquiring the route with a lookup before the first forward when no
 measured path exists, or sending the first handshake over two disjoint first
-hops, would shorten that. Nothing was measured above 120 nodes, and the idle
-traffic itself (about 32 packets per second per node at 120 nodes) is the next
-number to look at before the mesh is asked to be larger.
+hops, would shorten that. Nothing was measured above 120 nodes. The traffic of a
+mesh still settling is the number to look at before it is asked to be larger: at
+30 nodes, about 29 KiB/s per node during the first minutes (neighbour searches
+and handshakes), against about 0.2 KiB/s once settled (pings only).
 
 ## 101 — low — An accepted link closed before the greeting raised out of the accept callback
 

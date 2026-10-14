@@ -134,9 +134,17 @@ every routed packet. A link's score decides only between two links to the **same
 identity, so the score is computed only when a second link to an identity shows
 up; scoring every link on every call was most of the CPU forwarding used. On 120
 nodes over eight processes the profile of one worker went from 32 s to 2.4 s in
-that function, and the workers' CPU at rest fell by about 16 % (three alternating
-runs, noisy). An idle node at that size sends about 30 packets a second and uses
-about a twentieth of a core.
+that function, and the workers' CPU fell by about 16 % (three alternating runs,
+noisy), measured while the mesh was still settling, 30 to 70 s after it was
+built.
+
+What a node costs once the mesh has settled is a different, much smaller figure.
+At 30 nodes with about 20 links each, two minutes after the last join, an idle
+node sends about two packets a second, all of them keepalives (0.2 KiB/s). The
+first minutes cost far more: 29 KiB/s per node, of which about 19 are `FOUND_NODE`
+answers (26 kB each, a post-quantum certificate chain per entry) and about 10 are
+handshakes. A figure called "at rest" has to say how long after the last join it
+was taken.
 
 ### A return path learned from traffic (`_route_hints`)
 
