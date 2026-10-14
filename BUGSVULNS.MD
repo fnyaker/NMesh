@@ -4138,6 +4138,8 @@ arrived; with the links spread over distance, 90 to 92 over four seeds, and 86 t
 with nothing killed; the undelivered ones mostly end at a node holding one to
 five links (`mesh_sim.py --explain`). A rule that looked up the target at a
 local minimum of the distance was tried and measured no better (91 of 100 on
-the seed that gave 91). And there is nothing larger than 240 nodes to measure on this
+the seed that gave 91), and so was a Kademlia bucket refresh for the bands
+where a node holds no link (93 of 100 on average over four seeds, the same as
+without, for 4 to 6 packets per second per node at rest instead of 2.4 to 4.4). And there is nothing larger than 240 nodes to measure on this
 machine: the simulator needs more cores than the 8 it has once the mesh is
 chatty, and at rest it is the first number to check again.
