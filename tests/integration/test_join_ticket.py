@@ -94,6 +94,55 @@ class TestJoinByTicket:
             await host.stop()
 
 
+class TestTheFirstInvitationOfANetwork:
+    """Nobody has connected to a node that has just been installed, so none of
+    its addresses is confirmed — and the first invitation of a network is the one
+    that has to name an address nobody has tried."""
+
+    @staticmethod
+    def _lan(address: str, confirmed: bool) -> dict:
+        return {"transport": "tcp", "scope": "lan", "anchor": "",
+                "address": address, "confirmed": confirmed}
+
+    async def test_an_untried_address_on_our_own_network_is_offered_and_says_so(self):
+        node = make_node()
+        await node.start(["tcp://127.0.0.1:19378"])
+        try:
+            node.reachability = lambda: [self._lan("tcp://192.0.2.10:9000", False)]
+            assert node.local_endpoints() == []
+            assert node.local_endpoints(confirmed=False) == ["tcp://192.0.2.10:9000"]
+            ticket = await node.issue_join_ticket(600)
+            assert join_ticket.decode(ticket["ticket"])["uri"] == "tcp://192.0.2.10:9000"
+            assert ticket["scope"] == "lan"
+            assert ticket["confirmed"] is False
+        finally:
+            await node.stop()
+
+    async def test_a_confirmed_one_is_preferred_and_says_so(self):
+        node = make_node()
+        await node.start(["tcp://127.0.0.1:19379"])
+        try:
+            node.reachability = lambda: [self._lan("tcp://192.0.2.10:9000", False),
+                                         self._lan("tcp://192.0.2.11:9000", True)]
+            ticket = await node.issue_join_ticket(600)
+            assert join_ticket.decode(ticket["ticket"])["uri"] == "tcp://192.0.2.11:9000"
+            assert ticket["confirmed"] is True
+        finally:
+            await node.stop()
+
+    async def test_an_untried_public_address_is_still_never_offered(self):
+        node = make_node()
+        await node.start(["tcp://127.0.0.1:19380"])
+        try:
+            node.reachability = lambda: [
+                {"transport": "tcp", "scope": "world", "anchor": "",
+                 "address": "tcp://203.0.113.7:9000", "confirmed": False}]
+            with pytest.raises(ValueError):
+                await node.issue_join_ticket(600)
+        finally:
+            await node.stop()
+
+
 class TestPublicGate:
     async def test_a_node_with_no_route_in_at_all_refuses_to_issue_one(self):
         """An invitation pointing nowhere is worse than none: it fails after

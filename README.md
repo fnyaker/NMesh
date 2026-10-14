@@ -265,6 +265,7 @@ A transport is anything that moves bytes. Shipped:
 |------------|-------------------------------------|--------------------------------|
 | `tcp://`   | TCP/IP                              | ordinary network links         |
 | `udp://`   | UDP/IP (reliability + NAT hole punching) | direct links behind NAT   |
+| `veil://` | TCP, keyed                        | no fixed bytes on the wire; silent to anyone without the key |
 | `spool://` | shared directory / file             | store-and-forward, USB stick   |
 
 Writing your own: [`Docs/Transports/guide`](Docs/Transports/guide) +

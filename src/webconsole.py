@@ -36,7 +36,7 @@ import threading
 import time
 from collections import OrderedDict
 from http.cookies import SimpleCookie
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs
 
 from . import app_api
@@ -58,6 +58,8 @@ from .apps.fleet import (console_path_refusal as fleet_console_refusal,
                          FileTransferError as FleetFileError)
 from .apps.fleet_docker import DockerError
 from . import console_feed
+from . import faults
+from .http_server import CONNECTION_TIMEOUT, HardenedServer
 from .http_headers import SECURITY_HEADERS
 from .apps.fleet_console import (APPS_HEADER, FULL_HEADER, GOVERN_HEADER,
                                  REPLAY_HEADER)
@@ -334,7 +336,7 @@ class WebConsole:
         self._app_host = app_host
         self._chat_bridge = chat_bridge
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._server: ThreadingHTTPServer | None = None
+        self._server: HardenedServer | None = None
         self._thread: threading.Thread | None = None
         # What the node says has moved, and the streams reading it. The console
         # subscribes on start() and unsubscribes on stop(): a listener left
@@ -468,6 +470,9 @@ class WebConsole:
         cert_pem, key_pem, loaded = self._load_or_create_cert()
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        # TLS 1.2 only with forward secrecy and an AEAD: the CBC suites a default
+        # context still offers add nothing a browser needs. TLS 1.3 is unaffected.
+        ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
         # load_cert_chain needs files; use a temp dir only if we have no state dir.
         import tempfile
         d = self._state_dir or tempfile.mkdtemp(prefix="nmesh-console-")
@@ -733,11 +738,9 @@ class WebConsole:
             self._chat_bridge.start(self._loop)
         self._node.set_change_listener(self._changes.note)
         handler = _make_handler(self)
-        self._server = ThreadingHTTPServer((self.host, self.port), handler)
+        self._server = HardenedServer((self.host, self.port), handler)
         if self._ssl_ctx is not None:
-            self._server.socket = self._ssl_ctx.wrap_socket(
-                self._server.socket, server_side=True
-            )
+            self._server.wrap_tls(self._ssl_ctx)
         # If port was 0, capture the OS-assigned one.
         self.port = self._server.server_address[1]
         self._thread = threading.Thread(
@@ -1019,6 +1022,7 @@ def _number(raw, default: int = 0) -> int:
 def _make_handler(console: WebConsole):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        timeout = CONNECTION_TIMEOUT
         server_version = "nmesh-console"
         sys_version = ""      # the interpreter's exact version is nobody's business
 
@@ -2338,6 +2342,9 @@ def _make_handler(console: WebConsole):
             data = data or {}
             node = data.get("node") or data.get("id") or ""
             action = path.rsplit("/", 1)[1]
+            if not isinstance(node, str):
+                self._json(400, {"error": "bad node id"})
+                return
             try:
                 if action == "enrol":
                     ok = fleet.enrol(node, data.get("caps"), data.get("label", ""))
@@ -2472,6 +2479,12 @@ def _make_handler(console: WebConsole):
                 self._json(502, {"error": str(exc)[:200]})
             except ValueError:
                 self._json(400, {"error": "bad request"})
+            except (TypeError, AttributeError, KeyError, IndexError) as exc:
+                # A value of the wrong shape got further than it should. What
+                # went wrong is for the log: the interpreter's own words about
+                # its internals are nothing an operator can act on.
+                faults.note(f"fleet console {action}", exc)
+                self._json(503, {"error": "that request could not be carried out"})
             except Exception as exc:
                 self._json(503, {"error": str(exc)[:200]})
 

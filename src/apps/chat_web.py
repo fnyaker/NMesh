@@ -19,10 +19,11 @@ import secrets
 import threading
 import time
 from collections import OrderedDict
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 from .. import app_api
+from ..http_server import CONNECTION_TIMEOUT, HardenedServer
 from .. import console_feed
 from ..http_headers import SECURITY_HEADERS
 from ..node_id import NodeID
@@ -596,14 +597,14 @@ class ChatWebServer:
         self.token = token or secrets.token_urlsafe(18)
         self._token_bytes = self.token.encode("utf-8")
         self.bridge = ChatBridge(chat_app, peer=peer)
-        self._server: ThreadingHTTPServer | None = None
+        self._server: HardenedServer | None = None
         self._thread: threading.Thread | None = None
 
     # -- lifecycle --------------------------------------------------------
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self.bridge.start(loop or asyncio.get_event_loop())
-        self._server = ThreadingHTTPServer((self.host, self.port), _make_handler(self))
+        self._server = HardenedServer((self.host, self.port), _make_handler(self))
         self.port = self._server.server_address[1]
         # Poll the shutdown flag tightly (stdlib default is 0.5s) so stop()
         # returns near-instantly instead of blocking up to half a second.
@@ -638,6 +639,7 @@ class ChatWebServer:
 def _make_handler(server: "ChatWebServer"):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        timeout = CONNECTION_TIMEOUT
         server_version = "nmesh-chat"
         sys_version = ""
 

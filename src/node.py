@@ -583,6 +583,8 @@ class MeshNode:
         # path that provably carried a packet; no remote relay identities are
         # inferred from this local observation.
         self._route_hints: OrderedDict[NodeID, tuple[NodeID, float]] = OrderedDict()
+        # replay key -> (identities the packet arrived from, identities it left to)
+        self._fwd_book: OrderedDict[int, tuple[list[bytes], list[bytes]]] = OrderedDict()
         # …and what that guess is being replaced by: first hops we have
         # actually probed end to end. See `routed.py`.
         self._paths = routed.PathBook()
@@ -3164,21 +3166,29 @@ class MeshNode:
 
         Identities keep the order they were first seen in, so a list on a
         screen does not reshuffle itself because two links swapped rank."""
-        best: dict[NodeID, tuple[float, _Peer]] = {}
+        best: dict[NodeID, _Peer] = {}
+        scores: dict[NodeID, float] = {}
         order: list[NodeID] = []
         for peer in self._peers:
             if (peer is exclude or peer.authenticated_id is None
                     or peer.session is None):
                 continue
             node_id = peer.authenticated_id
-            score = self._link_score(peer)
             held = best.get(node_id)
             if held is None:
                 order.append(node_id)
-                best[node_id] = (score, peer)
-            elif score > held[0]:
-                best[node_id] = (score, peer)
-        return [best[node_id][1] for node_id in order]
+                best[node_id] = peer
+                continue
+            # A score only ever settles a choice between two links to one
+            # identity, and this runs for every routed packet over every link:
+            # scoring each link as it is met was most of what forwarding cost.
+            if node_id not in scores:
+                scores[node_id] = self._link_score(held)
+            score = self._link_score(peer)
+            if score > scores[node_id]:
+                best[node_id] = peer
+                scores[node_id] = score
+        return [best[node_id] for node_id in order]
 
     # -- redundant links --------------------------------------------------
     #
@@ -3279,6 +3289,43 @@ class MeshNode:
                if p.authenticated_id is not None]
         ids.sort(key=self._id.distance)
         return ids
+
+    def _finger_candidates(self) -> list[NodeID]:
+        """Identities that would give this node a link in a distance band it
+        holds too few in.
+
+        A band is the bit length of the XOR distance to us: half the id space is
+        in the farthest, a quarter in the next, and so on down to the few nodes
+        nearest us. Greedy forwarding picks the neighbour nearest the target, and
+        it only makes progress when every band that has nodes in it has a link —
+        otherwise a packet reaches the node nearest the target *among our
+        neighbours* and stops. Links bought by lookups are not spread that way:
+        they are wherever the questions went.
+
+        One identity per short band, the one seen most recently, at most
+        `_FINGER_DIALS` of them, farthest band first (the one a wrong guess
+        costs the most hops in)."""
+        now = time.monotonic()
+        linked = {p.authenticated_id for p in self._authenticated_peers()}
+        held: dict[int, int] = {}
+        for node_id in linked:
+            band = self._id.distance(node_id).bit_length()
+            held[band] = held.get(band, 0) + 1
+        best: dict[int, NodeEntry] = {}
+        for entry in self._routing.all_entries():
+            if entry.node_id in linked or entry.node_id == self._id \
+                    or self._routing.is_silent(entry):
+                continue
+            # One that just refused us is not offered again until its back-off
+            # is over, or a band with one unwilling node in it is never filled.
+            if now < self._neighbor_retry.get(entry.node_id, (0, 0.0))[1]:
+                continue
+            band = self._id.distance(entry.node_id).bit_length()
+            if held.get(band, 0) >= _FINGER_LINKS:
+                continue
+            if band not in best or entry.last_seen > best[band].last_seen:
+                best[band] = entry
+        return [best[band].node_id for band in sorted(best, reverse=True)[:_FINGER_DIALS]]
 
     def _neighbor_slots(self) -> list[NodeID]:
         """The maintained set: the `_NEIGHBOR_FLOOR` XOR-nearest live links.
@@ -3426,7 +3473,8 @@ class MeshNode:
         live = self._live_neighbors()
         searching = force or len(live) < _NEIGHBOR_FLOOR
         promotions = self._neighbor_promotions()
-        if not searching and not promotions:
+        fingers = self._finger_candidates()
+        if not searching and not promotions and not fingers:
             return
 
         if searching and self._authenticated_peers():
@@ -3440,7 +3488,7 @@ class MeshNode:
 
         now = time.monotonic()
         live_ids = {p.authenticated_id for p in self._authenticated_peers()}
-        desired = list(promotions)
+        desired = list(promotions) + fingers
         if searching:
             desired += [entry.node_id for entry in
                         self._routing.get_closest(self._id, _NEIGHBOR_TARGET)]
@@ -3863,13 +3911,22 @@ class MeshNode:
             await asyncio.sleep(_AUTH_POLL_INTERVAL)
         return None
 
-    def _maybe_upgrade_path(self, target: NodeID) -> None:
+    def _maybe_upgrade_path(self, target: NodeID, conversation: bool = True) -> None:
         """Fire-and-forget attempt to turn a relayed path into a direct link
         (direct connect first, hole punch as fallback — both inside
         _ensure_route_to). Rate-limited per target so a chatty flow doesn't
         turn into a connect/punch storm."""
         if target == self._id or target in self._pending_connections:
             return
+        # Past a soft number of links, only a node that would join the set of
+        # nearest neighbours is worth a direct link for the sake of a lookup:
+        # every lookup answered through a relay otherwise ends in a dial, and a
+        # mesh where each node dials each node it asks about is a full mesh.
+        # What people say to each other still gets its direct link.
+        if not conversation and len(self._peers) >= _UPGRADE_LINK_SOFT:
+            cutoff = self._neighbor_cutoff()
+            if cutoff is None or self._id.distance(target) >= cutoff:
+                return
         now = time.monotonic()
         last = self._upgrade_last.get(target)
         if last is not None and now - last < _UPGRADE_COOLDOWN:
@@ -4558,7 +4615,8 @@ class MeshNode:
                 # share that relay come to hold a link of their own.
                 known = self._routing.get(target)
                 if known is None or not self._routing.is_silent(known):
-                    self._maybe_upgrade_path(target)
+                    self._maybe_upgrade_path(
+                        target, conversation=packet.type in _CONVERSATION_TYPES)
                 # …and for a conversation, whether or not that ever works,
                 # start measuring the ways through the mesh to it. An upgrade
                 # is an optimisation and may be impossible; a second *routed*
@@ -4639,7 +4697,17 @@ class MeshNode:
         self._e2e_attempt[target] = time.monotonic()
         self._persist_state()
         packet = Packet.create(E2E_HANDSHAKE, self._id.raw, target.raw, payload)
-        await self._route_outbound(packet)
+        first = await self._route_outbound(packet)
+        # A first contact crosses relays nobody has measured, and a relay that
+        # takes packets and drops them cannot be told from a good one before it
+        # has failed. A second neighbour carries the same packet (the far end
+        # drops the later copy as a replay), so one such relay costs a copy
+        # rather than a retry interval.
+        if first is not None and first.authenticated_id != target:
+            other = [p for p in self._route_candidates(target)
+                     if p.authenticated_id not in (first.authenticated_id, target)]
+            if other:
+                await self._send_to_candidates(packet, other[:1])
 
     def _ensure_e2e_retry(self) -> None:
         if self._e2e_retry_task is None or self._e2e_retry_task.done():
@@ -4761,7 +4829,13 @@ class MeshNode:
         peer.pending_challenge = challenge
         packet = Packet.create(CHALLENGE, self._id.raw,
                                NodeID(b"\xff" * 20).raw, challenge)
-        await peer.send(packet)
+        try:
+            await peer.send(packet)
+        except Exception as exc:
+            # The far end let go between the accept and the greeting. This runs
+            # in the transport's accept callback, which has nobody to hand an
+            # exception to.
+            self._drop_failed_peer(peer, exc)
 
     def _end_double_accept(self, peer: _Peer) -> None:
         """Both ends of this link accepted it: each challenged, each waits for
@@ -5885,16 +5959,23 @@ class MeshNode:
                     out.append(address)
         return out
 
-    def local_endpoints(self) -> list[str]:
+    def local_endpoints(self, *, confirmed: bool = True) -> list[str]:
         """Addresses a node on our own networks can dial.
 
         Not a weaker version of :meth:`public_endpoints` — a different audience,
         proved by a different thing (`ip_utils.ip_reachability`). A ticket that
         names one works on that network and nowhere else, which is exactly right
-        for the case it exists for and is why what comes back says so."""
+        for the case it exists for and is why what comes back says so.
+
+        ``confirmed=False`` also returns the ones no inbound connection has
+        arrived on yet. Confirmation is evidence a node collects by being used,
+        and a node that has never had a peer has none to show: it is the first
+        invitation of a network that has to name an address nobody has tried."""
         out: list[str] = []
         for descriptor in self.reachability():
-            if descriptor.get("scope") != "lan" or not descriptor.get("confirmed"):
+            if descriptor.get("scope") != "lan":
+                continue
+            if confirmed and not descriptor.get("confirmed"):
                 continue
             address = descriptor.get("address")
             if isinstance(address, str) and address.startswith("tcp://"):
@@ -5940,6 +6021,21 @@ class MeshNode:
                 direct = (hostport[0].strip("[]"), hostport[1])
 
         candidates = self._rendezvous_candidates()
+        tried = bool(endpoints)
+        if direct is None and not candidates:
+            # Nothing proven and nobody to carry it. An address on one of this
+            # machine's own networks is still the right thing to offer on that
+            # network — the alternative is no short invitation at all for the
+            # first node of a network — and the answer says it is untried. A
+            # public address that nothing has reached is a different claim and
+            # is never offered this way.
+            endpoints = self.local_endpoints(confirmed=False)
+            if endpoints:
+                parsed = _validate_uri(endpoints[0])
+                hostport = split_host_port(parsed[1]) if parsed else None
+                if hostport is not None:
+                    direct = (hostport[0].strip("[]"), hostport[1])
+                    scope = "lan"
         if direct is None and not candidates:
             raise ValueError(
                 "this node has no confirmed public address and no peer that can "
@@ -5970,6 +6066,9 @@ class MeshNode:
             # has to be able to say "this one only works on your own network"
             # rather than let somebody find out after sharing it.
             "scope": scope if direct else "",
+            # False for an address no connection has reached yet, so a page can
+            # say so rather than let somebody find out after sharing it.
+            "confirmed": tried if direct else False,
             "code": code,
             "expires_at": expires_at,
             "ttl": window,
@@ -7525,7 +7624,56 @@ class MeshNode:
         not a place to spend a false positive."""
         return self._seen_msgs.add(key)
 
-    async def _forward_packet(self, from_peer: _Peer, packet: Packet) -> None:
+    def _note_forwarded(self, key: int | None, arrived: _Peer, sent_to: _Peer) -> None:
+        """Remember which way a routed packet went, bounded, so a copy that
+        comes back can be sent another way (`_reroute_looped`)."""
+        if key is None or arrived.authenticated_id is None \
+                or sent_to.authenticated_id is None:
+            return
+        entry = self._fwd_book.get(key)
+        if entry is None:
+            while len(self._fwd_book) >= _FWD_BOOK_MAX:
+                self._fwd_book.popitem(last=False)
+            entry = ([], [])
+            self._fwd_book[key] = entry
+        for held, peer in ((entry[0], arrived), (entry[1], sent_to)):
+            raw = peer.authenticated_id.raw
+            if raw not in held and len(held) <= _ROUTE_SEND_FANOUT:
+                held.append(raw)
+
+    async def _reroute_looped(self, peer: _Peer, packet: Packet, key: int) -> None:
+        """A routed packet we already passed on has come back to us, over a link
+        it had not crossed here before: it went round a cycle. Send this copy
+        down a neighbour the first one did not take, rather than dropping the only
+        copy that is still alive.
+
+        Bounded three ways: a copy over a link it already used here is a replay
+        and is dropped as always; a packet leaves by at most
+        `_ROUTE_SEND_FANOUT` distinct neighbours from this node; and a copy is
+        forwarded once per duplicate received, so a replay buys no more than the
+        same packet sent fresh would."""
+        entry = self._fwd_book.get(key)
+        if entry is None or packet.ttl <= 1 or peer.authenticated_id is None:
+            return
+        arrived, tried = entry
+        via = peer.authenticated_id.raw
+        if via in arrived or len(tried) >= _ROUTE_SEND_FANOUT \
+                or len(arrived) > _ROUTE_SEND_FANOUT:
+            return
+        arrived.append(via)
+        skip = set(arrived) | set(tried)
+        target = NodeID(packet.dst_id)
+        pool = [p for p in self._authenticated_peers(exclude=peer)
+                if p.authenticated_id.raw not in skip]
+        pool.sort(key=lambda p: target.distance(p.authenticated_id))
+        sent = await self._send_to_candidates(
+            packet, pool[:_ROUTE_SEND_FANOUT], decrement=True)
+        if sent is not None and sent.authenticated_id is not None:
+            tried.append(sent.authenticated_id.raw)
+            self._metrics.total.on_relay(_HEADER_BYTES + len(packet.payload))
+
+    async def _forward_packet(self, from_peer: _Peer, packet: Packet,
+                              key: int | None = None) -> None:
         if packet.ttl <= 1:
             return
         target = NodeID(packet.dst_id)
@@ -7541,6 +7689,7 @@ class MeshNode:
             # were not ours, and it is one integer pair on a path that has just
             # done a routing decision and a write.
             self._metrics.total.on_relay(_HEADER_BYTES + len(packet.payload))
+            self._note_forwarded(key, from_peer, peer)
             return
         # No live relay. Acquiring one takes seconds and must not happen here:
         # this runs in from_peer's receive loop, so an inline lookup/dial froze
@@ -7585,13 +7734,15 @@ class MeshNode:
             if key is None:
                 return
             if self._is_seen(key):
+                if packet.dst_id != self._id.raw and packet.dst_id != _BROADCAST_ID:
+                    await self._reroute_looped(peer, packet, key)
                 return
             # Past the gates the packet is well-formed, fresh, and came off an
             # authenticated link: record that link as a path back to its source
             # so the reply follows the way the request came.
             self._learn_reverse_path(peer, packet)
             if packet.dst_id != self._id.raw and packet.dst_id != _BROADCAST_ID:
-                await self._forward_packet(peer, packet)
+                await self._forward_packet(peer, packet, key)
                 return
         # One dict lookup and a set test, and only for a peer that has actually
         # announced something — this is the whole hot-path cost of rule C1. A

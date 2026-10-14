@@ -635,6 +635,37 @@ over it.
   matters). It lived here as `_wait_closed_bounded` until a second caller needed
   it and the connector was found still awaiting bare — see `gotchas.md` §1.
 
+## Veil: TCP with nothing recognisable on the wire (`transports/veil.py`)
+
+`tcp://` opens with a fixed pattern — the listener speaks first, and its first
+packet carries the version byte and a destination of twenty `0xff` bytes
+(BUGSVULNS 107). A censor needs no cryptanalysis to match that, and a prober
+confirms it by connecting. `veil://` is the same stream with that removed:
+
+* **The dialler speaks first**: `salt(16) | tag(16) | ChaCha20(padding)`, where
+  `tag` is an HMAC of the salt and the current minute under the circle's key and
+  the padding is 0–512 random bytes behind a two-byte length. Both directions'
+  stream keys come from HKDF over the key and the salt. After the hello, the
+  ordinary TCP framing runs inside the stream, so lengths are hidden as well.
+* **A listener answers only a hello that proves the key.** A wrong tag, a salt
+  already seen (only proved hellos are remembered, `MAX_SEEN`, so the table
+  cannot be filled by someone without the key), a minute outside
+  `CLOCK_WINDOW` either side, or a truncated hello gets no byte back: the
+  connection is read and discarded for 10–40 s and closed. The tag comparison
+  does not exit early on a match. Connections that have not proved the key —
+  from accept until proved or closed — are held to `MAX_SILENT`; past that, a
+  new one is closed at once.
+* **The key is a setting of the medium** (`key`, at least 12 characters), the
+  same on every node of a circle, read at each hello so a change applies to the
+  next one. It is a network-wide secret: whoever holds it can recognise the
+  traffic, so it hides the mesh from a censor outside the circle, not from the
+  circle. The node-to-node authentication and encryption run inside, unchanged.
+
+It is `TCPTransport` with a cipher between the socket and the framing
+(`_SealedReader`, `_SealedWriter`), so every TCP setting applies. What it does
+not do: hide the traffic's timing and volume, or look like a protocol (it looks
+like nothing), which some networks block for that reason alone.
+
 ## UDP (`transports/udp.py`)
 
 UDP is connectionless and unreliable → a **reliability layer**:
@@ -970,7 +1001,9 @@ arrived on it*. The gossip path simply never applied it.
 - **Two audiences, two proofs** (`ip_utils.ip_reachability`). A `lan`
   descriptor is confirmed by any inbound authenticated link: the listener
   works. A link-local address is no audience at all and gets no descriptor
-  (`advertisable_ips`). A `world` descriptor is a claim about the NAT, and only a connection
+  (`advertisable_ips`). A descriptor follows the **bind host**, as
+  `expand_listen_uri` does: a wildcard listener has one per address the machine
+  holds, one bound to an address has that one, a loopback listener has none. A `world` descriptor is a claim about the NAT, and only a connection
   from **off our own networks** supports it — `node._off_our_networks`, which is
   a globally-routable source address and nothing subtler. A relayed link is
   never evidence about a listener: nothing was opened to us.
@@ -979,7 +1012,12 @@ arrived on it*. The gossip path simply never applied it.
   second is what `advertised_uris()` requires before pairing a discovered public
   IP with a listener's port, and what `relay_capable()` ends up resting on.
 - **Local addresses need no proof.** They are addresses of interfaces on this
-  machine; a peer that cannot reach one simply fails to.
+  machine; a peer that cannot reach one simply fails to. That is why the first
+  invitation of a network may name a `lan` address no connection has reached yet
+  (`issue_join_ticket`, `local_endpoints(confirmed=False)`, answered with
+  `confirmed: false`): a node nobody has connected to has nothing confirmed, and
+  without this its first short invitation was refused. A `world` address that
+  nothing has reached is still never offered.
 - **The operator's escape hatch already existed**: only *wildcard* listen URIs
   are expanded, so somebody who knows their forwarding works states it as a
   concrete `tcp://their.public.ip:9000` and nothing here applies.

@@ -209,6 +209,42 @@ class TestFileRoutes:
             await node.stop()
 
 
+class TestANodeThatIsNotText:
+    """`node` is read once at the top of the fleet routes and used as a key and
+    a path part further down. An object or a list there got as far as a dict
+    lookup and came back as the interpreter's own message."""
+
+    ROUTES = ("update", "status", "revoke", "mkdir", "stacks", "scan", "shell",
+              "password", "invite", "enrol", "approve", "deny", "caps-set")
+
+    async def test_it_is_refused_as_a_bad_node_and_never_as_an_exception(self):
+        node, console, host, _built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            for route in self.ROUTES:
+                for value in ({"a": 1}, [1, 2], 5, True):
+                    status, _, _, data = await _post(
+                        console, "/api/fleet/" + route, token, {"node": value})
+                    assert status == 400, (route, value, status, data)
+                    assert data["error"] == "bad node id"
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+    async def test_the_id_spelling_is_checked_the_same_way(self):
+        node, console, host, _built = await _make(enabled=True)
+        try:
+            _status, token = await _login(console)
+            status, _, _, data = await _post(console, "/api/fleet/update", token,
+                                             {"id": ["ee" * 20]})
+            assert status == 400 and data["error"] == "bad node id"
+        finally:
+            console.stop()
+            await host.stop_all()
+            await node.stop()
+
+
 class TestDisabledApp:
     async def test_fleet_api_is_absent_when_disabled(self):
         node, console, host, _ = await _make(enabled=False)

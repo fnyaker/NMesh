@@ -475,6 +475,8 @@ _GOSSIP_FANOUT         = 6
 # the node runs. Failed identities back off independently so dead addresses do
 # not turn maintenance into a dial storm.
 _NEIGHBOR_TARGET          = 5
+_FINGER_LINKS             = 2      # links wanted in each distance band that has nodes in it
+_FINGER_DIALS             = 4      # bands filled per maintenance cycle
 # Floor of live maintained links. Below it the node is *searching*: it runs a
 # discovery cycle every _NEIGHBOR_REFRESH. At or above it the neighbourhood is
 # considered joined and the cycle stays quiet — a node that keeps looking up its
@@ -544,6 +546,11 @@ _LOSS_BURST_TRACKED       = 16
 _LOSS_BURST_COOLDOWN      = 60.0
 _ROUTE_SEND_FANOUT        = 5
 _ROUTE_HINT_MAX           = 256
+# Routed packets this node has passed on and how: the links each arrived on and
+# the links it went down, so a copy that comes back round a cycle can be sent a
+# different way instead of being dropped. Per packet the sets stop at
+# `_ROUTE_SEND_FANOUT`, which is also the most a replay can buy.
+_FWD_BOOK_MAX             = 4096
 _ROUTE_HINT_TTL           = 120.0
 # Measuring a routed path instead of assuming it (see `routed.py`).
 #
@@ -887,6 +894,7 @@ _CONN_HOLE_SUSTAIN  = 180.0
 _MANUAL_HOLE_MAX    = 32       # bounded table of manual-punch targets
 _UPGRADE_COOLDOWN      = 60.0  # min seconds between direct-link attempts per target
 _UPGRADE_MAX_TRACKED   = 256   # bounded per-target cooldown table
+_UPGRADE_LINK_SOFT     = 24    # links past which a lookup no longer buys a direct one
 
 # Two-step connect exchange blocks
 _CONN_BLOCK_VERSION = 2
@@ -1043,6 +1051,8 @@ __all__ = [
     "_NEIGHBOR_RETRY_MIN",
     "_NEIGHBOR_RETRY_TRACKED",
     "_NEIGHBOR_TARGET",
+    "_FINGER_LINKS",
+    "_FINGER_DIALS",
     "_NEIGHBOR_WATCH_TRACKED",
     "_OFFER_MAX",
     "_OFFER_RATE_MAX",
@@ -1149,6 +1159,7 @@ __all__ = [
     "_REVOKE_RATE_WINDOW",
     "_REVOKE_SYNC_MAX",
     "_ROUTABLE_TYPES",
+    "_FWD_BOOK_MAX",
     "_ROUTE_HINT_MAX",
     "_ROUTE_HINT_TTL",
     "_ROUTE_SEND_FANOUT",
@@ -1194,5 +1205,6 @@ __all__ = [
     "_TARPIT_MIN",
     "_UPGRADE_COOLDOWN",
     "_UPGRADE_MAX_TRACKED",
+    "_UPGRADE_LINK_SOFT",
     "_is_ip_address",
 ]

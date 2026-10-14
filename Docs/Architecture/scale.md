@@ -17,7 +17,7 @@ test for anything that grows.
 | # | Point | State |
 |---|---|---|
 | 1 | Membership chains and the routing answers that carry them | **fixed** (compaction, lookup end); smaller chains on the wire in progress |
-| 2 | Links per node, and what probing them costs a relay | **fixed** (probe budget) |
+| 2 | Links per node, and what probing them costs a relay | **fixed** (probe budget; links spread over distance and no link bought by a lookup, BUGSVULNS 108) |
 | 3 | Gossip planes (addresses, revocations, abuse, releases) | open |
 | 4 | Distributed storage (DHT, names, package directory) | open |
 | 5 | Per-remote-node tables | partly reviewed (below) |

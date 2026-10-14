@@ -49,6 +49,9 @@ MAX_RESPONSE = 4 * 1024 * 1024    # bytes read from one API answer
 MAX_LINE = 64 * 1024              # one header or chunk-size line
 MAX_CONTAINERS = 250
 MAX_IMAGES = 250
+MAX_VOLUMES = 250
+MAX_NETWORKS = 100
+MAX_STATS = 40                    # containers sampled at once; each sample takes ~1 s
 MAX_STACKS = 100
 MAX_LOG_TAIL = 2000               # lines
 # What a reply may carry back. Sized to fit one frame *after* JSON escaping:
@@ -480,6 +483,87 @@ async def images() -> list[dict]:
             "created": entry.get("Created") if isinstance(entry.get("Created"), int) else 0,
         })
     return out
+
+
+def _number(value) -> float:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def sample(raw) -> dict:
+    """CPU share and memory of one container from an Engine stats document.
+
+    The daemon reports counters, not rates: the share is the container's CPU
+    time over the machine's between the two readings the document carries."""
+    raw = raw if isinstance(raw, dict) else {}
+    cpu = raw.get("cpu_stats") if isinstance(raw.get("cpu_stats"), dict) else {}
+    before = raw.get("precpu_stats") if isinstance(raw.get("precpu_stats"), dict) else {}
+
+    def total(block: dict) -> float:
+        usage = block.get("cpu_usage") if isinstance(block.get("cpu_usage"), dict) else {}
+        return _number(usage.get("total_usage"))
+
+    used = total(cpu) - total(before)
+    system = _number(cpu.get("system_cpu_usage")) - _number(before.get("system_cpu_usage"))
+    cores = int(_number(cpu.get("online_cpus"))) or 1
+    percent = used / system * cores * 100.0 if used > 0 and system > 0 else 0.0
+    memory = raw.get("memory_stats") if isinstance(raw.get("memory_stats"), dict) else {}
+    detail = memory.get("stats") if isinstance(memory.get("stats"), dict) else {}
+    # What the kernel can take back is not what the container holds on to.
+    held = _number(memory.get("usage")) - _number(detail.get("inactive_file", detail.get("cache")))
+    return {"cpu": round(min(max(percent, 0.0), 100.0 * cores), 1),
+            "memory": int(max(held, 0.0)), "limit": int(_number(memory.get("limit")))}
+
+
+async def stats() -> dict:
+    """A sample for each running container, taken side by side."""
+    rows = [row for row in await containers(False) if row["state"] == "running"]
+    rows = rows[:MAX_STATS]
+
+    async def one(row: dict):
+        try:
+            raw = await call("GET", f"/containers/{clean_id(row['id'])}/stats?stream=false",
+                             timeout=10.0)
+        except DockerError:
+            return row["id"], None
+        return row["id"], sample(raw)
+
+    found = await asyncio.gather(*(one(row) for row in rows))
+    return {ident: value for ident, value in found if value is not None}
+
+
+async def volumes() -> list[dict]:
+    raw = await call("GET", "/volumes")
+    listed = raw.get("Volumes") if isinstance(raw, dict) else None
+    return [{"name": _short(entry.get("Name"), 128), "driver": _short(entry.get("Driver"), 32),
+             "mount": _short(entry.get("Mountpoint"), 256),
+             "created": _short(entry.get("CreatedAt"), 40)}
+            for entry in (listed if isinstance(listed, list) else [])[:MAX_VOLUMES]
+            if isinstance(entry, dict)]
+
+
+async def networks() -> list[dict]:
+    raw = await call("GET", "/networks")
+    out = []
+    for entry in (raw if isinstance(raw, list) else [])[:MAX_NETWORKS]:
+        if not isinstance(entry, dict):
+            continue
+        config = (entry.get("IPAM") or {}).get("Config") if isinstance(entry.get("IPAM"), dict) else None
+        subnet = next((_short(c.get("Subnet"), 64) for c in (config if isinstance(config, list) else [])
+                       if isinstance(c, dict) and c.get("Subnet")), "")
+        containers_in = entry.get("Containers")
+        out.append({"id": _short(entry.get("Id"), 64), "name": _short(entry.get("Name"), 128),
+                    "driver": _short(entry.get("Driver"), 32), "scope": _short(entry.get("Scope"), 16),
+                    "subnet": subnet,
+                    "attached": len(containers_in) if isinstance(containers_in, dict) else 0})
+    return out
+
+
+async def remove_image(image: str) -> dict:
+    ident = clean_image(image)
+    if not ident or ".." in ident:          # it becomes part of a request path
+        raise DockerError("that is not an image")
+    await call("DELETE", f"/images/{ident}", timeout=60.0)
+    return {"image": ident}
 
 
 async def overview() -> dict:

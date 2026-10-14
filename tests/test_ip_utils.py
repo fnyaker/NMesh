@@ -120,6 +120,30 @@ class TestExpand:
 # Attached-network enumeration
 # ---------------------------------------------------------------------------
 
+class TestWhatABoundListenerIsReachableOn:
+    """`expand_listen_uri` keeps a concrete bind host as it is; the descriptors
+    that tickets and LAN discovery read said every address the machine holds,
+    whatever the listener was bound to."""
+
+    @staticmethod
+    def _addresses(uri: str, local_ips: list[str]) -> set[str]:
+        from src.ip_utils import ip_reachability
+        return {d["address"] for d in
+                ip_reachability("tcp", uri, local_ips, [], True)}
+
+    def test_a_loopback_listener_is_reachable_by_nobody_else(self):
+        assert self._addresses("tcp://127.0.0.1:9000", ["192.0.2.5"]) == set()
+        assert self._addresses("tcp://[::1]:9000", ["192.0.2.5"]) == set()
+
+    def test_a_listener_bound_to_one_address_is_reachable_on_that_one(self):
+        got = self._addresses("tcp://192.0.2.5:9000", ["192.0.2.5", "198.51.100.7"])
+        assert got == {"tcp://192.0.2.5:9000"}
+
+    def test_a_wildcard_listener_is_reachable_on_every_address(self):
+        got = self._addresses("tcp://0.0.0.0:9000", ["192.0.2.5", "198.51.100.7"])
+        assert got == {"tcp://192.0.2.5:9000", "tcp://198.51.100.7:9000"}
+
+
 class TestLocalNetworks:
     """A LAN sweep needs the real prefix. Guessing /24 around an address misses
     a /22 or /16 entirely, so these check that the real mask comes through and

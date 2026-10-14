@@ -2212,6 +2212,18 @@ class FleetApp:
     async def _docker_images(self, _src, _rid, _document) -> dict:
         return {"items": await fleet_docker.images()}
 
+    async def _docker_stats(self, _src, _rid, _document) -> dict:
+        return {"info": await fleet_docker.stats()}
+
+    async def _docker_volumes(self, _src, _rid, _document) -> dict:
+        return {"items": await fleet_docker.volumes()}
+
+    async def _docker_networks(self, _src, _rid, _document) -> dict:
+        return {"items": await fleet_docker.networks()}
+
+    async def _docker_remove_image(self, _src, _rid, document) -> dict:
+        return {"info": await fleet_docker.remove_image(document.get("image"))}
+
     async def _docker_pull(self, _src, _rid, document) -> dict:
         return {"info": await fleet_docker.pull(document.get("image"))}
 
@@ -3576,6 +3588,10 @@ _DOCKER_OPS = {
     "logs": FleetApp._docker_logs,
     "act": FleetApp._docker_act,
     "images": FleetApp._docker_images,
+    "stats": FleetApp._docker_stats,
+    "volumes": FleetApp._docker_volumes,
+    "networks": FleetApp._docker_networks,
+    "remove_image": FleetApp._docker_remove_image,
     "pull": FleetApp._docker_pull,
     "deploy": FleetApp._docker_deploy,
     "stacks": FleetApp._docker_stacks,

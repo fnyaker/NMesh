@@ -1,7 +1,7 @@
 import asyncio
 import os
 import pytest
-from src.node import MeshNode, PING, PONG, FIND_NODE, FOUND_NODE, _encode_entries, _encode_addresses
+from src.node import MeshNode, CHALLENGE, PING, PONG, FIND_NODE, FOUND_NODE, _encode_entries, _encode_addresses
 from src.node_id import NodeID
 from src.routing import NodeEntry
 from src.packet import Packet
@@ -283,6 +283,33 @@ class TestAdmission:
             CHALLENGE, os.urandom(20), b"\xff" * 20, os.urandom(32)))
         await asyncio.sleep(0.02)
         assert virtual in node._peers
+        await node.stop()
+
+
+class _LetsGoBeforeTheGreeting(FakeTransport):
+    """A far end that closed the link between the accept and our first words."""
+
+    async def send(self, packet) -> None:
+        if packet.type == CHALLENGE:
+            raise ConnectionError("the tcp link is closed")
+        await super().send(packet)
+
+
+class TestAnAcceptedLinkThatClosesBeforeTheGreeting:
+    async def test_it_is_dropped_and_nothing_is_raised(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        await node._on_new_transport(_LetsGoBeforeTheGreeting())
+        await asyncio.sleep(0.02)
+        assert node._peers == []
+        await node.stop()
+
+    async def test_the_node_goes_on_accepting(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._running = True
+        await node._on_new_transport(_LetsGoBeforeTheGreeting())
+        await node._on_new_transport(FakeTransport())
+        assert len(node._peers) == 1
         await node.stop()
 
 

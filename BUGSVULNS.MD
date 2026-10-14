@@ -3835,3 +3835,311 @@ builds and then cannot import. The test written for exactly this failed on
 3.14. On 3.14 Trivy found four fixable HIGHs, all in pip's own vendored
 packages, so the running image no longer carries pip. Unit and integration
 suites pass on 3.14; CI's interpreter is now 3.14 (`TEST.md`, `AGENTS.md`).
+
+## 100 — high — A routed packet that went round a cycle was dropped with its only copy
+
+> **Status — mitigated.** Tests: `tests/test_loop_backtrack.py`. Measured on
+> 120 nodes over eight processes (`tests/tools/mesh_sim.py`): of 300 first
+> contacts, 256 arrived within 12 s before and 285 after; the sender had to
+> retry 45 times before and 15 after. Not measured past 120 nodes.
+
+**Where** — `src/node.py`: `_forward_packet`, `_route_candidates`, and the
+replay drop in `_handle_packet`.
+
+**What happens** — a relay forwards a routed packet to its XOR-nearest
+neighbours **except the link it arrived on**, and nothing else prevents a cycle:
+`_is_seen` drops the second visit. In a trace of one `E2E_HANDSHAKE` from node
+A to node D, relay B sent it to C, C — whose nearest neighbour other than B was
+B's other neighbour — sent it on, and it came back to B, which had already seen
+it. The packet is lost without a word. The next attempt, five seconds later,
+often takes a route that the first one's background acquisition has since
+learned. A strict "forward only to a node closer than this one" rule is not the
+answer: on a chain the next hop is farther by definition (`routing.md`).
+
+**Reproduce** — N real `MeshNode`s on loopback (TCP only), each newcomer joining
+through two random earlier members; wait for gossip to settle; from random pairs
+that share no link send one message each and wait. At 30 nodes (event loop late
+by under 100 ms) 491 of 500 first contacts arrive within 8 s, about 2 % wait one
+or two retry intervals (5, 10 or 15 s). At 120 nodes spread over eight processes
+15 % of 300 do not arrive in 12 s. Every failure is a first contact; once an
+end-to-end session exists the same pair answers in about 10 ms.
+
+**Withdrawn** — an earlier version of this entry quoted 100 and 200 nodes
+(median 1.7 s and 10 s, 23 of 30 delivered). Those were taken in **one**
+process, whose event loop was hundreds of milliseconds late (retries arrived
+every 8 s instead of 5): they measured the simulator's CPU, not the routing.
+
+**Tried, not kept** — a handshake retry of 0.75 s doubling to 5 s instead of a
+flat 5 s: no difference at 30 or 40 nodes.
+
+**Fixed** — `_reroute_looped`: a duplicate arriving over an identity the packet
+had not used at this node is sent to the nearest neighbour it had neither come
+from nor gone to. A duplicate over an identity already seen is a replay and is
+dropped as before; a packet leaves a node by at most `_ROUTE_SEND_FANOUT`
+neighbours; the book that remembers is bounded (`_FWD_BOOK_MAX`). The cost,
+measured on 120 nodes while the mesh was settling: 31.5 against 32.6 packets per
+second per node, and 27 336 against 25 447 packets relayed during 100 first
+contacts.
+
+**Still open** — a first contact still goes out blind, so it can wander before
+it arrives; acquiring the route with a lookup before the first forward when no
+measured path exists, or sending the first handshake over two disjoint first
+hops, would shorten that. Nothing was measured above 120 nodes. The traffic of a
+mesh still settling is the number to look at before it is asked to be larger: at
+30 nodes, about 29 KiB/s per node during the first minutes (neighbour searches
+and handshakes), against about 0.2 KiB/s once settled (pings only).
+
+## 101 — low — An accepted link closed before the greeting raised out of the accept callback
+
+> **Status — fixed.** Tests: `tests/test_node.py::TestAnAcceptedLinkThatClosesBeforeTheGreeting`
+> (a far end that lets go before our first words; both tests fail with the guard
+> removed). What triggered it on the 200-node start-up was not confirmed, so the
+> test stands in for the far end.
+
+**Where** — `src/node.py`: `_on_new_transport`, the `peer.send` of the
+capabilities and the challenge; reached from `src/transports/tcp.py`
+(`_accept`) and `src/transports/manager.py` (`_dispatch_incoming`).
+
+**What happens** — when the far end closes the link before the node's first
+send, `peer.send` raises `ConnectionError("the tcp link is closed")`, which
+nothing catches: asyncio logs `Unhandled exception in client_connected_cb` with
+a traceback. Seen three times while 200 in-process nodes dialled each other at
+start-up (mutual dials). The node did not fall over, and what happens to
+the peer already appended to `_peers` was not followed. The charter's line is
+that no input should get an unhandled exception out of a receive path.
+
+**Fixed** — the `CHALLENGE` send is guarded like the capabilities one beside it:
+a failure ends the link through `_drop_failed_peer` instead of leaving the accept
+callback.
+
+**Not reproduced by a raw client** — 3984 connections opened and closed at once
+against a running node produced none. That points at the link being ended from
+inside the node rather than at a hostile client, but the cause was not
+confirmed. The only reproduction is the 200-node start-up of BUGSVULNS 100.
+
+## 102 — medium — Relays that take packets and drop them cost a fifth of first contacts at 20 %
+
+> **Status — mitigated.** A first handshake now leaves by two neighbours (below);
+> relays that drop what they should forward are still not detected as such.
+
+**Where** — `src/node.py`: the relay path (`_forward_packet`, `_reroute_looped`),
+`_route_outbound`, the E2E handshake retry.
+
+**What happens** — a node that stays in the mesh, answers for itself and relays
+nothing for anybody else is a black hole, and a mesh with a share of them loses
+first contacts in proportion. On 100 nodes over eight processes, 60 to 80 first
+contacts between honest nodes (`tests/tools/mesh_sim.py --blackhole`, loop
+lateness under 200 ms): with none 58 of 60 arrive within 12 s; with 10 %, 54 of
+60; with 20 %, between 39 and 54 of 60 across runs (194 of 240 within 8 s over
+three seeds); with 30 %, 37 to 39 of 60. The sender had to retry for 15 to 40 %
+of them, and a retry takes the same greedy walk again.
+
+**Tried, not kept** — a retry that leaves by the next candidate instead of the
+best, and starts after 0.75 s instead of 5 s. At 20 % it delivered 188 of 240
+against 194 (noise) and needed 35 retries against 52. A black hole that is not
+the first hop is not avoided by changing the first hop, and the answer has to
+come back through relays too.
+
+**Fixed (mitigation)** — `_initiate_e2e_handshake` sends the same packet to a
+second neighbour when the first is not the target; the far end drops the later
+copy as a replay. 100 nodes over eight processes, 20 % black holes, 80 first
+contacts, three seeds each: within 8 s 192 of 240 before, 209 of 240 after; the
+sender had to retry for 64 before, 16 after; packets relayed during the run did
+not rise (51 450 before, 35 262 after). With none, 74 then 78 of 80 on one seed.
+It widens the first contact, it does not find the relay.
+
+**Still needs** — something that does not rely on the relays a first contact happens
+to cross: acquiring a direct link by lookup and dial before the first blind
+forward, or sending the first handshake over two disjoint paths, or a hop-by-hop
+acknowledgement a relay cannot fake. Each costs traffic and must be measured at
+the same sizes. An authenticated peer can already be charged for what it is seen
+doing (`reputation.py`); a relay that silently drops is exactly what that cannot
+see, so this is the case the measured paths in `routed.py` exist for, and what
+they cover for a first contact is the open question.
+
+## 103 — low — A fleet route given a `node` that was not text answered with the interpreter's own words
+
+> **Status — fixed.** Tests: `tests/test_console_fleet.py::TestANodeThatIsNotText`.
+> Found by `tests/tools/api_fuzz.py`, signed in, on a throwaway node.
+
+**Where** — `src/webconsole.py`: `_handle_fleet_post`, the first lines and the
+last `except`.
+
+**What happens** — `node` is read once, `data.get("node") or data.get("id")`, and
+never checked to be text. An object or a list there reached a dictionary lookup
+further down and came back as `503 {"error": "unhashable type: 'dict'"}` on
+`update`, `stacks` and `mkdir`. The node did not fall over, and the route needs a
+session; what it gave an operator was the name of an internal type and no way to
+act on it.
+
+**Fixed** — a `node` that is not text is a `400 bad node id`, whichever route
+and whichever of the two spellings; a `TypeError`, `AttributeError`, `KeyError`
+or `IndexError` that gets past the checks is written to the log and answered with
+a sentence that says nothing about the code.
+
+**Checked and fine** — all 60 API routes refuse a request without a session
+(401); across about 3 100 hostile requests (truncated, binary, deeply nested and
+oversized JSON, wrong types, control characters, 300 kB strings) the console
+answered 400, 404 or 413 or a refusal, and the node answered afterwards.
+`POST /api/fleet/invite` for a node that does not answer waits up to
+`_INVITE_WAIT` for the answer by design.
+
+## 104 — high — One silent connection stopped the console for everybody
+
+> **Status — fixed.** Tests: `tests/test_http_server.py` (the silent client
+> fails with the handshake back in `accept()`; the ceiling fails with the
+> semaphore removed). Found by `tests/tools/api_fuzz.py` leaving a traceback in
+> the log, then followed up by hand.
+
+**Where** — `src/webconsole.py`: the server's creation; the same default
+`ThreadingHTTPServer` in `src/apps/chat_web.py` and `src/apps/mcp.py`.
+
+**What happens** — the console wraps its *listening* socket for TLS, and a
+wrapped listening socket handshakes inside `accept()`. `ThreadingHTTPServer`
+accepts in one thread, so a client that connects to the port and sends nothing
+holds that thread: every other request, a signed-in operator's included, waited
+behind it. It was not let go after 130 s, and the handlers set no timeout, so it
+was the client's choice when. No credential is needed. The console binds to
+loopback by default, and `--console-host 0.0.0.0` is the documented way to
+reach it from another machine.
+
+Two lesser faults came with it. Connections were not bounded: a thread each, for
+anyone who could connect. And a client that reset a connection made the default
+`handle_error` write a traceback of about 1.4 kB to stderr: 500 resets, 723 kB of
+log, with no password involved.
+
+**Fixed** — `HardenedServer` (`src/http_server.py`), used by all three servers:
+the handshake is the connection's own (`do_handshake_on_connect=False`), handlers
+set `timeout = CONNECTION_TIMEOUT` (30 s), at most `MAX_CONNECTIONS` (256) are
+served at once and a further one is closed before it costs a thread, and a client
+that hung up is not logged. A client whose hello arrives three seconds late is
+served; one that never speaks is closed at the timeout.
+
+**The first fix was not enough** — with only the total bound, one client opening
+256 requests it never finishes (a byte every few seconds keeps the timeout from
+firing) took every slot and the console refused everybody, which is a different
+way to the same outage. `MAX_PER_ADDRESS` (32) bounds one address; measured
+against a real node, 300 attempts from one address left 32 open and a request
+from another machine was served. An attacker with many addresses is not stopped
+by this, and the console is not meant to face one.
+
+## 105 — medium — The first invitation of a network could not be a short one
+
+> **Status — fixed.** Tests: `tests/integration/test_join_ticket.py::TestTheFirstInvitationOfANetwork`.
+> Found walking the console in a browser with two freshly started nodes.
+
+**Where** — `src/node.py`: `issue_join_ticket`, `local_endpoints`.
+
+**What happens** — a `lan` address is confirmed by an inbound authenticated
+connection. A node nobody has connected to has none, so *Network → Add a node →
+Create invitation* answered "this node has no confirmed public address and no
+peer that can carry an invitation for it … Use the manual exchange instead": for
+the first node of a network, on a home network with two machines, the way out was
+three blocks of text moved by hand.
+
+**Fixed** — with no confirmed address and no relay, a `lan` address on one of this
+node's own networks is offered, with `confirmed: false`, and the page says the
+address is untried and what to check if the other machine cannot reach it. A
+confirmed address still wins; a `world` address nothing has reached is still never
+offered. Measured in a browser on two fresh nodes: invitation in 0.4 s, joined
+0.4 s after it was pasted.
+
+## 106 — medium — A listener bound to one address announced every address on the machine
+
+> **Status — fixed.** Tests: `tests/test_ip_utils.py::TestWhatABoundListenerIsReachableOn`.
+> Found because the fix for 105 failed an existing test that bound a loopback
+> listener and still expected LAN addresses.
+
+**Where** — `src/ip_utils.py`: `ip_reachability`.
+
+**What happens** — `expand_listen_uri` keeps a concrete bind host as it is, and
+`ip_reachability` took only the port and listed every interface address the
+machine holds. A node listening on `127.0.0.1`, or on one address of several,
+described itself as reachable on addresses it was not listening on. Nothing
+noticed while a `lan` descriptor needed a confirmed connection first; the
+descriptors feed tickets, LAN discovery and the console's Reachability page.
+
+**Fixed** — the descriptors follow the bind host: a wildcard has one per address,
+a concrete host has that one, a loopback listener has none. Two existing tests
+that described a LAN-reachable node while listening on `127.0.0.1` now listen on
+`0.0.0.0`, which is what their story meant.
+
+
+## 107 — medium — The TCP link opens with a fixed, recognisable pattern
+
+> **Status — mitigated.** `veil://` (`src/transports/veil.py`) is a TCP medium
+> with no fixed bytes and a listener that answers only a hello proving a shared
+> key. `tcp://` itself still opens as described; a node that must not be
+> recognised listens on `veil://`. The key is network-wide, and the timing and
+> volume of the traffic are not hidden.
+
+**Where** — `src/transports/tcp.py`, `src/packet.py` (`HEADER_FORMAT`), the
+first frame a node sends on an accepted link.
+
+**What happens** — connecting to a node's listener and saying nothing, the node
+speaks first: a length prefix, then a packet header in the clear (version byte,
+type, TTL 64, the 20-byte source id, and a destination of twenty `0xff` bytes).
+Over 336 bytes the byte entropy is 5.8 bits, against close to 8 for an
+encrypted stream. A censor does not need to break anything: a rule on "server
+speaks first, `0xff` run at offset 25" finds every listener, and an active
+prober that connects and listens confirms it. This is the property that
+protocols built against national firewalls (obfs4, Shadowsocks, Snowflake,
+meek, REALITY) spend their effort removing, and a mesh meant to resist
+disruption inherits the problem at its edge: the links between nodes in
+different networks are the ones a censor sees.
+
+**Needs** — a transport that wraps TCP in a stream with no fixed bytes: keyed by
+something the dialler already holds (the join ticket carries a key for the
+listener it names), uniform-looking from the first byte, silent until the right
+key proves itself so a prober gets nothing back, with padding on the lengths. It
+is a transport (`BaseTransport`), so the core does not change; the packet header
+inside it can stay as it is. A listener that answers a wrong first message with
+nothing is the part that defeats active probing.
+
+## 108 — high — Every lookup answered through a relay ended in a direct link, so the mesh became a full mesh
+
+> **Status — fixed** (soft limit, and links spread over distance). Tests:
+> `tests/test_routing_stability.py::TestALookupDoesNotBuyALinkPastTheSoftLimit`,
+> `TestFingers`.
+
+**Where** — `src/node.py`: `_route_outbound` → `_maybe_upgrade_path`;
+`_maintain_neighbors`.
+
+**What happens** — any routed packet sent through a relay asked for a direct link
+to its destination, and a lookup (`FIND_NODE`, and the `FOUND_NODE` that answers
+it) is a routed packet. Every lookup therefore ended in a handshake with the node
+it asked about. Measured on real nodes spread over eight processes, 90 s after
+start: 40 nodes held 24 links each (of 39 possible), 100 nodes held 57, and the
+traffic of a mesh with nothing to say grew with it, 5.1 then 17.9 packets per
+second per node, 19.8 at 240 nodes with the simulator itself saturated (loop
+lateness 1 s, 7.4 of 8 cores). A node holds at most `_MAX_PEERS` = 128 links, so
+at the sizes the project is for each node would sit at that limit and spend its
+time on post-quantum handshakes (about 22 kB each way) with nodes it asked one
+question. It was also why routing looked fine at these sizes: the mesh was
+nearly complete.
+
+**Fixed** — two parts, measured together.
+
+* Past `_UPGRADE_LINK_SOFT` links, a lookup no longer buys a direct link unless
+  the node asked about is nearer than the least near of the three neighbours
+  held; what people say to each other still does.
+* Without those links the greedy forwarding had nothing to hold on to, so links
+  are now spread over distance on purpose (`_finger_candidates`): each distance
+  band that has nodes in it gets `_FINGER_LINKS` links, filled from the routing
+  table `_FINGER_DIALS` bands per maintenance cycle, farthest first.
+
+On 240 nodes over eight processes (not saturated: loop lateness at the 99th
+percentile 4 to 13 ms): 2.9 to 3.5 packets per second per node at rest (from
+19.8), 0.7 cores for the whole mesh (from 7.4), about 25 to 30 links per node
+(from 56 at 100 nodes). With the soft limit alone, 87 to 94 first contacts of 100
+arrived; with the links spread over distance, 90 to 92 over four seeds, and 86 to 96 once a node that had just refused was no longer offered again before its back-off ended. Run to run the same seed moves by five or more, so these are ranges, not a ranking.
+
+**Still open** — about one first contact in fourteen is still lost on 240 nodes
+with nothing killed; the undelivered ones mostly end at a node holding one to
+five links (`mesh_sim.py --explain`). A rule that looked up the target at a
+local minimum of the distance was tried and measured no better (91 of 100 on
+the seed that gave 91), and so was a Kademlia bucket refresh for the bands
+where a node holds no link (93 of 100 on average over four seeds, the same as
+without, for 4 to 6 packets per second per node at rest instead of 2.4 to 4.4). And there is nothing larger than 240 nodes to measure on this
+machine: the simulator needs more cores than the 8 it has once the mesh is
+chatty, and at rest it is the first number to check again.

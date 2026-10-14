@@ -372,6 +372,21 @@ scope. Add yours.
   $p; done`, the loop's own shell matched, and it killed itself the same way.
   Take the PID the background task reported, or match with `ps … | grep
   "[d]evmesh"`, whose pattern does not match its own text.
+- **`pkill -f` a third time, over `ssh`/`pct exec`.** `pct exec 112 -- bash -c
+  'pkill -f nmesh_node.py; …deploy…'` matched the `bash -c` carrying that very
+  text, so the deploy after it never ran and the screenshot taken next showed
+  the old page. → Kill by PID read from `pgrep`/`ps` in a separate step, and
+  confirm the new file is on the target (grep for the new string) before
+  looking at what it renders.
+- **A scale figure that measured the simulator.** Routing results at 100 and
+  200 nodes were taken with every node in one process: its event loop was
+  hundreds of milliseconds late, retries came every 8 s instead of 5, and the
+  "failures" were CPU. They went into `BUGSVULNS.MD` before anyone read the
+  loop's lateness, and had to be withdrawn. → A simulation reports its own
+  clock error next to its result (the lateness of a 50 ms timer is enough),
+  and a number taken while that error is large is not a number about the
+  system. Prefer a metric that does not read the wall clock — "did the sender
+  have to retry" — over a latency taken on a saturated loop.
 - **A clock patched through a module that shares it.** `monkeypatch.setattr(
   node_mod.time, "monotonic", …)` replaces `time.monotonic` for the whole
   process, the event loop's clock included: every `sleep` and `wait_for` froze
@@ -468,6 +483,11 @@ scope. Add yours.
   suite hung. The close had been the only thing ending it. → Before removing an
   exit from a loop, find what else that exit was the bound for, and test the
   loop with a medium that never waits.
+- **A rate called "at rest" that was a mesh still settling.** About 30 packets
+  per second per node was published as idle traffic; it was taken 25 s after
+  start, with searches and handshakes still running, and the same mesh sent
+  under 2 packets per second (about 0.2 KiB/s, pings only) after 150 s. →
+  Measure at two settling times, publish the later one, and state the time.
 
 ### Running the tests (read this before trusting "green")
 

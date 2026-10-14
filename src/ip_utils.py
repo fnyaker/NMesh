@@ -448,6 +448,19 @@ def ip_reachability(scheme: str, uri: str, local_ips: list[str],
     if hp is None:
         return []
     port = hp[1]
+    bound = hp[0].strip("[]")
+    if not is_wildcard(bound):
+        # A listener bound to one address is reachable on that one, as
+        # `expand_listen_uri` already says of it — not on every address this
+        # machine happens to hold. A loopback listener is reachable by nobody
+        # else at all.
+        try:
+            if ipaddress.ip_address(bound).is_loopback:
+                local_ips = []
+            else:
+                local_ips = [bound]
+        except ValueError:
+            local_ips = []
     anchor = next((a for a in public_addrs if _is_global_ip(a)), "")
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
