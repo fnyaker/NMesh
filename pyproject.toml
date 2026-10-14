@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "nmesh"
-version = "0.4.102"
+version = "0.4.103"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

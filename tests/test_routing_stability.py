@@ -950,3 +950,43 @@ class TestAnIdThatNeverAnswers:
 
 async def _empty():
     return []
+
+
+# ---------------------------------------------------------------------------
+# 5 — A first contact leaves by two neighbours
+# ---------------------------------------------------------------------------
+
+class TestAFirstHandshakeTakesTwoWays:
+    async def _founder(self):
+        node = MeshNode(transport_manager=make_manager())
+        node._cert_store.add(node._identity.self_signed_cert())
+        node._cert_store.add_root(node.id)
+        return node
+
+    async def test_a_second_neighbour_carries_the_same_packet(self):
+        from src.node import E2E_HANDSHAKE
+        node = await self._founder()
+        target = NodeID(os.urandom(20))
+        links = [await _attach(node, NodeID(os.urandom(20))) for _ in range(3)]
+        await node._initiate_e2e_handshake(target)
+        seen = [[p for p in fake.sent if p.type == E2E_HANDSHAKE] for _, fake in links]
+        carriers = [sent for sent in seen if sent]
+        assert len(carriers) == 2, "exactly two neighbours carry it"
+        assert carriers[0][0].msg_id == carriers[1][0].msg_id
+
+    async def test_a_direct_link_to_the_target_is_not_duplicated(self):
+        from src.node import E2E_HANDSHAKE
+        node = await self._founder()
+        target = NodeID(os.urandom(20))
+        _, direct = await _attach(node, target)
+        _, other = await _attach(node, NodeID(os.urandom(20)))
+        await node._initiate_e2e_handshake(target)
+        assert [p.type for p in direct.sent if p.type == E2E_HANDSHAKE] == [E2E_HANDSHAKE]
+        assert not [p for p in other.sent if p.type == E2E_HANDSHAKE]
+
+    async def test_one_neighbour_alone_still_gets_it_once(self):
+        from src.node import E2E_HANDSHAKE
+        node = await self._founder()
+        _, fake = await _attach(node, NodeID(os.urandom(20)))
+        await node._initiate_e2e_handshake(NodeID(os.urandom(20)))
+        assert len([p for p in fake.sent if p.type == E2E_HANDSHAKE]) == 1

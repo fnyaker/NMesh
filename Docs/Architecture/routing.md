@@ -146,6 +146,19 @@ answers (26 kB each, a post-quantum certificate chain per entry) and about 10 ar
 handshakes. A figure called "at rest" has to say how long after the last join it
 was taken.
 
+### A first handshake leaves by two neighbours (`_initiate_e2e_handshake`)
+
+A first contact crosses relays this node has never measured, and a relay that
+takes packets and drops them looks like any other until it has failed. So the
+E2E handshake, and only it, is sent to a second neighbour as well, whenever the
+first is not the target. Both copies carry the same `msg_id`; whichever arrives
+second is dropped as a replay by the far end (`_is_seen`), and the relays on the
+way see two independent walks. A direct link to the target gets the one copy.
+Measured on 100 nodes with 20 % relays dropping everything: 209 of 240 first
+contacts within 8 s against 192, and 16 retries against 64 (BUGSVULNS 102). It
+makes a bad relay cost a copy instead of `_E2E_RETRY_INTERVAL`; it does not find
+the relay.
+
 ### A return path learned from traffic (`_route_hints`)
 
 XOR proximity is only a **hypothesis** about an overlay we have not finished

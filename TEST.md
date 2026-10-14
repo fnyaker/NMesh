@@ -274,7 +274,9 @@ tests/
 │     cost is bounded (replays, fanout, the book)
 ├── test_routing_stability.py                          — routing regressions:
 │     the size of a FOUND_NODE, acquiring a route outside the receive loop,
-│     the return path learned from traffic, bounded teardown
+│     the return path learned from traffic, bounded teardown, a first
+│     handshake carried by two neighbours (and by one only when it has one,
+│     or a direct link to the target)
 ├── test_e2e.py / test_data.py                         — E2E encryption
 ├── test_invite*.py / test_cert_store.py               — invitations & trust,
 │     including the **rendezvous** that lets one reach a node with no address of

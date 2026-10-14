@@ -4649,7 +4649,17 @@ class MeshNode:
         self._e2e_attempt[target] = time.monotonic()
         self._persist_state()
         packet = Packet.create(E2E_HANDSHAKE, self._id.raw, target.raw, payload)
-        await self._route_outbound(packet)
+        first = await self._route_outbound(packet)
+        # A first contact crosses relays nobody has measured, and a relay that
+        # takes packets and drops them cannot be told from a good one before it
+        # has failed. A second neighbour carries the same packet (the far end
+        # drops the later copy as a replay), so one such relay costs a copy
+        # rather than a retry interval.
+        if first is not None and first.authenticated_id != target:
+            other = [p for p in self._route_candidates(target)
+                     if p.authenticated_id not in (first.authenticated_id, target)]
+            if other:
+                await self._send_to_candidates(packet, other[:1])
 
     def _ensure_e2e_retry(self) -> None:
         if self._e2e_retry_task is None or self._e2e_retry_task.done():

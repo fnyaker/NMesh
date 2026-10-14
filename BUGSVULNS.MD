@@ -3919,7 +3919,8 @@ confirmed. The only reproduction is the 200-node start-up of BUGSVULNS 100.
 
 ## 102 — medium — Relays that take packets and drop them cost a fifth of first contacts at 20 %
 
-> **Status — open.** Measured, and one remedy tried and refused (below).
+> **Status — mitigated.** A first handshake now leaves by two neighbours (below);
+> relays that drop what they should forward are still not detected as such.
 
 **Where** — `src/node.py`: the relay path (`_forward_packet`, `_reroute_looped`),
 `_route_outbound`, the E2E handshake retry.
@@ -3939,7 +3940,15 @@ against 194 (noise) and needed 35 retries against 52. A black hole that is not
 the first hop is not avoided by changing the first hop, and the answer has to
 come back through relays too.
 
-**Needs** — something that does not rely on the relays a first contact happens
+**Fixed (mitigation)** — `_initiate_e2e_handshake` sends the same packet to a
+second neighbour when the first is not the target; the far end drops the later
+copy as a replay. 100 nodes over eight processes, 20 % black holes, 80 first
+contacts, three seeds each: within 8 s 192 of 240 before, 209 of 240 after; the
+sender had to retry for 64 before, 16 after; packets relayed during the run did
+not rise (51 450 before, 35 262 after). With none, 74 then 78 of 80 on one seed.
+It widens the first contact, it does not find the relay.
+
+**Still needs** — something that does not rely on the relays a first contact happens
 to cross: acquiring a direct link by lookup and dial before the first blind
 forward, or sending the first handshake over two disjoint paths, or a hop-by-hop
 acknowledgement a relay cannot fake. Each costs traffic and must be measured at
