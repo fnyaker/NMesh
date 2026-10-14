@@ -4810,7 +4810,11 @@ function ticketRoutes(data){
     ? "directly, on this network only" : "directly, from anywhere");
   if(data.relay_uri) routes.push("through another node, when that fails");
   if(!routes.length) return "";
-  return "It works " + routes.join(", and ") + ".";
+  const untried = data.uri && data.confirmed === false
+    ? " Nobody has connected to this node yet, so the address is untried: if the "
+      + "other machine cannot reach it, check that its port is open here."
+    : "";
+  return "It works " + routes.join(", and ") + "." + untried;
 }
 
 $("tk-make").addEventListener("click", (event) => withBusy(event.target, async () => {

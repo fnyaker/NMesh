@@ -5901,16 +5901,23 @@ class MeshNode:
                     out.append(address)
         return out
 
-    def local_endpoints(self) -> list[str]:
+    def local_endpoints(self, *, confirmed: bool = True) -> list[str]:
         """Addresses a node on our own networks can dial.
 
         Not a weaker version of :meth:`public_endpoints` — a different audience,
         proved by a different thing (`ip_utils.ip_reachability`). A ticket that
         names one works on that network and nowhere else, which is exactly right
-        for the case it exists for and is why what comes back says so."""
+        for the case it exists for and is why what comes back says so.
+
+        ``confirmed=False`` also returns the ones no inbound connection has
+        arrived on yet. Confirmation is evidence a node collects by being used,
+        and a node that has never had a peer has none to show: it is the first
+        invitation of a network that has to name an address nobody has tried."""
         out: list[str] = []
         for descriptor in self.reachability():
-            if descriptor.get("scope") != "lan" or not descriptor.get("confirmed"):
+            if descriptor.get("scope") != "lan":
+                continue
+            if confirmed and not descriptor.get("confirmed"):
                 continue
             address = descriptor.get("address")
             if isinstance(address, str) and address.startswith("tcp://"):
@@ -5956,6 +5963,21 @@ class MeshNode:
                 direct = (hostport[0].strip("[]"), hostport[1])
 
         candidates = self._rendezvous_candidates()
+        tried = bool(endpoints)
+        if direct is None and not candidates:
+            # Nothing proven and nobody to carry it. An address on one of this
+            # machine's own networks is still the right thing to offer on that
+            # network — the alternative is no short invitation at all for the
+            # first node of a network — and the answer says it is untried. A
+            # public address that nothing has reached is a different claim and
+            # is never offered this way.
+            endpoints = self.local_endpoints(confirmed=False)
+            if endpoints:
+                parsed = _validate_uri(endpoints[0])
+                hostport = split_host_port(parsed[1]) if parsed else None
+                if hostport is not None:
+                    direct = (hostport[0].strip("[]"), hostport[1])
+                    scope = "lan"
         if direct is None and not candidates:
             raise ValueError(
                 "this node has no confirmed public address and no peer that can "
@@ -5986,6 +6008,9 @@ class MeshNode:
             # has to be able to say "this one only works on your own network"
             # rather than let somebody find out after sharing it.
             "scope": scope if direct else "",
+            # False for an address no connection has reached yet, so a page can
+            # say so rather than let somebody find out after sharing it.
+            "confirmed": tried if direct else False,
             "code": code,
             "expires_at": expires_at,
             "ttl": window,

@@ -1237,9 +1237,13 @@ interface says so next to every ticket issued.
   `world` (an inbound connection really arrived on it, never one we merely
   believe is public) or, failing that, `lan`, which is a different audience and
   the whole of what a local deployment has — *and* a relay to reach it through
-  when that address does not answer. The page says which it got. A node with
-  neither gets a 409 and the explanation: an invitation pointing nowhere is
-  worse than none, because it fails after being shared.
+  when that address does not answer. The page says which it got. A node nobody
+  has connected to yet has nothing confirmed, so when it has neither a confirmed
+  address nor a relay its first invitation names an address on its own network
+  that no connection has reached, and the page says so ("untried"). A public
+  address nothing has reached is never offered. A node with no address at all
+  gets a 409 and the explanation: an invitation pointing nowhere is worse than
+  none, because it fails after being shared.
 - **The relay half is a rendezvous.** A relayed invitation needs a post-quantum
   key and a signature, five kilobytes — far past a QR code. So the inviter
   leaves that with the relay and the string carries the relay's address and the

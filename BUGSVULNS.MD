@@ -4011,3 +4011,45 @@ way to the same outage. `MAX_PER_ADDRESS` (32) bounds one address; measured
 against a real node, 300 attempts from one address left 32 open and a request
 from another machine was served. An attacker with many addresses is not stopped
 by this, and the console is not meant to face one.
+
+## 105 — medium — The first invitation of a network could not be a short one
+
+> **Status — fixed.** Tests: `tests/integration/test_join_ticket.py::TestTheFirstInvitationOfANetwork`.
+> Found walking the console in a browser with two freshly started nodes.
+
+**Where** — `src/node.py`: `issue_join_ticket`, `local_endpoints`.
+
+**What happens** — a `lan` address is confirmed by an inbound authenticated
+connection. A node nobody has connected to has none, so *Network → Add a node →
+Create invitation* answered "this node has no confirmed public address and no
+peer that can carry an invitation for it … Use the manual exchange instead": for
+the first node of a network, on a home network with two machines, the way out was
+three blocks of text moved by hand.
+
+**Fixed** — with no confirmed address and no relay, a `lan` address on one of this
+node's own networks is offered, with `confirmed: false`, and the page says the
+address is untried and what to check if the other machine cannot reach it. A
+confirmed address still wins; a `world` address nothing has reached is still never
+offered. Measured in a browser on two fresh nodes: invitation in 0.4 s, joined
+0.4 s after it was pasted.
+
+## 106 — medium — A listener bound to one address announced every address on the machine
+
+> **Status — fixed.** Tests: `tests/test_ip_utils.py::TestWhatABoundListenerIsReachableOn`.
+> Found because the fix for 105 failed an existing test that bound a loopback
+> listener and still expected LAN addresses.
+
+**Where** — `src/ip_utils.py`: `ip_reachability`.
+
+**What happens** — `expand_listen_uri` keeps a concrete bind host as it is, and
+`ip_reachability` took only the port and listed every interface address the
+machine holds. A node listening on `127.0.0.1`, or on one address of several,
+described itself as reachable on addresses it was not listening on. Nothing
+noticed while a `lan` descriptor needed a confirmed connection first; the
+descriptors feed tickets, LAN discovery and the console's Reachability page.
+
+**Fixed** — the descriptors follow the bind host: a wildcard has one per address,
+a concrete host has that one, a loopback listener has none. Two existing tests
+that described a LAN-reachable node while listening on `127.0.0.1` now listen on
+`0.0.0.0`, which is what their story meant.
+

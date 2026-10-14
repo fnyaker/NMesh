@@ -970,7 +970,9 @@ arrived on it*. The gossip path simply never applied it.
 - **Two audiences, two proofs** (`ip_utils.ip_reachability`). A `lan`
   descriptor is confirmed by any inbound authenticated link: the listener
   works. A link-local address is no audience at all and gets no descriptor
-  (`advertisable_ips`). A `world` descriptor is a claim about the NAT, and only a connection
+  (`advertisable_ips`). A descriptor follows the **bind host**, as
+  `expand_listen_uri` does: a wildcard listener has one per address the machine
+  holds, one bound to an address has that one, a loopback listener has none. A `world` descriptor is a claim about the NAT, and only a connection
   from **off our own networks** supports it — `node._off_our_networks`, which is
   a globally-routable source address and nothing subtler. A relayed link is
   never evidence about a listener: nothing was opened to us.
@@ -979,7 +981,12 @@ arrived on it*. The gossip path simply never applied it.
   second is what `advertised_uris()` requires before pairing a discovered public
   IP with a listener's port, and what `relay_capable()` ends up resting on.
 - **Local addresses need no proof.** They are addresses of interfaces on this
-  machine; a peer that cannot reach one simply fails to.
+  machine; a peer that cannot reach one simply fails to. That is why the first
+  invitation of a network may name a `lan` address no connection has reached yet
+  (`issue_join_ticket`, `local_endpoints(confirmed=False)`, answered with
+  `confirmed: false`): a node nobody has connected to has nothing confirmed, and
+  without this its first short invitation was refused. A `world` address that
+  nothing has reached is still never offered.
 - **The operator's escape hatch already existed**: only *wildcard* listen URIs
   are expanded, so somebody who knows their forwarding works states it as a
   concrete `tcp://their.public.ip:9000` and nothing here applies.
