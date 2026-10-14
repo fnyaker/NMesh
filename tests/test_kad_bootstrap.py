@@ -173,6 +173,8 @@ async def test_maintenance_targets_only_five_xor_nearest(monkeypatch):
 
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     monkeypatch.setattr(node, "_finger_candidates", lambda: [])
+    import src.node as nodemod
+    monkeypatch.setattr(nodemod, "_LEAF_SIZE", 0)
     await node._maintain_neighbors()
 
     assert attempted == expected

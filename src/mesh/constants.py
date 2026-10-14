@@ -475,6 +475,8 @@ _GOSSIP_FANOUT         = 6
 # the node runs. Failed identities back off independently so dead addresses do
 # not turn maintenance into a dial storm.
 _NEIGHBOR_TARGET          = 5
+_LEAF_SIZE                = 8      # the nearest nodes by XOR this node insists on a link with
+_LEAF_GIVE_UP             = 3      # failed dials after which a leaf entry stops keeping the node searching
 _FINGER_LINKS             = 2      # links wanted in each distance band that has nodes in it
 _FINGER_DIALS             = 4      # bands filled per maintenance cycle
 # Floor of live maintained links. Below it the node is *searching*: it runs a
@@ -1051,6 +1053,8 @@ __all__ = [
     "_NEIGHBOR_RETRY_MIN",
     "_NEIGHBOR_RETRY_TRACKED",
     "_NEIGHBOR_TARGET",
+    "_LEAF_SIZE",
+    "_LEAF_GIVE_UP",
     "_FINGER_LINKS",
     "_FINGER_DIALS",
     "_NEIGHBOR_WATCH_TRACKED",

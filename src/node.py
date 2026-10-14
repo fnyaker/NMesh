@@ -308,6 +308,7 @@ class MeshNode:
         self._e2e_pending_kem: dict[NodeID, bytes] = {}
         self._e2e_pending_nonce: dict[NodeID, bytes] = {}
         self._e2e_pending_data: dict[NodeID, list[bytes]] = {}
+        self._leaf_last: list[NodeID] = []              # the nearest nodes known at the last cycle
         self._e2e_attempt: dict[NodeID, float] = {}   # target -> last handshake attempt (monotonic)
         # Responder-side re-key candidates: peer -> (candidate session, expiry).
         # Promoted only by a DATA packet that decrypts under the candidate.
@@ -3474,8 +3475,26 @@ class MeshNode:
         searching = force or len(live) < _NEIGHBOR_FLOOR
         promotions = self._neighbor_promotions()
         fingers = self._finger_candidates()
-        if not searching and not promotions and not fingers:
+        # The leaf set: the `_LEAF_SIZE` nearest nodes we know. Greedy routing
+        # ends at the node nearest the target, and that node can only hand a
+        # packet on if it holds a link with the target; and a lookup can only
+        # find a node that its nearest neighbours know. Both need every node
+        # linked to its true nearest, and a node that held three links by luck
+        # of its join was known to three nodes and could be reached by nobody
+        # else. While the set is not all linked, or is not what it was last
+        # cycle, the cycle searches: a lookup of our own id (which is also how
+        # those nodes learn of us) and a dial of what it turned up.
+        leaf = [e.node_id for e in self._routing.get_closest(self._id, _LEAF_SIZE)]
+        linked = {p.authenticated_id for p in self._authenticated_peers()}
+        # One that has refused three times in a row is not waited for: an entry
+        # nobody can reach must not keep the node searching for ever.
+        unsettled = leaf != self._leaf_last or any(
+            i not in linked and self._neighbor_retry.get(i, (0, 0.0))[0] < _LEAF_GIVE_UP
+            for i in leaf)
+        self._leaf_last = leaf
+        if not searching and not promotions and not fingers and not unsettled:
             return
+        searching = searching or unsettled
 
         if searching and self._authenticated_peers():
             try:
@@ -3488,7 +3507,7 @@ class MeshNode:
 
         now = time.monotonic()
         live_ids = {p.authenticated_id for p in self._authenticated_peers()}
-        desired = list(promotions) + fingers
+        desired = list(promotions) + fingers + [i for i in leaf if i not in live_ids]
         if searching:
             desired += [entry.node_id for entry in
                         self._routing.get_closest(self._id, _NEIGHBOR_TARGET)]

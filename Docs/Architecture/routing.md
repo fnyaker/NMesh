@@ -400,12 +400,28 @@ then in a loop), but what it does depends on what we already hold:
   neighbourhood, then a directed dial of the `_NEIGHBOR_TARGET = 5` XOR-nearest
   entries it has no session with (`_connect_routing`, IPv6 then IPv4). It is a
   directed dial, not a broadcast.
-- **Quiet** — as soon as `_NEIGHBOR_FLOOR` links are held: no lookup, no dial. A
+- **Quiet** — as soon as `_NEIGHBOR_FLOOR` links are held *and the leaf set is
+  linked and unchanged* (below): no lookup, no dial, bar promotions and fingers. A
   node searching for its own id forever is nothing but traffic, and a mesh that
   never settles is a mesh an adversary can keep busy. Losing one of the three
   links (`_drop_failed_peer`, keepalive) restarts the search immediately.
 - `force=True` (join/`bootstrap`) imposes a full searching cycle whatever we
   already hold: a fresh table has to fill up.
+
+### The leaf set: a node is linked to its nearest neighbours (`_LEAF_SIZE`)
+
+Greedy forwarding ends at the node nearest the target, and a lookup finds a node
+through the nodes near it. Both rely on every node being linked to the nodes
+nearest it in id space and known to them. The maintained set used to be three
+links of whatever kind (`_NEIGHBOR_FLOOR`), which the join gave by luck, and
+measured on 1000 nodes the true nearest neighbour was linked 54 % of the time
+(BUGSVULNS 109).
+
+Each cycle takes the `_LEAF_SIZE` nearest nodes in the routing table. If they
+are not all linked, or are not the ones of the last cycle, the cycle is a
+searching one (a lookup of our own id, then a dial of whatever is missing); if
+they are, the node is quiet. An entry that refused `_LEAF_GIVE_UP` dials is not
+waited for. The cycle interval stretches while nothing changes, as before.
 
 ### Links are spread over distance, and a lookup does not buy one (`_finger_candidates`, `_UPGRADE_LINK_SOFT`)
 

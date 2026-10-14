@@ -106,6 +106,7 @@ async def test_quiet_once_the_floor_is_reached(monkeypatch):
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     monkeypatch.setattr(node, "kad_lookup", fake_lookup)
     monkeypatch.setattr(node, "_finger_candidates", lambda: [])    # its own rule, tested apart
+    monkeypatch.setattr(src.node, "_LEAF_SIZE", 0)                  # so is the leaf set
     await node._maintain_neighbors()
     assert attempted == []
     assert looked_up == []
@@ -150,6 +151,7 @@ async def test_losing_a_slot_resumes_the_search(monkeypatch):
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     monkeypatch.setattr(node, "kad_lookup", lambda *a, **k: asyncio.sleep(0))
     monkeypatch.setattr(node, "_finger_candidates", lambda: [])
+    monkeypatch.setattr(src.node, "_LEAF_SIZE", 0)
 
     await node._maintain_neighbors()
     assert attempted == []
@@ -404,7 +406,84 @@ async def test_a_quiet_node_still_fills_a_distance_band_it_has_no_link_in(monkey
 
     monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
     monkeypatch.setattr(node, "kad_lookup", fake_lookup)
+    monkeypatch.setattr(src.node, "_LEAF_SIZE", 0)
     await node._maintain_neighbors()
     assert attempted == [far]
     assert looked_up == [], "filling a band is not searching"
     await node.stop()
+
+
+class TestTheLeafSet:
+    """The nearest nodes we know are linked, and a node keeps searching until they are."""
+
+    async def _quiet_node(self, monkeypatch):
+        node = MeshNode(transport_manager=make_manager())
+        for _ in range(_NEIGHBOR_FLOOR):
+            await _attach_peer(node, _id_at_distance(node, 8))
+        monkeypatch.setattr(node, "_finger_candidates", lambda: [])
+        self.attempted, self.looked_up = [], []
+
+        async def fake_ensure(node_id, timeout=5.0):
+            self.attempted.append(node_id)
+            return None
+
+        async def fake_lookup(*args, **kwargs):
+            self.looked_up.append(args)
+            return []
+
+        monkeypatch.setattr(node, "_ensure_route_to", fake_ensure)
+        monkeypatch.setattr(node, "kad_lookup", fake_lookup)
+        return node
+
+    @pytest.mark.asyncio
+    async def test_a_near_node_we_have_no_link_with_is_searched_for_and_dialled(self, monkeypatch):
+        node = await self._quiet_node(monkeypatch)
+        near = _id_at_distance(node, 3)
+        node._routing.add(near, ["fake://near"], b"k")
+        await node._maintain_neighbors()
+        assert self.attempted == [near]
+        assert self.looked_up, "our own id is looked up, which is how they learn of us"
+        await node.stop()
+
+    @pytest.mark.asyncio
+    async def test_once_they_are_all_linked_and_unchanged_it_is_quiet(self, monkeypatch):
+        node = await self._quiet_node(monkeypatch)
+        near = _id_at_distance(node, 3)
+        node._routing.add(near, ["fake://near"], b"k")
+        await _attach_peer(node, near)
+        await node._maintain_neighbors()          # the set is new to us: one look
+        self.attempted.clear()
+        self.looked_up.clear()
+        await node._maintain_neighbors()
+        assert self.attempted == [] and self.looked_up == []
+        await node.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_new_nearer_node_starts_it_again(self, monkeypatch):
+        node = await self._quiet_node(monkeypatch)
+        await node._maintain_neighbors()
+        self.looked_up.clear()
+        node._routing.add(_id_at_distance(node, 2), ["fake://nearer"], b"k")
+        await node._maintain_neighbors()
+        assert self.looked_up
+
+    @pytest.mark.asyncio
+    async def test_a_node_nobody_can_reach_does_not_keep_it_searching(self, monkeypatch):
+        node = await self._quiet_node(monkeypatch)
+        ghost = _id_at_distance(node, 3)
+        node._routing.add(ghost, ["fake://ghost"], b"k")
+        await node._maintain_neighbors()          # the set is new to us
+        node._neighbor_retry[ghost] = (src.node._LEAF_GIVE_UP, time.monotonic() + 3600)
+        self.looked_up.clear()
+        await node._maintain_neighbors()
+        assert self.looked_up == []
+        await node.stop()
+
+    @pytest.mark.asyncio
+    async def test_the_set_is_bounded(self, monkeypatch):
+        node = await self._quiet_node(monkeypatch)
+        for index in range(60):
+            node._routing.add(_id_at_distance(node, 3 + index % 20), [f"fake://n{index}"], b"k")
+        await node._maintain_neighbors()
+        assert len(self.attempted) <= src.node._LEAF_SIZE + src.node._NEIGHBOR_TARGET
+        await node.stop()
