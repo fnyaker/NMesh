@@ -30,12 +30,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          base="$(.github/scripts/provide-base.sh "ghcr.io/${GITHUB_REPOSITORY,,}-base:latest")"
-          echo "BASE=$base" >> "$GITHUB_ENV"
+          .github/scripts/provide-base.sh "ghcr.io/${GITHUB_REPOSITORY,,}-base:latest" > "$RUNNER_TEMP/base.ref"
       - name: Fuzz every target
         env:
           SECONDS_PER_TARGET: ${{ inputs.seconds || '30' }}
         run: |
+          BASE="$(cat "$RUNNER_TEMP/base.ref")"
           case "$SECONDS_PER_TARGET" in ''|*[!0-9]*) echo "seconds must be a number"; exit 2;; esac
           docker run --rm -v "$PWD:/app" -w /app "$BASE" \
             python -m tests.fuzz -s "$SECONDS_PER_TARGET" \

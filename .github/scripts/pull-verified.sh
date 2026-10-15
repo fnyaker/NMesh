@@ -17,10 +17,11 @@ workflow="$2"
 
 docker pull --quiet "$image" >&2
 pinned="$(docker inspect --format '{{index .RepoDigests 0}}' "$image")"
-case "$pinned" in
-    *@sha256:*) ;;
-    *) echo "pull-verified: $image has no registry digest" >&2; exit 1 ;;
-esac
+# The reference goes on to other steps and into `docker run`: nothing but a
+# lowercase registry path and a digest, so it cannot carry a second line or an
+# option.
+[[ "$pinned" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$ ]] \
+    || { echo "pull-verified: $image has no registry digest" >&2; exit 1; }
 gh attestation verify "oci://$pinned" \
     --repo "$GITHUB_REPOSITORY" \
     --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/$workflow" \

@@ -43,13 +43,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BASE_NAME: ${{ steps.img.outputs.base }}
         run: |
-          base="$(.github/scripts/provide-base.sh "$BASE_NAME:latest")"
-          echo "BASE=$base" >> "$GITHUB_ENV"
+          .github/scripts/provide-base.sh "$BASE_NAME:latest" > "$RUNNER_TEMP/base.ref"
 
       - name: Unit tests (in the base image — liboqs already compiled)
         run: |
+          BASE="$(cat "$RUNNER_TEMP/base.ref")"
           docker run --rm -v "$PWD:/app" -w /app "$BASE" \
             sh -c "python -c 'import oqs; print(\"liboqs ready (prebuilt)\")' && pytest -q"
 
       - name: Integration tests
-        run: docker run --rm -v "$PWD:/app" -w /app "$BASE" pytest tests/integration -q
+        run: |
+          BASE="$(cat "$RUNNER_TEMP/base.ref")"
+          docker run --rm -v "$PWD:/app" -w /app "$BASE" pytest tests/integration -q

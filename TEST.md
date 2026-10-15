@@ -150,7 +150,11 @@ once its provenance checks out — attested by `base-image.yml`, run from `main`
 If it is unreachable or unproven (first bootstrap, a fork PR with no package
 access, a base published before it was attested), CI builds it here
 (`.github/scripts/provide-base.sh`); every job that uses the base, the fuzzer
-and the console scan included, goes through that script.
+and the console scan included, goes through that script. The reference a
+script prints is checked to be a plain lowercase image name and digest (or
+tag), and reaches the job's later steps through a file in `$RUNNER_TEMP`,
+never `$GITHUB_ENV`, where a value with a newline would define a second
+variable.
 
 Alongside it, GitHub runs **CodeQL** (`codeql.yml`: extended queries on
 Python, JavaScript and the workflows, plus `.github/codeql/nmesh`, the same

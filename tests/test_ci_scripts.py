@@ -87,6 +87,21 @@ class TestPullVerified:
         assert not gh.exists()
 
 
+    @pytest.mark.parametrize("digest", [
+        f"ghcr.io/owner/repo-base@{DIGEST}\nPATH=/tmp",
+        f"--privileged ghcr.io/owner/repo-base@{DIGEST}",
+        f"ghcr.io/Owner/repo-base@{DIGEST}",
+        "ghcr.io/owner/repo-base@sha256:abc",
+    ])
+    def test_only_a_plain_pinned_reference_comes_back(self, sandbox, digest):
+        _docker(sandbox, digest=digest)
+        gh = _gh(sandbox)
+        result = _run(sandbox, "pull-verified.sh", BASE, "base-image.yml")
+        assert result.returncode != 0
+        assert not result.stdout.strip()
+        assert not gh.exists()
+
+
 class TestProvideBase:
     def test_the_published_base_when_proven(self, sandbox):
         docker = _docker(sandbox)
@@ -107,6 +122,15 @@ class TestProvideBase:
         assert len(built) == 1
         assert f"-t {BASE}" in built[0]
         assert built[0].split()[2].endswith("docker/Dockerfile.base")
+
+    @pytest.mark.parametrize("name", ["", "-t evil", "ghcr.io/x-base", "a b:latest",
+                                      "ghcr.io/x-base:latest\nX=1"])
+    def test_a_name_that_is_not_an_image_reference_is_refused(self, sandbox, name):
+        docker = _docker(sandbox)
+        _gh(sandbox)
+        result = _run(sandbox, "provide-base.sh", name)
+        assert result.returncode != 0
+        assert not docker.exists()
 
     def test_a_failed_build_fails(self, sandbox):
         _tool(sandbox, "docker", 'case "$1" in pull) exit 1;; build) exit 3;; esac\nexit 0\n')

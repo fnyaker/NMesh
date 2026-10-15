@@ -187,3 +187,15 @@ def test_a_failing_command_cannot_hide_inside_an_echo(path):
     ``x="$(check)"`` fails the step under ``bash -e`` — then echo."""
     hiding = re.findall(r'^.*echo "[^"\n]*\$\([^\n]*>> "\$GITHUB_\w+".*$', path.read_text(), re.M)
     assert not hiding, f"{path.name}: {hiding}"
+
+
+@pytest.mark.parametrize("path", _workflows(), ids=lambda p: p.name)
+def test_an_image_reference_never_goes_through_the_job_environment(path):
+    """What a script prints reaches later steps through a file in
+    ``$RUNNER_TEMP``, never ``$GITHUB_ENV``: a value written there with a
+    newline in it defines whatever variable its second line names."""
+    for name, job in _jobs(path.read_text()).items():
+        if ".github/scripts/" in job and "GITHUB_ENV" in job:
+            for line in job.splitlines():
+                assert not ("GITHUB_ENV" in line and re.search(r"\b(APP|BASE)=", line)), \
+                    f"{path.name}/{name}: {line.strip()}"

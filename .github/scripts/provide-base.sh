@@ -13,6 +13,8 @@ set -euo pipefail
 
 [ $# -eq 1 ] || { echo "usage: provide-base.sh <base image:tag>" >&2; exit 2; }
 base="$1"
+[[ "$base" =~ ^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+$ ]] \
+    || { echo "provide-base: not an image reference: $base" >&2; exit 2; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 
