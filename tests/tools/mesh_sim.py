@@ -25,8 +25,12 @@ _TREE = os.path.dirname(os.path.dirname(_HERE))
 
 # ---------------------------------------------------------------- worker ----
 
-async def worker(src: str) -> None:
+async def worker(src: str, fast: bool = False) -> None:
     sys.path.insert(0, src)
+    if fast:
+        sys.path.insert(0, _HERE)
+        import fake_oqs
+        fake_oqs.install()
     out = os.fdopen(os.dup(1), "w", buffering=1)
     sys.stdout = sys.stderr           # the library prints; the protocol must not mix
     from src import MeshNode
@@ -94,10 +98,28 @@ async def worker(src: str) -> None:
         if op == "kill":
             await node.stop()
             return True
+        if op == "leafcheck":
+            ids = [NodeID(bytes.fromhex(h)) for h in req["ids"]]
+            out = []
+            for n in nodes:
+                if not n._running:
+                    continue
+                linked = {p.authenticated_id for p in n._peers if p.session is not None and p.authenticated_id}
+                order = sorted((i for i in ids if i != n.id), key=n.id.distance)
+                row = []
+                for k in req["ks"]:
+                    near = order[:k]
+                    row.append((sum(1 for i in near if i in linked), sum(1 for i in near if n._routing.contains(i)), k))
+                out.append(row)
+            return out
+        if op == "known_by":
+            target = NodeID(bytes.fromhex(req["to"]))
+            return sum(1 for n in nodes if n._running and n._routing.contains(target))
         if op == "explain":
             target = NodeID(bytes.fromhex(req["to"]))
             linked = {p.authenticated_id for p in node._peers if p.session is not None and p.authenticated_id}
-            return {"links": len(linked), "knows": node._routing.contains(target),
+            return {"links": len(linked), "table": len(node._routing.all_entries()),
+                    "knows": node._routing.contains(target),
                     "direct": target in linked,
                     "nearest_gap": min((target.distance(i) for i in linked), default=None) is not None
                     and min(target.distance(i) for i in linked) >= target.distance(node.id)}
@@ -113,6 +135,25 @@ async def worker(src: str) -> None:
             buf = io.StringIO()
             pstats.Stats(prof[0], stream=buf).sort_stats("tottime").print_stats(req.get("top", 14))
             return buf.getvalue()
+        if op == "budget":
+            for n in nodes:
+                n.set_link_budget(leaf_size=req["leaf"], finger_links=req["finger"], idle_minutes=req["idle"])
+            return True
+        if op == "trace_start":
+            from src.node import MESSAGE_NAMES
+            for n in nodes:
+                if n._running:
+                    n.trace.start(seconds=req["seconds"], events=1000, names=MESSAGE_NAMES)
+            return True
+        if op == "trace_totals":
+            out = {}
+            for n in nodes:
+                for (direction, kind), (cnt, nbytes) in n.trace._totals.items():
+                    if direction == "out":
+                        row = out.setdefault(n.trace.name(kind), [0, 0])
+                        row[0] += cnt
+                        row[1] += nbytes
+            return out
         if op == "counters":
             live = [n for n in nodes if n._running]
             return {"out": sum(n._metrics.total.pkts_out for n in live),
@@ -174,7 +215,7 @@ async def parent(args) -> None:
     workers = []
     for _ in range(args.procs):
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, os.path.abspath(__file__), "--worker", "--src", args.src,
+            sys.executable, os.path.abspath(__file__), "--worker", "--src", args.src, *(["--fast"] if args.fast else []),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, env=env)
         workers.append(Worker(proc))
@@ -206,6 +247,9 @@ async def parent(args) -> None:
         rows = await asyncio.gather(*[w.call(op="counters") for w in workers])
         return sum(r["out"] for r in rows), sum(r["relayed"] for r in rows)
 
+    if args.link_budget:
+        leaf, finger, idle = (int(x) for x in args.link_budget.split(","))
+        await asyncio.gather(*[w.call(op="budget", leaf=leaf, finger=finger, idle=idle) for w in workers])
     c0 = await counters()
     idle_cpu0 = sum(_cpu_seconds(w.proc.pid) for w in workers)
     await asyncio.sleep(args.settle)
@@ -218,11 +262,34 @@ async def parent(args) -> None:
                                          for g in range(len(nodes))]))
     print(f"links per node (distinct nodes): min {held[0]}, median {held[len(held) // 2]}, "
           f"mean {sum(held) / len(held):.1f}, max {held[-1]}", flush=True)
+    if args.rest_window:
+        await asyncio.gather(*[w.call(op="trace_start", seconds=args.rest_window + 10) for w in workers])
+        await asyncio.sleep(args.rest_window)
+        rows: dict = {}
+        for part in await asyncio.gather(*[w.call(op="trace_totals") for w in workers]):
+            for name, (cnt, size) in part.items():
+                row = rows.setdefault(name, [0, 0])
+                row[0] += cnt
+                row[1] += size
+        per = len(nodes) * args.rest_window
+        print(f"at rest, per node per second ({args.rest_window:.0f} s window): "
+              f"{sum(r[0] for r in rows.values()) / per:.2f} packets, "
+              f"{sum(r[1] for r in rows.values()) / per / 1024:.2f} KiB", flush=True)
+        for name, (cnt, size) in sorted(rows.items(), key=lambda kv: -kv[1][1])[:10]:
+            print(f"  {name:20s} {cnt / per:6.2f}/s  {size / max(cnt, 1):7.0f} B each  "
+                  f"{size / per / 1024:6.2f} KiB/s", flush=True)
     await asyncio.gather(*[w.call(op="lag") for w in workers])      # reset
     c2 = await counters()
     cpu0 = sum(_cpu_seconds(w.proc.pid) for w in workers)
     wall0 = time.monotonic()
 
+    ks = [1, 3, 8]
+    rows = [r for rs in await asyncio.gather(*[w.call(op="leafcheck", ids=[n[2] for n in nodes], ks=ks)
+                                               for w in workers]) for r in rs]
+    for column, k in enumerate(ks):
+        linked = sum(r[column][0] for r in rows) / (len(rows) * k)
+        known = sum(r[column][1] for r in rows) / (len(rows) * k)
+        print(f"true {k} nearest: {linked:.0%} are linked, {known:.0%} are in the routing table", flush=True)
     alive = list(range(len(nodes)))
     if args.blackhole:
         bad = rnd.sample(alive, int(len(alive) * args.blackhole))
@@ -262,7 +329,8 @@ async def parent(args) -> None:
         if got is None and args.explain:
             sender = await nodes[a][0].call(op="explain", i=nodes[a][1], to=nodes[b][2])
             receiver = await nodes[b][0].call(op="explain", i=nodes[b][1], to=nodes[a][2])
-            print(f"  undelivered: sender {sender}, receiver {receiver}", flush=True)
+            known = sum(await asyncio.gather(*[w.call(op="known_by", to=nodes[b][2]) for w in workers]))
+            print(f"  undelivered: sender {sender}, receiver {receiver}, receiver known to {known} nodes", flush=True)
     lags = await asyncio.gather(*[w.call(op="lag") for w in workers])
     if args.profile:
         print((await workers[0].call(op="prof_stop", top=args.profile)).strip(), flush=True)
@@ -286,7 +354,13 @@ async def parent(args) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--rest-window", type=float, default=0.0,
+                    help="after settling, count what each node sends, by message type, for this many seconds")
+    ap.add_argument("--link-budget", default="", metavar="LEAF,FINGER,IDLE_MIN",
+                    help="set the nodes' permanent-link budget before the settling time (e.g. 8,1,1)")
     ap.add_argument("--worker", action="store_true")
+    ap.add_argument("--fast", action="store_true",
+                    help="stub the post-quantum crypto (same sizes, no cost): routing at sizes the real thing cannot reach")
     ap.add_argument("--src", default=_TREE, help="the tree whose nodes are run")
     ap.add_argument("--procs", type=int, default=8)
     ap.add_argument("--nodes", type=int, default=240)
@@ -304,4 +378,4 @@ if __name__ == "__main__":
     ap.add_argument("--profile", type=int, default=0, metavar="N",
                     help="print the top N functions of the first worker while the pairs run")
     args = ap.parse_args()
-    asyncio.run(worker(args.src) if args.worker else parent(args))
+    asyncio.run(worker(args.src, args.fast) if args.worker else parent(args))

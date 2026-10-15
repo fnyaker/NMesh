@@ -249,6 +249,30 @@ def _as_route_hold(raw: str) -> int:
     return value
 
 
+def _as_leaf_size(raw: str) -> int:
+    """How many of the nearest nodes this one keeps a link with."""
+    value = int(str(raw).strip())
+    if not 2 <= value <= 32:
+        raise ValueError("between 2 and 32 nodes")
+    return value
+
+
+def _as_finger_links(raw: str) -> int:
+    """Links kept in each band of distance that has nodes in it."""
+    value = int(str(raw).strip())
+    if not 1 <= value <= 4:
+        raise ValueError("between 1 and 4 links")
+    return value
+
+
+def _as_link_idle(raw: str) -> int:
+    """Minutes a link nobody needs is kept. 0 keeps every link."""
+    value = int(str(raw).strip())
+    if not 0 <= value <= 1440:
+        raise ValueError("between 0 and 1440 minutes (0 = never close one)")
+    return value
+
+
 def _as_branch(raw: str) -> str:
     """A branch to follow instead of the published releases. Empty = releases.
 
@@ -316,6 +340,17 @@ SETTINGS = {
                         "Minutes a node reached through a relay keeps that "
                         "relay before moving to another healthy one (0 = "
                         "spread its traffic over every relay at once)"),
+    "leaf_size":       (_as_leaf_size, 8, True,
+                        "How many of the nearest nodes (by id) this one keeps "
+                        "a permanent link with; fewer saves keepalives, more "
+                        "makes it surer to be found"),
+    "finger_links":    (_as_finger_links, 2, True,
+                        "Permanent links kept in each distance band that has "
+                        "nodes in it; they are what a packet crosses the mesh on"),
+    "link_idle_minutes": (_as_link_idle, 10, True,
+                        "Minutes a link that is not one of the permanent ones "
+                        "is kept without a conversation on it (0 = never "
+                        "close one)"),
     "mlo_always":      (_as_bool, False, True,
                         "Keep multi-link operation running even when nothing "
                         "is using this node (otherwise it wakes with the "
@@ -457,6 +492,7 @@ SETTINGS = {
 LIVE = frozenset({
     "punch_keepalive", "lan_discovery", "transport_balance", "dynamic_address",
     "mlo_always", "mlo_skew_ms", "mlo_drop_percent", "route_hold_minutes",
+    "leaf_size", "finger_links", "link_idle_minutes",
     "keepalive_fast_min_ms", "keepalive_fast_max_ms",
     "keepalive_slow_min_ms", "keepalive_slow_max_ms",
     "pseudo", "no_abuse_gossip", "release_quorum", "release_auto_publish",

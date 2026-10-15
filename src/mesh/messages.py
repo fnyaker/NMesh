@@ -60,6 +60,7 @@ INVITE_OFFER      = 0x30   # "expect a seek for this code" — the inviter, to a
 SPEED_PROBE       = 0x31   # padding, to measure a link by loading it
 SPEED_ECHO        = 0x32   # the same padding back — one for one, never more
 STOP_RELAY        = 0x33   # a destination's signed "stop relaying that node to me"
+LINK_RELEASE      = 0x34   # "I am closing this link on purpose — do not chase me"
 
 # Built from this module's own constants so a message type added above can never
 # be missing here — a trace showing "0x1e" for a type the code knows the name of
@@ -99,6 +100,7 @@ __all__ = [
     "INVITE_SEEK",
     "KA_PROPOSE",
     "KA_REQUEST",
+    "LINK_RELEASE",
     "KEY_ACCEPT",
     "KEY_GRANT",
     "KEY_OFFER",

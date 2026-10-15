@@ -4144,7 +4144,71 @@ without, for 4 to 6 packets per second per node at rest instead of 2.4 to 4.4). 
 machine: the simulator needs more cores than the 8 it has once the mesh is
 chatty, and at rest it is the first number to check again.
 
-## 109 — medium — Two builds raced to publish the base image, and the older won
+## 109 — high — A node was linked to its true nearest neighbour about one time in two, and the others could not be found
+
+> **Status — fixed** (leaf set). Tests:
+> `tests/test_neighborhood.py::TestTheLeafSet`.
+
+**Where** — `src/node.py`: `_maintain_neighbors`.
+
+**What happens** — maintenance only insisted on `_NEIGHBOR_FLOOR` = 3 links, and
+stopped searching once it held them, whichever nodes they were. A node that
+joined through two random members held a handful of links in no particular part
+of the id space, was known to a handful of nodes, and had nobody near it in id
+space that knew it. Both ways of reaching it failed: greedy forwarding ends at
+the node nearest the target and that node had no link to it, and a lookup
+cannot find a node its nearest neighbours have never heard of. The `--explain`
+output of `tests/tools/mesh_sim.py` on 1000 nodes showed it: the undelivered
+first contacts ended at nodes holding 3 to 6 links, with a routing table of 3
+to 9 entries, known to 3 to 7 nodes in the mesh. `leafcheck` measured it
+directly: of each node's true 1, 3 and 8 nearest (computed over all ids), 54 %,
+53 % and 47 % were linked.
+
+Two changes that looked like the fix were measured and changed nothing: looking
+the target up before the first forward (89 and 89 of 100 against 90 and 88, and
+slower), and a rule that looked the target up at a local minimum of the
+distance. The cause was not the way packets are carried.
+
+**Fixed** — the nodes we hold nearest in id space, `_LEAF_SIZE` = 8, are a set
+the node insists on. While they are not all linked, or are not what they were at
+the last cycle, a cycle searches: it looks up its own id (which is also how
+those nodes come to know it) and dials what is missing. One that refused
+`_LEAF_GIVE_UP` times is not waited for, and the usual back-off stretches the
+cycles while nothing changes. On 1000 nodes over twelve processes with the
+crypto stubbed (`--fast`): the true 8 nearest linked 98 % of the time (from
+47 %), first contacts 99, 100 and 100 of 100 over three seeds (from 88 to 92), one retry in a hundred
+(from eleven), the same 4 packets per second per node at rest.
+
+**Still open** — nothing larger than 2000 nodes was run (memory: about 3 MB per
+simulated node). Hostile nodes inserting near ids to hold a victim in the
+searching regime are bounded by `_LEAF_GIVE_UP` and the back-off, but were not
+tried.
+
+## 110 — medium — Every link stayed open for ever, and keeping them open was the whole traffic of an idle node
+
+> **Status — fixed.** Tests: `tests/test_link_prune.py`.
+
+**Where** — `src/node.py`: nothing closed a link that nobody used.
+
+**What happens** — a node on 1000 nodes held 28 to 36 links (the leaf set and
+two links per band of distance, plus every link a conversation or a lookup had
+ever opened) and, with nothing to say, sent 3.6 packets per second and 0.38 KiB/s
+to keep them alive: `PING` and `PONG`, nothing else. The energy and performance
+bar moved the cadence of those probes and not the number of links.
+
+**Fixed** — `_prune_idle_links` (see `routing.md`), the three numbers on the
+bar, and `LINK_RELEASE`. A first version without the message closed links the
+far end then redialled, which cycled: 0.05 handshakes per second per node and
+5 KiB/s, ten times worse than doing nothing. At rest after the settling time on
+1000 nodes: 15 links per node, 1.7 packets per second, 0.22 KiB/s, 99 % of the
+true 8 nearest linked, 100 of 100 first contacts.
+
+**Still open** — the first minutes after a start (the settling time) still cost
+more than the rest: handshakes and the lookups of every new node (29 KiB/s
+per node at 30 nodes, measured earlier). Both ends of a link still
+probe it; one probe each way would halve the rest (the quality estimates of each
+side come from its own probes, so that is not free).
+## 111 — medium — Two builds raced to publish the base image, and the older won
 
 > **Status — fixed.** Tests: `tests/test_workflows_pinned.py`
 > (`test_what_publishes_latest_does_it_one_run_at_a_time`).
@@ -4162,8 +4226,6 @@ so the only symptom was that later builds broke.
 **Fixed** — both publishers run in a concurrency group that never cancels a run
 in progress, so they finish in the order they were queued and the newest commit
 publishes last. The base was republished from `main` by hand.
-
-
 ## 110 — medium — The image scanner held the Docker socket on a runner about to push
 
 > **Status — fixed.** Tests: `tests/test_workflows_pinned.py`
