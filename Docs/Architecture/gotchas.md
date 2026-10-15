@@ -2496,6 +2496,26 @@ running X.
   interpreter that may read it, the audit runner's included.
   The base build needs `make` → `build-essential`, not `gcc` alone (otherwise
   CMake: "CMAKE_MAKE_PROGRAM is not set").
+- liboqs is built with **only ML-KEM-768 and ML-DSA-65** (`OQS_MINIMAL_BUILD`
+  in `scripts/build_liboqs.sh`). The build used to turn on LMS, XMSS and the
+  hazardous stateful signing because "the wrapper fails to load without the
+  stateful symbols" — true of the *API* symbols (`OQS_SIG_STFL_*`), which
+  0.16.0 compiles with no scheme behind them, not of the schemes. With them on,
+  the library carried two advisories in code no node calls (BUGSVULNS 115). A
+  new algorithm in `src/crypto.py` needs its name added there:
+  `tests/test_liboqs_lock.py` derives the list from `KEM_ALG`/`DSA_ALG`, and
+  the wrapper raises `MechanismNotEnabledError` for anything not built.
+- A **required status check is matched by its name**, and a job run through a
+  reusable workflow reports as `<caller job> / <called job>`. Moving `ci.yml`'s
+  `test` job into a reusable workflow turned the check into `test / test`:
+  every check went green and the PR stayed blocked, waiting for a `test` that
+  no run would ever report. The suite is a composite action instead
+  (`.github/actions/suite`), so the job keeps its name;
+  `tests/test_workflows_pinned.py` holds it.
+- CI never hands the Docker socket to a tool, and logs in to the registry only
+  after the scan (BUGSVULNS 112): the socket is root on the runner, and the
+  login it would find is the one that pushes `:latest`. A scanner reads a
+  `docker save` file (`trivy image --input`) or the registry by digest.
 - Docker: the application image is a **fresh `python:*-slim` stage** that copies
   `/opt/liboqs` and `site-packages` out of the base — the base's compiler,
   CMake, git and headers never reach a running node. Two consequences: both

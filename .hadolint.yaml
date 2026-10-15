@@ -1,0 +1,7 @@
+# hadolint (repo-checks.yml). Each rule set aside, with its reason.
+ignored:
+  # Pin versions in apt-get install. Debian removes a superseded package from
+  # its archive, so a pinned version stops installing at the next security
+  # update; the image pins its base by digest and takes the distribution's
+  # fixes on purpose (`apt-get upgrade`), and Trivy gates what it ends up with.
+  - DL3008

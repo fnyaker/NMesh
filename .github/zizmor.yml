@@ -1,0 +1,3 @@
+# zizmor (repo-checks.yml). A finding set aside goes here, with its reason; an
+# empty rule set means every default audit applies.
+rules: {}
