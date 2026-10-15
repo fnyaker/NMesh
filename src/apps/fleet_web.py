@@ -49,12 +49,13 @@ MAX_INVITES = 32              # invitations held for the page, one per node
 MAX_PASSWORDS = 32            # provisioned consoles' passwords, until read
 MAX_DOCKER_ANSWERS = 32       # docker answers held for the page that asked
 # What a docker operation costs on the far side. The reads are one round trip;
-# the four that pull images are minutes, and a browser is not going to hold a
-# request open for those — they are started and watched through the job list.
+# the ones that pull images are minutes, and a browser is not going to hold a
+# request open for those — they are started, and the page asks for the answer
+# (`op: "answer"`) until it is there.
 _DOCKER_WAIT = 25.0
-_DOCKER_SLOW = ("pull", "deploy", "deploy_stack", "portainer_deploy")
-_DOCKER_ACTS = ("act", "pull", "deploy", "stack", "deploy_stack",
-                "portainer_stack", "portainer_deploy", "portainer")
+_DOCKER_SLOW = ("pull", "deploy", "deploy_stack", "check", "recreate")
+_DOCKER_ACTS = ("act", "pull", "deploy", "stack", "deploy_stack", "recreate",
+                "portainer")
 # How long a caller waits for a managed node to answer with an invitation. A
 # mesh hop and one signature, not a job: long enough for a slow path, short
 # enough that a page is never left hanging on a node that went away.
@@ -1284,15 +1285,16 @@ class FleetBridge:
         """One docker operation on a managed node, and its answer.
 
         The reads are waited on — a page with nothing to draw is not a page.
-        The four that pull images are started and watched through the job list
-        instead: a browser is not going to hold a request open for minutes, and
-        an operation that reports nothing until it finishes is one nobody can
-        tell from a hang."""
+        The ones that pull images are started and their ``rid`` handed back
+        instead: a browser is not going to hold a request open for minutes. The
+        page then asks ``answer`` with that rid until the node has replied."""
         if not self._app.state.may_use(node_hex, "docker"):
             raise DockerError("that node has not granted docker")
+        if op == "answer":
+            return self._docker_answer(node_hex, str(arguments.get("rid") or "")[:64])
         rid = self._job(self._call(self._app.request_docker(
             self._node(node_hex), op, **arguments)), "docker", node_hex)
-        if op in _DOCKER_SLOW:
+        if op in _DOCKER_SLOW or (op == "stack" and arguments.get("action") == "update"):
             return {"rid": rid, "started": True}
         deadline = time.monotonic() + _DOCKER_WAIT
         while time.monotonic() < deadline:
@@ -1304,6 +1306,23 @@ class FleetBridge:
                 raise DockerError(failure)
             time.sleep(0.05)
         raise DockerError("that node did not answer")
+
+    def _docker_answer(self, node_hex: str, rid: str) -> dict:
+        """A slow operation's answer once it is in, or that it is not yet.
+
+        Only for the node it was asked of: a rid is not a credential, and an
+        answer is handed to whoever asks about the machine it came from."""
+        with self._lock:
+            held = self._docker.get(rid)
+            if held is not None and held.get("node") == node_hex:
+                return self._docker.pop(rid)
+            job = self._jobs.get(rid)
+        if job is None or job.get("node") != node_hex:
+            raise DockerError("no such operation")
+        failure = self._job_failure(rid)
+        if failure is not None:
+            raise DockerError(failure)
+        return {"pending": True, "rid": rid}
 
     def take_docker(self, rid: str) -> dict | None:
         with self._lock:
@@ -1556,15 +1575,17 @@ def _docker_line(op: str, data: dict) -> str:
         return f"pulled {info.get('image', 'an image')}"
     if op == "deploy":
         return f"deployed {info.get('name') or info.get('image') or 'a container'}"
+    if op == "recreate":
+        return f"{info.get('name', 'a container')}: {info.get('result', 'done')}"
     if op in ("stack", "deploy_stack"):
         through = info.get("through")
-        return (f"stack {info.get('stack', '')} "
-                f"{info.get('action', 'updated')}"
+        what = info.get("action") or ("deployed" if op == "deploy_stack" else "updated")
+        if info.get("steps") is not None:
+            what = f"updated ({info.get('updated', 0)} container(s) recreated)"
+        return (f"stack {info.get('stack', '')} {what}"
                 + (f" through {through}" if through else ""))
-    if op in ("portainer_stack", "portainer_deploy"):
-        return f"Portainer stack {info.get('name') or info.get('stack', '')}"
     if op == "portainer":
-        return "Portainer configured" if info.get("configured") else "Portainer forgotten"
+        return "Portainer connected" if info.get("connected") else "Portainer forgotten"
     if items is not None:
         return f"{len(items)} item(s)"
     return "done"

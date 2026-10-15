@@ -527,6 +527,17 @@ scope. Add yours.
   under 2 packets per second (about 0.2 KiB/s, pings only) after 150 s. →
   Measure at two settling times, publish the later one, and state the time.
 
+- **A build given the timeout of a test run.** liboqs takes about forty
+  minutes to compile on four cores; it was started under `timeout 900`, killed
+  two thirds of the way, and the half hour it had run was lost. → Before
+  bounding a command, estimate how long it takes (count its steps); bound it to
+  that, not to a habit.
+- **A test double that answered two shapes with one test.** A fake Engine
+  returned "the container" when its table was a `dict` — and a table of
+  containers is a `dict` too, so every lookup returned the table and the test
+  failed for a reason that looked like the code's. → A fake that serves one
+  thing or many decides by a field of the thing, not by its type.
+
 ### Running the tests (read this before trusting "green")
 
 `pyproject.toml` sets:

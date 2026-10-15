@@ -484,13 +484,29 @@ tests/
 │     escaped; a container is *built* from a validated shape rather than
 │     forwarded, so `Privileged` cannot ride in; a bind mount is two absolute
 │     paths or a volume name; a command is split, never handed to a shell), the
-│     stacks recovered from compose's own labels, the multiplexed log header
-│     taken off rather than printed, and the wire itself driven against a socket
-│     that answers like a daemon — both framings, the daemon's own message
-│     surfaced, a failed pull *inside* a 200 still a failure, an oversized answer
-│     refused. For Portainer: an address that is a host and nothing else, a token
-│     that cannot become a second header, a fingerprint pin, and a git stack
-│     redeployed through git rather than handed the file it already had
+│     multiplexed log header taken off rather than printed, and the wire itself
+│     driven against a socket that answers like a daemon — both framings, the
+│     daemon's own message surfaced, a failed pull *inside* a 200 still a
+│     failure, an oversized answer refused, an engine that dropped our API
+│     version asked again in its own, a reference split where docker splits it,
+│     a private registry reached with this account's login and no other's, an
+│     archive read without following a link or a climbing name. For Portainer:
+│     an address that is a host and nothing else (HTTP to loopback only), a token
+│     that cannot become a second header, a fingerprint pin, a probe that sends
+│     no token, a git stack redeployed through git with the credentials
+│     Portainer stored, the stack's environment handed back rather than erased,
+│     and a stack matched to its record by id, never by an ambiguous name
+├── test_fleet_stacks.py                               — stacks recovered from
+│     compose's own labels (one-offs left out, bounded, whatever the daemon
+│     sends); a Portainer stack known by its directory, a Portainer server or
+│     agent by its container; which act each stack's Update is; the replacement
+│     of a container (what the old image supplied left to the new one, what the
+│     container was given kept, anonymous volumes and aliases carried, the old
+│     one put back when the new one does not stay up, a digest left alone, a
+│     shared network refused); an update where one service failing costs only
+│     itself; the six states a check tells apart; compose asked rather than
+│     assumed, its argv, no `--remove-orphans`; a stack's file read without its
+│     environment; a new stack's file written privately under the node's state
 ├── test_fleet_deploy.py                               — remote deployment and the
 │     right to update: the authorised script is not inside the node's prefix, the
 │     rule names one path with no wildcard, the wrapper refuses every argument,

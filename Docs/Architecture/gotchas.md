@@ -2729,3 +2729,75 @@ and the same guard file refuses a random port pick anywhere under `tests/`.
   other and answered yes, so the node was never enrolled. The sweep now removes
   them all first and judges afterwards. The same shape is why the other two
   call sites pass `exclude=peer`.
+
+## Docker: who owns a stack, and what an update must keep
+
+The fleet app's Docker panel (`src/apps/fleet_stacks.py`, `fleet_portainer.py`;
+the whole mechanism is in `Docs/Apps/fleet`, "Docker"). Each trap below was in
+the code, and each looked right from reading it.
+
+- **Portainer labels nothing of its own.** The first version recognised a
+  Portainer stack by an `io.portainer.stack.name` label; Portainer CE 2.45
+  writes no such label (nor any `io.portainer.*` one) on a stack's containers,
+  so every Portainer stack was listed as a plain compose project and updated
+  with `compose` on paths under `/data/compose/<id>` — which exist inside
+  Portainer's container, not on the host. What gives a Portainer stack away is
+  that directory, and the number in it is Portainer's stack id (BUGSVULNS 117).
+  Before naming a label as evidence, look at a real container
+  (`docker inspect … --format '{{json .Config.Labels}}'`).
+- **A Portainer redeploy *replaces* the stack's environment.** `PUT
+  /api/stacks/<id>` with `"Env": []` erases every variable the stack had, and
+  Portainer recreates the containers without them — reproduced live:
+  `GREETING=hello` came back `GREETING=`. The environment is read from
+  `GET /api/stacks/<id>` and handed back unchanged. Same shape for a git stack:
+  `RepositoryAuthentication: false` tells Portainer to drop the credentials it
+  stored; asking for them with an empty password makes it use its own.
+- **Portainer deploys asynchronously.** A create or redeploy answers at once
+  with `Status: 3` (deploying) on recent versions, and refuses a second
+  redeploy while one runs (`Invalid request payload`). An answer is not a
+  finished deployment: `Portainer._settled` asks `GET /api/stacks/<id>` every
+  `SETTLE_POLL` until the status leaves 3, and reads a failure from the last
+  `DeploymentStatus` entry carrying a `Message`. Reported done at the answer,
+  the page redrew in the middle of the recreation, showing compose's temporary
+  `<id>_<name>` containers beside the real ones.
+- **A copy of Portainer's directory is not Portainer's stack.** The directory
+  can be read out of the Portainer container through the Engine's archive route,
+  and `compose` run on the copy. It does not reproduce what runs: a relative
+  bind (`./data`) was resolved by Portainer against `/data/compose/<id>` — a
+  path it then handed the daemon as a *host* path — and an `env_file:
+  stack.env` against the same directory. With `--project-directory
+  /data/compose/<id>` compose cannot find the env file; without it, the bind
+  moves and the service's compose hash changes (measured: `web` changed, the
+  service without a relative path did not). Without a connected Portainer, a
+  Portainer stack is updated through the Engine, container by container.
+- **Recreating a container: what the image gave is not what the container was
+  given.** A container's `Config` carries its image's environment, command,
+  labels, ports and volumes merged in. Copied whole, the replacement runs the
+  new image with the old one's defaults (an `APP_VERSION=1` on version 2). Each
+  is compared with the old image's own `Config` and dropped when equal.
+  `Cmd` is dropped only together with `Entrypoint`: `--entrypoint` clears the
+  image's command, so a command next to a custom entrypoint was given.
+- **…and the anonymous volumes are the container's data.** An image `VOLUME`
+  with no named volume behind it gets an anonymous one, named by a 64-hex id and
+  listed only under `Mounts`; compose declares its own in `HostConfig.Mounts`
+  with *no* `Source`. Recreated as written, both give the replacement a fresh,
+  empty volume. The name is carried over: as a bind for the first, as the
+  missing `Source` for the second. And the old container is removed without
+  `v=1`.
+- **The old container is put aside, not removed, until the new one stays up.**
+  Stop, rename aside, create, start, wait `SETTLE`; on any failure the new one
+  is deleted and the old one renamed back and restarted. Removing first turns a
+  bad image into an outage.
+- **`docker` on the PATH is not compose.** The CLI is very often installed
+  without the compose plugin; `compose_available()` answered from
+  `shutil.which("docker")` and offered updates that then failed. Compose is
+  asked (`docker compose version`, then `docker-compose`).
+- **A pinned API version ages.** The client spoke `/v1.41/` only. An engine
+  raises its minimum over the years (29.x accepts 1.40; later ones will not), so
+  the version is raised once, from the daemon's own refusal ("Minimum supported
+  API version is …"), rather than asked before every call.
+- **The page's router handler was replaced by its own start.** `enter()` called
+  `ROUTER.start(() => {})`, and `start` keeps the handler it is given — so the
+  `ROUTER.onChange` set beside the panels, which loads the Docker panel when it
+  is opened and refreshes the Logs one, never ran (BUGSVULNS 119). Call
+  `ROUTER.start()` with no argument where the handler is set elsewhere.

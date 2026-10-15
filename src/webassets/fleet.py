@@ -140,78 +140,70 @@ FLEET_HTML = """<!doctype html>
     <section id="panel-docker" class="content panel" role="tabpanel" data-panel="docker" hidden>
       <div class="page-head">
         <div class="grow"><p class="eyebrow">Containers</p><h1>Docker</h1>
-          <p class="lede">What a node runs in containers, and the stacks on top of them —
-            including the ones Portainer owns. The <code class="inline">docker</code> right is
-            root on that machine: the socket is.</p></div>
+          <p class="lede">The stacks and containers of one machine, found from what it runs —
+            whether compose or Portainer deployed them — and brought up to date the way
+            their owner would.</p></div>
         <div class="actions">
-          <label class="field"><span class="sr-only">Node</span><select id="dk-node"></select></label>
-          <button id="dk-refresh" class="primary">Refresh</button>
+          <label class="field"><span class="sr-only">Machine</span><select id="dk-node"></select></label>
+          <button id="dk-refresh" class="ghost">Refresh</button>
         </div>
       </div>
-      <div id="dk-overview" class="stats"></div>
-      <p id="dk-msg" class="msg"></p>
+      <div id="dk-summary"></div>
 
-      <article class="card">
-        <div class="card-head"><div class="grow"><h2>Stacks</h2>
-          <div class="sub">A stack is a compose project. Ticking one adds it to what
-            <b>Update</b> brings up on that node.</div></div>
-          <button id="dk-stack-new" class="ghost sm">Deploy a stack</button></div>
-        <div class="card-body tight"><div id="dk-stacks" class="stack"></div></div>
-      </article>
+      <nav id="dk-tabs" class="subnav" role="tablist" aria-label="Docker views">
+        <button role="tab" data-subtab="stacks" aria-selected="true">Stacks <span id="dk-n-stacks" class="tail"></span></button>
+        <button role="tab" data-subtab="containers" aria-selected="false">Containers <span id="dk-n-containers" class="tail"></span></button>
+        <button role="tab" data-subtab="images" aria-selected="false">Images</button>
+        <button role="tab" data-subtab="storage" aria-selected="false">Volumes &amp; networks</button>
+        <button role="tab" data-subtab="portainer" aria-selected="false">Portainer <span id="dk-n-portainer" class="tail"></span></button>
+      </nav>
 
-      <article class="card">
-        <div class="card-head"><div class="grow"><h2>Containers</h2>
-          <div class="sub">Everything on that machine, in a stack or not</div></div>
-          <button id="dk-container-new" class="ghost sm">Run a container</button></div>
-        <div class="card-body tight"><div id="dk-containers" class="stack"></div></div>
-      </article>
-
-      <details class="card"><summary>Images</summary>
-        <div class="card-body">
-          <form id="dk-pull-form" class="toolbar">
-            <label class="field grow"><span class="sr-only">Image</span>
-              <input id="dk-pull" class="mono" placeholder="ghcr.io/owner/image:tag"
-                     autocomplete="off" spellcheck="false"></label>
-            <button type="submit" class="primary">Pull</button>
-          </form>
-          <div id="dk-images" class="stack"></div>
+      <div data-sub="stacks" class="stack">
+        <div class="toolbar">
+          <label class="search"><span class="sr-only">Filter stacks</span>
+            <input id="dk-stack-filter" type="search" placeholder="Filter stacks" autocomplete="off"></label>
+          <span id="dk-checked" class="muted small grow"></span>
+          <button id="dk-check" class="ghost">Check for updates</button>
+          <button id="dk-update-all" class="primary" hidden>Update all</button>
+          <button id="dk-stack-new" class="ghost">Deploy a stack</button>
         </div>
-      </details>
+        <div id="dk-stacks" class="stack"></div>
+      </div>
 
-      <details class="card"><summary>Volumes</summary>
-        <div class="card-body"><div id="dk-volumes" class="stack"></div></div>
-      </details>
-
-      <details class="card"><summary>Networks</summary>
-        <div class="card-body"><div id="dk-networks" class="stack"></div></div>
-      </details>
-
-      <details class="card"><summary>Portainer</summary>
-        <div class="card-body">
-          <p class="muted small">A stack Portainer owns is updated <b>through</b> Portainer —
-            running compose behind its back leaves its record stale and the next thing it does
-            undoes the update. The token is written to that node's encrypted drawer and never
-            read back over the mesh.</p>
-          <div class="split">
-            <div class="stack">
-              <label class="field"><span>Address</span>
-                <input id="pt-url" class="mono" placeholder="https://portainer.lan:9443"
-                       autocomplete="off" spellcheck="false"></label>
-              <label class="field"><span>Access token</span>
-                <input id="pt-token" type="password" autocomplete="new-password"
-                       placeholder="ptr_…"></label>
-              <label class="field"><span>Certificate fingerprint (optional)</span>
-                <input id="pt-fp" class="mono" placeholder="sha256, 64 hex characters"
-                       autocomplete="off" spellcheck="false"></label>
-              <div class="btn-row"><button id="pt-save" class="primary">Save</button>
-                <button id="pt-forget" class="danger">Forget</button></div>
-              <p id="pt-msg" class="msg"></p>
-            </div>
-            <div class="stack"><h3>Its stacks</h3>
-              <div id="pt-stacks" class="stack"></div></div>
+      <div data-sub="containers" class="stack" hidden>
+        <div class="toolbar">
+          <label class="search"><span class="sr-only">Filter containers</span>
+            <input id="dk-ct-filter" type="search" placeholder="Filter containers" autocomplete="off"></label>
+          <div class="segmented" role="group" aria-label="Which containers">
+            <button data-dk-scope="all" aria-selected="true">All</button>
+            <button data-dk-scope="loose" aria-selected="false">Outside a stack</button>
           </div>
+          <span class="grow"></span>
+          <button id="dk-container-new" class="ghost">Run a container</button>
         </div>
-      </details>
+        <article class="card"><div class="card-body tight"><div id="dk-containers"></div></div></article>
+      </div>
+
+      <div data-sub="images" class="stack" hidden>
+        <form id="dk-pull-form" class="toolbar">
+          <label class="field grow"><span class="sr-only">Image</span>
+            <input id="dk-pull" class="mono" placeholder="ghcr.io/owner/image:tag"
+                   autocomplete="off" spellcheck="false"></label>
+          <button type="submit" class="primary">Pull</button>
+        </form>
+        <article class="card"><div class="card-body tight"><div id="dk-images"></div></div></article>
+      </div>
+
+      <div data-sub="storage" class="stack" hidden>
+        <article class="card"><div class="card-head"><div class="grow"><h2>Volumes</h2></div></div>
+          <div class="card-body tight"><div id="dk-volumes"></div></div></article>
+        <article class="card"><div class="card-head"><div class="grow"><h2>Networks</h2></div></div>
+          <div class="card-body tight"><div id="dk-networks"></div></div></article>
+      </div>
+
+      <div data-sub="portainer" class="stack" hidden>
+        <div id="dk-portainer" class="stack"></div>
+      </div>
     </section>
 
     <!-- ── Discover & deploy ────────────────────────────────────────────── -->
@@ -503,6 +495,19 @@ FLEET_PAGE_CSS = """
 .node-card .stats{grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}
 .upd{display:flex;flex-direction:column;gap:4px}
 .cap-pick{display:grid;gap:var(--s-2);grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+
+/* Docker. A stack is a card whose title carries who owns it and where it
+   stands; the counts on the sub-tabs are plain numbers, hidden while empty. */
+#panel-docker .card-head h2.row{gap:var(--s-2);font-size:var(--fs-md)}
+#panel-docker .card-head h2 .badge{font-weight:500}
+#dk-tabs .tail{color:var(--text-faint);font-size:var(--fs-xs);margin-left:var(--s-1)}
+#dk-tabs .tail:empty{display:none}
+#panel-docker td .badge{white-space:nowrap}
+#panel-docker td.mono{overflow-wrap:anywhere;min-width:12ch}
+#panel-docker .flush{margin:0}
+#panel-docker progress.meter{flex:1 1 auto;max-width:240px}
+#panel-docker .fp{overflow-wrap:anywhere}
+#panel-docker .notice .btn-row,#panel-docker .notice button{flex:none}
 """
 
 
@@ -1448,43 +1453,77 @@ function nodeGroupsDialog(id){
 }
 
 // ---- docker ----------------------------------------------------------------
-// One node at a time, because everything here is about one machine. The reads
-// are waited on by the console; the ones that pull images are started and
-// watched through the job list, since a browser will not hold a request open
-// for minutes and an operation that says nothing until it ends is one nobody
-// can tell from a hang.
+// One machine at a time, because everything here is about one machine. Quick
+// reads are waited on by the console; the ones that pull images — an update, a
+// check, a deploy — hand back a rid and are asked about until they answer,
+// because a browser will not hold a request open for minutes and an operation
+// that says nothing until it ends is one nobody can tell from a hang.
 
-const DK = {node:"", overview:null, stacks:[], containers:[], images:[],
-            volumes:[], networks:[], stats:{}, portainer:[], busy:false};
+const DK = {node:"", overview:null, stacks:null, containers:null, images:null,
+            volumes:null, networks:null, stats:{}, check:null, checkedAt:0,
+            running:{}, results:{}, scope:"all", probe:null, error:"", loading:false};
 
 function dockerNodes(){
   return (ST.managed || []).filter((node) => (node.caps || []).includes("docker"));
 }
-async function dockerCall(op, extra){
-  if(!DK.node) throw new Error("pick a node first");
+async function dockerCall(op, extra, node){
+  const target = node || DK.node;
+  if(!target) throw new Error("pick a machine first");
   const answer = await apiJson("/api/fleet/docker", "POST",
-                               Object.assign({node:DK.node, op}, extra || {}));
+                               Object.assign({node:target, op}, extra || {}));
   if(!answer.ok) throw new Error((answer.data && answer.data.error) || "that was refused");
   return answer.data;
 }
-async function dockerLoad(){
-  if(!DK.node || DK.busy) return;
-  DK.busy = true;
-  setMessage("dk-msg", "Reading that machine…");
-  try{
-    const overview = await dockerCall("overview");
-    const stacks = await dockerCall("stacks");
-    const containers = await dockerCall("containers");
-    DK.overview = overview.info || {};
-    DK.stacks = stacks.items || [];
-    DK.containers = containers.items || [];
-    setMessage("dk-msg", "");
-    dockerSample();
-  }catch(error){
-    DK.overview = null; DK.stacks = []; DK.containers = [];
-    setMessage("dk-msg", String(error.message || error), true);
-  }finally{ DK.busy = false; }
+// A slow operation: started, then asked about every two seconds until the node
+// has answered. Thirty minutes is the far side's own ceiling on a compose run.
+async function dockerSlow(op, extra){
+  const node = DK.node;
+  const started = await dockerCall(op, extra, node);
+  if(!started.rid) return started;
+  for(let tries = 0; tries < 900; tries++){
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const answer = await dockerCall("answer", {rid:started.rid}, node);
+    if(!answer.pending) return answer;
+  }
+  throw new Error("that machine stopped answering about it");
+}
+// Something long running, drawn as running wherever it shows, for as long as
+// it runs — and only on the machine it was started on.
+async function dockerRun(key, label, op, extra){
+  const node = DK.node;
+  DK.running[key] = {label, since:Date.now(), node};
   paintDocker();
+  try{ return await dockerSlow(op, extra); }
+  finally{ delete DK.running[key]; paintDocker(); }
+}
+function dockerBusy(key){
+  const job = DK.running[key];
+  return job && job.node === DK.node ? job : null;
+}
+
+async function dockerLoad(){
+  if(!DK.node || DK.loading) return;
+  DK.loading = true;
+  DK.error = "";
+  paintDocker();
+  try{
+    DK.overview = (await dockerCall("overview")).info || {};
+    if(DK.overview.engine){
+      const [stacks, containers] = await Promise.all(
+        [dockerCall("stacks"), dockerCall("containers")]);
+      DK.stacks = stacks.items || [];
+      DK.containers = containers.items || [];
+      if(stacks.info && stacks.info.portainer_problem)
+        toast("Portainer did not answer", "warn", stacks.info.portainer_problem);
+    }else{ DK.stacks = []; DK.containers = []; }
+  }catch(error){
+    DK.error = String(error.message || error);
+  }finally{ DK.loading = false; }
+  paintDocker();
+  if(DK.overview && DK.overview.engine){
+    dockerSample();
+    dockerLoadTab(ROUTER.sub);
+  }
 }
 // Usage figures take about a second a container to read, so the list is shown
 // first and they join it when they arrive.
@@ -1495,8 +1534,30 @@ async function dockerSample(){
     if(node === DK.node){ DK.stats = answer.info || {}; paintDocker(); }
   }catch(_){ /* the list stands without them */ }
 }
+// The lists only one tab needs are read when that tab is opened, not on every
+// refresh of the panel: each is a round trip to somebody else's machine.
+async function dockerLoadTab(sub, force){
+  if(!DK.node || !DK.overview || !DK.overview.engine) return;
+  const node = DK.node;
+  const wanted = {images:["images"], storage:["volumes", "networks"]}[sub] || [];
+  for(const op of wanted){
+    if(DK[op] !== null && !force) continue;
+    try{
+      const items = (await dockerCall(op)).items || [];
+      if(node === DK.node) DK[op] = items;
+    }catch(error){ toast(String(error.message || error), "danger"); }
+  }
+  paintDocker();
+}
+function dockerReset(){
+  Object.assign(DK, {overview:null, stacks:null, containers:null, images:null,
+                     volumes:null, networks:null, stats:{}, check:null, checkedAt:0,
+                     probe:null, error:""});
+}
+
+// ---- what is drawn -----------------------------------------------------------
 // Which stacks *Update* also brings up on that node. Read from the ledger, not
-// from the checkbox: it is a choice this console remembers about a machine, and
+// from a checkbox: it is a choice this console remembers about a machine, and
 // the node card's Update button reads the same one.
 function dockerChosen(){
   const node = (ST.managed || []).find((entry) => entry.id === DK.node);
@@ -1506,149 +1567,556 @@ function stat(value, key, tone){
   return '<div class="stat' + (tone ? " " + tone : "") + '"><span class="v">' +
     esc(String(value)) + '</span><span class="k">' + esc(key) + "</span></div>";
 }
-function paintDockerOverview(){
+function stateBadge(state){
+  const tone = {running:"ok", restarting:"warn", paused:"warn", created:"",
+                exited:"danger", dead:"danger"}[state];
+  return badge(state || "unknown", tone === undefined ? "" : tone);
+}
+// What a check said about one container, as a word and a colour.
+const UPDATE_WORDS = {
+  outdated:["update available", "warn"], pulled:["newer image here", "info"],
+  current:["up to date", "ok"], pinned:["pinned", ""], local:["local image", ""],
+  unknown:["could not check", ""],
+};
+function updateBadge(id){
+  const state = DK.check && DK.check.containers && DK.check.containers[id];
+  if(!state) return "";
+  const [word, tone] = UPDATE_WORDS[state] || [state, ""];
+  return badge(word, tone);
+}
+function stackNeedsUpdate(stack){
+  if(!DK.check) return false;
+  return (stack.services || []).some((row) =>
+    ["outdated", "pulled"].includes(DK.check.containers[row.container]));
+}
+function portainerWord(info){
+  const pt = (info && info.portainer) || {};
+  if(pt.connected) return ["connected", "ok"];
+  if(pt.server) return ["found", "warn"];
+  if(pt.agent) return ["agent", ""];
+  return ["none", ""];
+}
+function useText(id){
+  const use = DK.stats[id];
+  return use ? use.cpu.toFixed(1) + "% · " + fmtBytes(use.memory) : "";
+}
+
+function paintDockerSummary(){
+  const nodes = dockerNodes();
+  if(!nodes.length){
+    setHTML("dk-summary", emptyHTML("No machine has granted docker",
+      "A machine you manage has to grant the docker right before it can be read here. " +
+      "It is root on that machine, so it is never granted by default."));
+    return;
+  }
+  if(DK.error){
+    setHTML("dk-summary", errorHTML("That machine did not answer", DK.error));
+    return;
+  }
   const info = DK.overview;
-  if(!info){ setHTML("dk-overview", ""); return; }
-  setHTML("dk-overview",
-    stat(info.running + "/" + info.containers, "containers running", "accent") +
-    stat(DK.stacks.length, "stacks") +
-    stat(info.images || 0, "images") +
-    stat(info.version || "—", "engine") +
-    stat(info.compose ? "yes" : "no", "docker compose") +
-    stat(info.portainer ? "configured" : "none", "portainer"));
+  if(!info){
+    setHTML("dk-summary", DK.loading ? skeletonHTML(1) : "");
+    return;
+  }
+  if(!info.engine){
+    setHTML("dk-summary", errorHTML("No docker to drive on that machine",
+      (info.problem || "") + ". Install docker there, or re-run install.sh --docker so " +
+      "the node's account can reach the socket."));
+    return;
+  }
+  const [ptWord, ptTone] = portainerWord(info);
+  let updates = "not checked", tone = "";
+  if(DK.check){
+    const waiting = Object.values(DK.check.containers || {})
+      .filter((state) => state === "outdated" || state === "pulled").length;
+    updates = waiting ? waiting + " behind" : "up to date";
+    tone = waiting ? "warn" : "ok";
+  }
+  setHTML("dk-summary", '<div class="stats">' +
+    stat((info.running || 0) + " / " + (info.containers || 0), "containers running", "accent") +
+    stat(DK.stacks ? DK.stacks.length : (info.stacks || 0), "stacks") +
+    stat(updates, "updates", tone) +
+    stat(info.version || "—", "docker engine") +
+    stat(info.compose || "not installed", "docker compose", info.compose ? "" : "warn") +
+    stat(ptWord, "portainer", ptTone) + "</div>");
 }
-function stackRow(stack){
+
+function stackOwner(stack){
+  if(stack.owner === "portainer")
+    return badge("Portainer" + (stack.portainer_id ? " · stack " + stack.portainer_id : ""),
+                 "accent");
+  return badge(stack.nmesh ? "compose · deployed from here" : "compose");
+}
+function stackStateBadge(stack){
+  if(!stack.total) return badge("stopped");
+  if(stack.running === stack.total) return badge(stack.total + " running", "ok");
+  if(!stack.running) return badge("stopped", "danger");
+  return badge(stack.running + " of " + stack.total + " running", "warn");
+}
+// Where the stack comes from, said in the words an operator would look for.
+function stackSource(stack){
+  if(stack.owner === "portainer"){
+    return stack.portainer_api ? "Held by Portainer, which is connected here" +
+      (stack.git ? " — redeployed from its git repository" : "")
+      : "Held by Portainer, which is not connected here";
+  }
+  if(!(stack.files || []).length) return "No compose file is recorded for it";
+  return (stack.files || []).join(", ") + (stack.files_ok ? "" : " — not readable by the node");
+}
+function serviceRows(stack){
+  if(!(stack.services || []).length)
+    return '<p class="muted small flush">Nothing of it runs on this machine.</p>';
+  return '<div class="table-wrap"><table><thead><tr><th>Service</th><th>Image</th>' +
+    "<th>State</th><th>Use</th><th>Image status</th><th></th></tr></thead><tbody>" +
+    stack.services.map((row) =>
+      "<tr><td><b>" + esc(row.service || row.name) + "</b>" +
+      '<div class="tiny muted mono truncate">' + esc(row.name) + "</div></td>" +
+      '<td class="mono tiny">' + esc(row.image) + "</td>" +
+      "<td>" + stateBadge(row.state) + '<div class="tiny muted">' + esc(row.status || "") +
+      "</div></td>" +
+      '<td class="mono tiny nowrap">' + esc(useText(row.container)) + "</td>" +
+      "<td>" + updateBadge(row.container) + "</td>" +
+      '<td class="tight"><button class="sm ghost" data-dk="logs" data-id="' +
+      esc(row.container) + '" data-label="' + esc(row.service || row.name) +
+      '">Logs</button></td></tr>').join("") + "</tbody></table></div>";
+}
+function stackCard(stack){
+  const key = "stack:" + stack.name;
+  const busy = dockerBusy(key);
+  const name = esc(stack.name);
+  const running = stack.running > 0;
+  const off = busy ? " disabled" : "";
+  const result = DK.results[stack.name];
   const chosen = dockerChosen().has(stack.name);
-  const owner = stack.portainer_id ? "portainer" : (stack.files ? "compose" : "unmanaged");
-  return '<div class="row wrap">' +
-    '<label class="check" title="Include this stack in Update on that node">' +
-    '<input type="checkbox" data-stack-pick="' + esc(stack.name) + '"' +
-    (chosen ? " checked" : "") + '><span class="tiny">update</span></label>' +
-    '<b class="grow truncate">' + esc(stack.name) + "</b>" +
-    badge(stack.running + "/" + stack.total + " up",
-          stack.running === stack.total ? "ok" : (stack.running ? "warn" : "")) +
-    badge(owner, owner === "portainer" ? "accent" : "") +
-    '<span class="btn-row">' +
-    '<button class="sm" data-stack-act="start" data-stack="' + esc(stack.name) + '">Start</button>' +
-    '<button class="sm" data-stack-act="stop" data-stack="' + esc(stack.name) + '">Stop</button>' +
-    '<button class="sm" data-stack-act="restart" data-stack="' + esc(stack.name) + '">Restart</button>' +
-    '<button class="sm primary" data-stack-act="update" data-stack="' + esc(stack.name) + '">Update</button>' +
-    "</span></div>";
+  return '<article class="card"><div class="card-head"><div class="grow">' +
+    '<h2 class="row wrap">' + name + " " + stackOwner(stack) + " " + stackStateBadge(stack) +
+    (stackNeedsUpdate(stack) ? " " + badge("update available", "warn") : "") + "</h2>" +
+    '<div class="sub">' + esc(stackSource(stack)) + "</div></div>" +
+    '<div class="btn-row">' +
+    '<button class="sm primary" data-dk="update" data-stack="' + name + '"' + off + ">Update</button>" +
+    '<button class="sm" data-dk="stack" data-action="' + (running ? "stop" : "start") +
+      '" data-stack="' + name + '"' + off + ">" + (running ? "Stop" : "Start") + "</button>" +
+    (running ? '<button class="sm" data-dk="stack" data-action="restart" data-stack="' + name +
+      '"' + off + ">Restart</button>" : "") +
+    '<button class="sm ghost" data-dk="file" data-stack="' + name + '">File</button>' +
+    "</div></div>" +
+    '<div class="card-body stack">' + serviceRows(stack) +
+    '<p class="muted small flush"><b>Update</b> ' + esc(stack.why || "") + ".</p>" +
+    (busy ? '<div class="row"><progress class="meter"></progress><span class="small nowrap" ' +
+      'data-since="' + busy.since + '">' + esc(busy.label) + "</span></div>" : "") +
+    (!busy && result ? '<div class="notice ' + (result.ok ? "ok" : "danger") + '">' +
+      '<span class="grow">' + esc(result.text) + "</span>" +
+      (result.output ? '<button class="sm ghost" data-dk="output" data-stack="' + name +
+        '">Output</button>' : "") + "</div>" : "") +
+    "</div>" +
+    '<div class="card-foot"><label class="check" title="Update on the machine\'s card also ' +
+    'brings this stack up to date"><input type="checkbox" role="switch" data-dk-pick="' + name +
+    '"' + (chosen ? " checked" : "") + "><span>Include in this machine's Update</span></label></div>" +
+    "</article>";
 }
+function paintDockerStacks(){
+  const all = DK.stacks;
+  if(all === null){
+    setHTML("dk-stacks", DK.loading ? skeletonHTML(3) : "");
+    return;
+  }
+  const filter = $("dk-stack-filter").value.trim().toLowerCase();
+  const shown = all.filter((stack) => !filter || stack.name.toLowerCase().includes(filter) ||
+    (stack.services || []).some((row) => (row.image + " " + row.service).toLowerCase().includes(filter)));
+  setHTML("dk-stacks", shown.map(stackCard).join("") ||
+    (all.length ? emptyHTML("No stack matches that filter")
+      : emptyHTML("No stack on this machine",
+          "A stack is a compose project, deployed by compose or by Portainer. Deploy one, or " +
+          "look at the containers that run on their own.")));
+  const behind = all.filter(stackNeedsUpdate);
+  $("dk-update-all").hidden = !behind.length;
+  $("dk-update-all").textContent = "Update " + plural(behind.length, "stack");
+  $("dk-check").disabled = !!dockerBusy("check");
+  $("dk-check").textContent = dockerBusy("check") ? "Checking…" : "Check for updates";
+  $("dk-checked").textContent = DK.check
+    ? "Checked " + fmtAgo((Date.now() - DK.checkedAt) / 1000) : "";
+}
+
 function containerRow(entry){
   const running = entry.state === "running";
-  const use = DK.stats[entry.id];
-  return '<div class="row wrap">' +
-    '<b class="grow truncate">' + esc(entry.name || shortId(entry.id)) + "</b>" +
-    '<span class="muted small truncate">' + esc(entry.image) + "</span>" +
-    (entry.project ? badge(entry.project) : "") +
-    badge(entry.state || "?", running ? "ok" : "warn") +
-    (use ? '<span class="mono tiny muted">' + use.cpu.toFixed(1) + "% · " +
-      fmtBytes(use.memory) + "</span>" : "") +
-    (entry.ports.length ? '<span class="mono tiny muted">' +
-      esc(entry.ports.join(" ")) + "</span>" : "") +
-    '<span class="btn-row">' +
-    '<button class="sm" data-ct-act="' + (running ? "stop" : "start") + '" data-ct="' +
-      esc(entry.id) + '">' + (running ? "Stop" : "Start") + "</button>" +
-    '<button class="sm" data-ct-act="restart" data-ct="' + esc(entry.id) + '">Restart</button>' +
-    '<button class="sm ghost" data-ct-logs="' + esc(entry.id) + '">Logs</button>' +
-    '<button class="sm danger" data-ct-act="remove" data-ct="' + esc(entry.id) + '">Remove</button>' +
-    "</span></div>";
+  const key = "ct:" + entry.id;
+  const off = dockerBusy(key) ? " disabled" : "";
+  const id = esc(entry.id);
+  return "<tr><td><b class=\"truncate\">" + esc(entry.name || shortId(entry.id)) + "</b>" +
+    (entry.ports.length ? '<div class="tiny muted mono">' + esc(entry.ports.join("  ")) +
+      "</div>" : "") + "</td>" +
+    '<td class="mono tiny">' + esc(entry.image) + "</td>" +
+    "<td>" + (entry.project ? badge(entry.project) : '<span class="muted tiny">—</span>') + "</td>" +
+    "<td>" + stateBadge(entry.state) + "</td>" +
+    '<td class="mono tiny nowrap">' + esc(useText(entry.id)) + "</td>" +
+    "<td>" + (dockerBusy(key) ? badge("updating…", "info") : updateBadge(entry.id)) + "</td>" +
+    '<td class="tight"><span class="btn-row">' +
+    '<button class="sm" data-dk="act" data-action="' + (running ? "stop" : "start") +
+      '" data-id="' + id + '"' + off + ">" + (running ? "Stop" : "Start") + "</button>" +
+    (running ? '<button class="sm" data-dk="act" data-action="restart" data-id="' + id + '"' +
+      off + ">Restart</button>" : "") +
+    // Inside a stack, the stack's Update is the one that knows its owner.
+    (entry.project ? "" : '<button class="sm" data-dk="recreate" data-id="' + id +
+      '" data-label="' + esc(entry.name) + '"' + off + ">Update</button>") +
+    '<button class="sm ghost" data-dk="logs" data-id="' + id + '" data-label="' +
+      esc(entry.name) + '">Logs</button>' +
+    '<button class="sm danger" data-dk="remove" data-id="' + id + '" data-label="' +
+      esc(entry.name) + '"' + off + ">Remove</button></span></td></tr>";
 }
-function portainerRow(stack){
-  return '<div class="row wrap"><b class="grow truncate">' + esc(stack.name) + "</b>" +
-    badge(stack.active ? "active" : "stopped", stack.active ? "ok" : "") +
-    (stack.git ? badge("git") : "") +
-    '<span class="btn-row">' +
-    '<button class="sm" data-pt-act="' + (stack.active ? "stop" : "start") +
-      '" data-pt="' + stack.id + '">' + (stack.active ? "Stop" : "Start") + "</button>" +
-    '<button class="sm primary" data-pt-act="redeploy" data-pt="' + stack.id +
-      '">Redeploy</button></span></div>';
+function paintDockerContainers(){
+  const all = DK.containers;
+  if(all === null){ setHTML("dk-containers", DK.loading ? skeletonHTML(4) : ""); return; }
+  const filter = $("dk-ct-filter").value.trim().toLowerCase();
+  const shown = all.filter((entry) => (DK.scope === "all" || !entry.project) &&
+    (!filter || (entry.name + " " + entry.image + " " + entry.project).toLowerCase().includes(filter)));
+  $$("[data-dk-scope]").forEach((button) =>
+    button.setAttribute("aria-selected", button.dataset.dkScope === DK.scope ? "true" : "false"));
+  setHTML("dk-containers", shown.length ? '<div class="table-wrap"><table><thead><tr>' +
+    "<th>Name</th><th>Image</th><th>Stack</th><th>State</th><th>Use</th><th>Image status</th>" +
+    "<th></th></tr></thead><tbody>" + shown.map(containerRow).join("") + "</tbody></table></div>"
+    : emptyHTML(all.length ? "No container matches" : "No container on this machine"));
 }
+
+function paintDockerImages(){
+  if(DK.images === null){ setHTML("dk-images", skeletonHTML(3)); return; }
+  const used = new Set((DK.containers || []).map((entry) => entry.image_id));
+  setHTML("dk-images", DK.images.length ? '<div class="table-wrap"><table><thead><tr>' +
+    '<th>Image</th><th class="num">Size</th><th>Created</th><th></th></tr></thead><tbody>' +
+    DK.images.map((image) => {
+      const name = image.tags[0] || image.id;
+      return '<tr><td class="mono tiny">' + esc(name) +
+        (image.tags.length > 1 ? '<div class="muted">' + esc(image.tags.slice(1).join(", ")) +
+          "</div>" : "") + "</td>" +
+        '<td class="num">' + fmtBytes(image.size) + "</td>" +
+        '<td class="nowrap">' + (image.created
+          ? esc(new Date(image.created * 1000).toLocaleDateString()) : "—") + "</td>" +
+        '<td class="tight">' + (used.has(image.id) ? badge("in use", "ok")
+          : '<button class="sm danger" data-dk="rmi" data-image="' + esc(name) +
+            '">Remove</button>') + "</td></tr>";
+    }).join("") + "</tbody></table></div>" : emptyHTML("No image on this machine"));
+}
+function paintDockerStorage(){
+  setHTML("dk-volumes", DK.volumes === null ? skeletonHTML(2) : DK.volumes.length
+    ? '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Driver</th></tr></thead><tbody>' +
+      DK.volumes.map((volume) => '<tr><td class="mono tiny">' + esc(volume.name) + "</td><td>" +
+        esc(volume.driver) + "</td></tr>").join("") + "</tbody></table></div>"
+    : emptyHTML("No volume"));
+  setHTML("dk-networks", DK.networks === null ? skeletonHTML(2) : DK.networks.length
+    ? '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Driver</th><th>Subnet</th>' +
+      '<th class="num">Containers</th></tr></thead><tbody>' +
+      DK.networks.map((network) => "<tr><td><b>" + esc(network.name) + "</b></td><td>" +
+        esc(network.driver) + '</td><td class="mono tiny">' + esc(network.subnet || "—") +
+        '</td><td class="num">' + network.attached + "</td></tr>").join("") +
+      "</tbody></table></div>"
+    : emptyHTML("No network"));
+}
+
+// The Portainer tab is a conversation in three states: none here, found but
+// not connected, connected. Rebuilt only when that state changes, so a token
+// half typed is never wiped by a poll.
+function portainerKey(){
+  const pt = (DK.overview && DK.overview.portainer) || {};
+  return JSON.stringify([DK.node, !!DK.overview, pt.connected, pt.url, pt.pinned,
+                         pt.server && pt.server.id, pt.agent, DK.probe]);
+}
+let PT_DRAWN = "";
+function paintDockerPortainer(){
+  const key = portainerKey();
+  const pt = (DK.overview && DK.overview.portainer) || null;
+  $("dk-n-portainer").textContent = pt && pt.connected ? "connected"
+    : pt && pt.server ? "found" : "";
+  if(key === PT_DRAWN) return;
+  PT_DRAWN = key;
+  if(!pt){ setHTML("dk-portainer", DK.loading ? skeletonHTML(2) : ""); return; }
+  const server = pt.server;
+  let html = "";
+  if(server){
+    html += '<article class="card"><div class="card-head"><div class="grow"><h2>Portainer ' +
+      "runs on this machine</h2><div class=\"sub\">Found from its container — no credential " +
+      "is needed to see it, or to see which stacks are its.</div></div>" +
+      stateBadge(server.state) + "</div>" +
+      '<div class="card-body"><dl class="kv">' +
+      "<dt>Container</dt><dd>" + esc(server.name) + "</dd>" +
+      '<dt>Image</dt><dd class="mono">' + esc(server.image) + "</dd>" +
+      "<dt>Edition</dt><dd>" + esc(server.edition) + "</dd>" +
+      '<dt>Address here</dt><dd class="mono">' + esc(server.url || "publishes no port") + "</dd>" +
+      "</dl></div></article>";
+  }else if(pt.agent){
+    html += '<div class="notice">This machine runs a Portainer agent: its stacks are deployed ' +
+      "by a Portainer elsewhere. Connect that Portainer to update them through it.</div>";
+  }
+  if(pt.connected){
+    html += '<article class="card"><div class="card-head"><div class="grow"><h2>Connected</h2>' +
+      '<div class="sub">Stacks Portainer owns are updated through its API — it pulls and ' +
+      "redeploys with the file and environment it holds, and its own record stays true." +
+      "</div></div>" + badge("connected", "ok") + "</div>" +
+      '<div class="card-body"><dl class="kv"><dt>Address</dt><dd class="mono">' + esc(pt.url) +
+      "</dd><dt>Certificate</dt><dd>" + (pt.pinned ? "pinned" :
+        pt.url.startsWith("http:") ? "none: loopback only" : "verified by its chain") +
+      "</dd><dt>Token</dt><dd>kept in that node's encrypted drawer, never read back</dd></dl></div>" +
+      '<div class="card-foot"><button class="danger" data-dk="pt-forget">Forget</button></div>' +
+      "</article>";
+  }else{
+    const suggested = (server && server.url) || "";
+    const probe = DK.probe;
+    html += '<article class="card"><div class="card-head"><div class="grow"><h2>Connect ' +
+      (server ? "it" : "a Portainer") + "</h2>" +
+      '<div class="sub">Without it, a Portainer stack is updated by pulling its images and ' +
+      "recreating its containers with the settings they run with. Connected, it is " +
+      "redeployed by Portainer itself.</div></div></div>" +
+      '<div class="card-body stack">' +
+      '<div class="toolbar"><label class="field grow"><span>Address, as that machine reaches it</span>' +
+      '<input id="pt-url" class="mono" value="' + esc((probe && probe.url) || suggested) +
+      '" placeholder="https, host and port" autocomplete="off" spellcheck="false"></label>' +
+      '<button class="ghost" data-dk="pt-probe">Read its certificate</button></div>' +
+      (probe ? '<div class="notice ok"><span class="grow">Portainer ' + esc(probe.version) +
+        " answers there." + (probe.fingerprint ? ' Its certificate: <span class="mono fp">' +
+        esc(probe.fingerprint.match(/../g).join(":")) + "</span>" : "") + "</span></div>" +
+        (probe.fingerprint ? '<label class="check"><input id="pt-pin" type="checkbox" checked>' +
+          "<span>Trust this certificate (pin it). Compare it with the one your browser shows " +
+          "for Portainer if the address is not this machine's own.</span></label>" : "") : "") +
+      '<label class="field"><span>Access token</span><input id="pt-token" type="password" ' +
+      'autocomplete="new-password" placeholder="ptr_…">' +
+      '<span class="hint">In Portainer: your account, then Access tokens, then Add access ' +
+      "token. It is written to that node's encrypted drawer and never read back.</span></label>" +
+      '<div class="btn-row"><button class="primary" data-dk="pt-connect">Connect</button></div>' +
+      '<p id="pt-msg" class="msg"></p></div></article>';
+  }
+  if(!server && !pt.agent && !pt.connected){
+    html = '<div class="notice">No Portainer runs on this machine. Stacks deployed with compose ' +
+      "are updated from their own files; connect a Portainer below only if one elsewhere " +
+      "manages this machine.</div>" + html;
+  }
+  setHTML("dk-portainer", html);
+}
+
 function paintDocker(){
   $("nav-docker").textContent = dockerNodes().length || "";
-  paintDockerOverview();
-  // Nothing read yet is not the same as nothing there, and a panel that says
-  // "no stack" before it has looked is a panel that lies once a second.
-  const waiting = DK.overview === null;
-  setHTML("dk-stacks", DK.stacks.map(stackRow).join("") ||
-    (waiting ? emptyHTML("Not read yet", "Pick a node, then Refresh.")
-             : emptyHTML("No stack here",
-                 "A stack is a compose project. Deploy one, or run plain containers.")));
-  setHTML("dk-containers", DK.containers.map(containerRow).join("") ||
-    (waiting ? "" : emptyHTML("Nothing is running", "No container on that machine.")));
-  setHTML("dk-images", DK.images.map((image) =>
-    '<div class="row"><b class="grow truncate mono">' +
-    esc((image.tags[0] || image.id).slice(0, 80)) + "</b>" +
-    '<span class="muted small">' + fmtBytes(image.size) + "</span>" +
-    '<button class="sm danger" data-img-rm="' + esc(image.tags[0] || image.id) +
-      '">Remove</button></div>').join("") ||
-    '<p class="muted small">Nothing read yet.</p>');
-  setHTML("dk-volumes", DK.volumes.map((volume) =>
-    '<div class="row"><b class="grow truncate mono">' + esc(volume.name.slice(0, 64)) + "</b>" +
-    '<span class="muted small">' + esc(volume.driver) + "</span></div>").join("") ||
-    '<p class="muted small">No volume, or not read yet.</p>');
-  setHTML("dk-networks", DK.networks.map((network) =>
-    '<div class="row wrap"><b class="grow truncate">' + esc(network.name) + "</b>" +
-    '<span class="muted small">' + esc(network.driver) + "</span>" +
-    (network.subnet ? '<span class="mono tiny muted">' + esc(network.subnet) + "</span>" : "") +
-    badge(plural(network.attached, "container"))  + "</div>").join("") ||
-    '<p class="muted small">No network, or not read yet.</p>');
-  setHTML("pt-stacks", DK.portainer.map(portainerRow).join("") ||
-    '<p class="muted small">Nothing read from Portainer yet.</p>');
+  $("dk-n-stacks").textContent = DK.stacks ? DK.stacks.length : "";
+  $("dk-n-containers").textContent = DK.containers ? DK.containers.length : "";
+  paintDockerSummary();
+  const engine = !!(DK.overview && DK.overview.engine) || DK.loading;
+  $("dk-tabs").hidden = !engine && !!DK.overview;
+  paintDockerStacks();
+  paintDockerContainers();
+  paintDockerImages();
+  paintDockerStorage();
+  paintDockerPortainer();
+  tickDocker();
 }
+// The elapsed time on a running job, rewritten in place: a whole repaint a
+// second would close whatever the operator had open.
+function tickDocker(){
+  $$("#panel-docker [data-since]").forEach((element) => {
+    const seconds = Math.round((Date.now() - Number(element.dataset.since)) / 1000);
+    const label = element.dataset.label || element.textContent.replace(/ · \d+:\d\d$/, "");
+    element.dataset.label = label;
+    element.textContent = label + " · " + Math.floor(seconds / 60) + ":" +
+      String(seconds % 60).padStart(2, "0");
+  });
+}
+setInterval(tickDocker, 1000);
 
-// A long job — a pull, a deploy, a stack coming up — is started and then
-// watched in the job list. Reporting only at the end is indistinguishable from
-// a hang, and this is minutes of somebody else's machine.
-async function dockerJob(label, op, extra){
-  let answer;
-  try{ answer = await dockerCall(op, extra); }
-  catch(error){ toast(String(error.message || error), "danger"); return; }
-  if(!answer.rid){ toast(label + " done", "ok"); await dockerLoad(); return; }
-  toast(label + " started — it shows in Activity");
-  const rid = answer.rid;
-  for(let tries = 0; tries < 600; tries++){
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    const job = (ST.jobs || []).find((entry) => entry.rid === rid);
-    if(job && job.state !== "running"){
-      toast(label + (job.state === "ok" ? " done" : " failed: " + (job.detail || "")),
-            job.state === "ok" ? "ok" : "danger");
-      break;
-    }
+// ---- what is done ------------------------------------------------------------
+
+function stackByName(name){
+  return (DK.stacks || []).find((stack) => stack.name === name);
+}
+// Updating is the one act here that restarts services, so it says what it will
+// do before doing it: through whom, and which containers.
+async function updateStack(name, quiet){
+  const stack = stackByName(name);
+  if(!stack) return false;
+  if(!quiet){
+    const services = (stack.services || []).map((row) =>
+      "<li><b>" + esc(row.service || row.name) + '</b> <span class="mono tiny">' +
+      esc(row.image) + "</span></li>").join("");
+    const agreed = await confirmAction({title:"Update " + name + "?",
+      body:'<p class="small">' + esc(stack.why || "") + ".</p>" +
+        (services ? '<ul class="small">' + services + "</ul>" : "") +
+        '<p class="muted small">A container whose image changed is recreated, so its service ' +
+        "is down for a few seconds. Volumes are kept.</p>",
+      confirmLabel:"Update"});
+    if(!agreed) return false;
   }
+  try{
+    const answer = await dockerRun("stack:" + name, "Updating", "stack",
+                                   {stack:name, action:"update"});
+    const info = answer.info || {};
+    const steps = info.steps || [];
+    const text = info.through === "engine"
+      ? (info.updated ? plural(info.updated, "container") + " recreated on a newer image"
+                      : "Already on the newest images — nothing recreated")
+      : info.through === "portainer" ? "Redeployed by Portainer, images pulled"
+      : "Pulled and brought up with compose";
+    DK.results[name] = {ok:true, text, output:info.output ||
+      steps.map((step) => step.service + ": " + step.result).join("\n")};
+    if(!quiet) toast(name + ": " + text, "ok");
+    return true;
+  }catch(error){
+    DK.results[name] = {ok:false, text:String(error.message || error), output:""};
+    toast(name + " could not be updated", "danger", String(error.message || error));
+    return false;
+  }finally{
+    await dockerLoad();
+    if(DK.check) checkUpdates(true);
+  }
+}
+async function updateAll(){
+  const names = (DK.stacks || []).filter(stackNeedsUpdate).map((stack) => stack.name);
+  const agreed = await confirmAction({title:"Update " + plural(names.length, "stack") + "?",
+    body:'<p class="small">One after the other, each the way its owner would: ' +
+      esc(names.join(", ")) + ".</p>" +
+      '<p class="muted small">Each container whose image changed is recreated.</p>',
+    confirmLabel:"Update all"});
+  if(!agreed) return;
+  let done = 0;
+  for(const name of names){ if(await updateStack(name, true)) done++; }
+  toast(plural(done, "stack") + " of " + names.length + " updated",
+        done === names.length ? "ok" : "warn");
+}
+async function checkUpdates(quiet){
+  try{
+    const answer = await dockerRun("check", "Checking", "check", {});
+    DK.check = answer.info || {containers:{}, images:{}};
+    DK.checkedAt = Date.now();
+    if(!quiet){
+      const behind = Object.values(DK.check.containers || {})
+        .filter((state) => state === "outdated" || state === "pulled").length;
+      toast(behind ? plural(behind, "container") + " can be updated" : "Everything is up to date",
+            behind ? "warn" : "ok");
+    }
+  }catch(error){ if(!quiet) toast(String(error.message || error), "danger"); }
+  paintDocker();
+}
+async function stackAct(name, action, button){
+  return withBusy(button, async () => {
+    try{
+      await dockerCall("stack", {stack:name, action});
+      toast(name + ": " + ({start:"started", stop:"stopped", restart:"restarted"}[action] || action), "ok");
+    }catch(error){ toast(String(error.message || error), "danger"); }
+    await dockerLoad();
+  });
+}
+async function containerAct(id, action, label, button){
+  if(action === "remove"){
+    const agreed = await confirmAction({title:"Remove " + (label || "this container") + "?",
+      body:'<p class="muted small">It is stopped and deleted. Anything it wrote outside a ' +
+        "volume goes with it.</p>", confirmLabel:"Remove", danger:true});
+    if(!agreed) return;
+  }
+  return withBusy(button, async () => {
+    try{ await dockerCall("act", {id, action}); }
+    catch(error){ toast(String(error.message || error), "danger"); }
+    await dockerLoad();
+  });
+}
+async function recreateContainer(id, label){
+  const agreed = await confirmAction({title:"Update " + (label || "this container") + "?",
+    body:'<p class="small">Its image is pulled again. If the registry has a newer one, the ' +
+      "container is recreated from it with the settings it runs with, and put back as it " +
+      "was if the new one does not stay up.</p>", confirmLabel:"Update"});
+  if(!agreed) return;
+  try{
+    const info = (await dockerRun("ct:" + id, "Updating", "recreate", {id})).info || {};
+    toast((label || "Container") + ": " + (info.result === "updated" ? "recreated on a newer image"
+      : info.result === "pinned" ? "pinned to a digest, nothing to pull" : "already up to date"), "ok");
+  }catch(error){ toast(String(error.message || error), "danger"); }
   await dockerLoad();
 }
-
-async function dockerLogs(id){
-  $("modal-title").textContent = "Logs";
-  $("modal-body").innerHTML = '<pre class="term" id="dk-log">Reading…</pre>';
+function textDialog(title, sub, text){
+  $("modal-title").textContent = title;
+  $("modal-body").innerHTML = (sub ? '<p class="muted small mono">' + esc(sub) + "</p>" : "") +
+    '<pre class="term" id="dk-text"></pre>' +
+    '<div class="btn-row"><button id="dk-text-copy" class="ghost">Copy</button></div>';
+  // Written as text, never as markup: these are bytes a container or a file chose.
+  $("dk-text").textContent = text;
+  $("dk-text-copy").addEventListener("click", () => copyText(text));
   $("modal").showModal();
+}
+async function dockerLogs(id, label){
+  $("modal-title").textContent = "Logs · " + (label || shortId(id));
+  $("modal-body").innerHTML = '<pre class="term" id="dk-log">Reading…</pre>' +
+    '<div class="btn-row"><button id="dk-log-more" class="ghost">Reload</button></div>';
+  $("modal").showModal();
+  const read = async () => {
+    try{
+      const answer = await dockerCall("logs", {id, tail:400});
+      $("dk-log").textContent = answer.text || "(nothing)";
+      $("dk-log").scrollTop = $("dk-log").scrollHeight;
+    }catch(error){ $("dk-log").textContent = String(error.message || error); }
+  };
+  $("dk-log-more").addEventListener("click", read);
+  await read();
+}
+async function stackFile(name){
   try{
-    const answer = await dockerCall("logs", {id, tail:400});
-    // Written as text, never as markup: these are bytes a container chose.
-    $("dk-log").textContent = answer.text || "(nothing)";
-  }catch(error){ $("dk-log").textContent = String(error.message || error); }
+    const info = (await dockerCall("stack_file", {stack:name})).info || {};
+    textDialog(name + " · compose file", info.path || "", info.text || "");
+  }catch(error){ toast(String(error.message || error), "danger"); }
+}
+async function portainerProbe(button){
+  const url = $("pt-url").value.trim();
+  if(!url){ setMessage("pt-msg", "An address is needed.", true); return; }
+  return withBusy(button, async () => {
+    try{
+      DK.probe = (await dockerCall("portainer_probe", {url})).info || null;
+      paintDocker();
+    }catch(error){ setMessage("pt-msg", String(error.message || error), true); }
+  });
+}
+async function portainerConnect(button){
+  const url = $("pt-url").value.trim();
+  const token = $("pt-token").value;
+  if(!url || !token){ setMessage("pt-msg", "An address and a token are needed.", true); return; }
+  const pin = $("pt-pin") && $("pt-pin").checked && DK.probe && DK.probe.url === url
+    ? DK.probe.fingerprint : "";
+  return withBusy(button, async () => {
+    try{
+      const answer = await dockerCall("portainer", {url, token, fingerprint:pin});
+      // Never echoed back: the token now lives in that node's drawer.
+      $("pt-token").value = "";
+      DK.probe = null;
+      toast("Portainer connected — " + plural((answer.items || []).length, "environment") +
+            " visible", "ok");
+      await dockerLoad();
+    }catch(error){ setMessage("pt-msg", String(error.message || error), true); }
+  });
+}
+async function portainerForget(button){
+  const agreed = await confirmAction({title:"Forget that Portainer?",
+    body:'<p class="muted small">The address and token are deleted from that node\'s drawer. ' +
+      "Its stacks keep running; they are then updated by recreating their containers " +
+      "instead of through Portainer.</p>", confirmLabel:"Forget", danger:true});
+  if(!agreed) return;
+  return withBusy(button, async () => {
+    try{ await dockerCall("portainer", {clear:true}); toast("Portainer forgotten"); }
+    catch(error){ toast(String(error.message || error), "danger"); }
+    await dockerLoad();
+  });
 }
 
 function runDialog(){
   $("modal-title").textContent = "Run a container";
   $("modal-body").innerHTML =
-    '<p class="muted small">Built field by field on the far side — a container body passed ' +
-    "through whole would be every field that node does not know about.</p>" +
+    '<div class="form-grid">' +
     '<label class="field"><span>Name</span><input id="rn-name" class="mono" ' +
     'placeholder="my-service" autocomplete="off" spellcheck="false"></label>' +
     '<label class="field"><span>Image</span><input id="rn-image" class="mono" ' +
     'placeholder="ghcr.io/owner/image:tag" autocomplete="off" spellcheck="false"></label>' +
-    '<label class="field"><span>Ports (host:container, one per line)</span>' +
-    '<textarea id="rn-ports" class="mono" rows="2" placeholder="8080:80"></textarea></label>' +
-    '<label class="field"><span>Volumes (host:container[:ro], one per line)</span>' +
-    '<textarea id="rn-vols" class="mono" rows="2" placeholder="/srv/data:/data"></textarea></label>' +
-    '<label class="field"><span>Environment (KEY=value, one per line)</span>' +
-    '<textarea id="rn-env" class="mono" rows="3" placeholder="TZ=Europe/Paris"></textarea></label>' +
+    '<label class="field"><span>Ports</span>' +
+    '<textarea id="rn-ports" class="mono" rows="2" placeholder="8080:80"></textarea>' +
+    '<span class="hint">host:container, one per line; add :udp for UDP</span></label>' +
+    '<label class="field"><span>Volumes</span>' +
+    '<textarea id="rn-vols" class="mono" rows="2" placeholder="/srv/data:/data"></textarea>' +
+    '<span class="hint">host path or volume name : container path, :ro for read-only</span></label>' +
+    '<label class="field"><span>Environment</span>' +
+    '<textarea id="rn-env" class="mono" rows="3" placeholder="TZ=Europe/Paris"></textarea>' +
+    '<span class="hint">KEY=value, one per line</span></label>' +
     '<label class="field"><span>Restart policy</span><select id="rn-restart">' +
     '<option value="unless-stopped">unless-stopped</option><option value="always">always</option>' +
     '<option value="on-failure">on-failure</option><option value="no">no</option></select></label>' +
+    "</div>" +
     '<div class="btn-row"><button id="rn-go" class="primary">Run</button>' +
     '<button id="rn-no">Cancel</button></div><p id="rn-msg" class="msg"></p>';
   $("rn-go").addEventListener("click", (event) => withBusy(event.target, async () => {
@@ -1670,9 +2138,13 @@ function runDialog(){
       if(at > 0) env[line.slice(0, at)] = line.slice(at + 1);
     });
     $("modal").close();
-    await dockerJob("Container", "deploy", {spec:{
-      name:$("rn-name").value.trim(), image, ports, volumes, env,
-      restart:$("rn-restart").value}});
+    try{
+      await dockerRun("run", "Starting " + image, "deploy", {spec:{
+        name:$("rn-name").value.trim(), image, ports, volumes, env,
+        restart:$("rn-restart").value}});
+      toast(image + " is running", "ok");
+    }catch(error){ toast(String(error.message || error), "danger"); }
+    await dockerLoad();
   }));
   $("rn-no").addEventListener("click", () => $("modal").close());
   $("modal").showModal();
@@ -1680,35 +2152,51 @@ function runDialog(){
 }
 
 function stackDialog(){
-  const viaPortainer = !!(DK.overview && DK.overview.portainer);
+  const connected = !!(DK.overview && DK.overview.portainer && DK.overview.portainer.connected);
+  const compose = !!(DK.overview && DK.overview.compose);
   $("modal-title").textContent = "Deploy a stack";
   $("modal-body").innerHTML =
-    '<p class="muted small">A compose file, kept on that machine under this node\'s own state ' +
-    "so a redeploy later finds it where compose recorded it.</p>" +
+    (connected ? '<div class="segmented" role="group" aria-label="Deployed by">' +
+      '<button data-sk-through="compose" aria-selected="' + (compose ? "true" : "false") +
+      '"' + (compose ? "" : " disabled") + ">Compose, on that machine</button>" +
+      '<button data-sk-through="portainer" aria-selected="' + (compose ? "false" : "true") +
+      '">Portainer</button></div>' : "") +
+    '<p id="sk-where" class="muted small"></p>' +
     '<label class="field"><span>Name</span><input id="sk-name" class="mono" ' +
-    'placeholder="my-stack" autocomplete="off" spellcheck="false"></label>' +
-    (viaPortainer ? '<label class="check"><input id="sk-pt" type="checkbox">' +
-      "<span>Deploy through Portainer, so it owns and can redeploy it</span></label>" +
-      '<label class="field"><span>Portainer environment id</span>' +
-      '<input id="sk-endpoint" class="mono" value="1"></label>' : "") +
+    'placeholder="my-stack" autocomplete="off" spellcheck="false">' +
+    '<span class="hint">lowercase letters, digits, - and _</span></label>' +
     '<label class="field"><span>docker-compose.yml</span>' +
-    '<textarea id="sk-body" class="mono" rows="12" spellcheck="false" ' +
+    '<textarea id="sk-body" class="mono" rows="14" spellcheck="false" ' +
     'placeholder="services:&#10;  web:&#10;    image: nginx:alpine"></textarea></label>' +
     '<div class="btn-row"><button id="sk-go" class="primary">Deploy</button>' +
     '<button id="sk-no">Cancel</button></div><p id="sk-msg" class="msg"></p>';
+  let through = connected && !compose ? "portainer" : "compose";
+  const explain = () => {
+    $("sk-where").textContent = through === "portainer"
+      ? "Portainer keeps the file and owns the stack; it is updated through Portainer."
+      : "The file is kept on that machine under the node's own state, and compose brings it up.";
+    $$("[data-sk-through]").forEach((button) =>
+      button.setAttribute("aria-selected", button.dataset.skThrough === through ? "true" : "false"));
+  };
+  $$("[data-sk-through]").forEach((button) => button.addEventListener("click", () => {
+    through = button.dataset.skThrough; explain();
+  }));
+  explain();
+  if(!compose && !connected)
+    setMessage("sk-msg", "That machine has no docker compose: install it there first.", true);
   $("sk-go").addEventListener("click", (event) => withBusy(event.target, async () => {
     const name = $("sk-name").value.trim();
-    const compose = $("sk-body").value;
-    if(!name || !compose.trim()){
-      setMessage("sk-msg", "A name and a compose file are required.", true); return;
+    const body = $("sk-body").value;
+    if(!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(name) || !body.trim()){
+      setMessage("sk-msg", "A lowercase name and a compose file are needed.", true); return;
     }
-    const through = viaPortainer && $("sk-pt").checked;
     $("modal").close();
-    await dockerJob("Stack " + name,
-                    through ? "portainer_deploy" : "deploy_stack",
-                    through ? {stack:name, compose,
-                               endpoint:parseInt($("sk-endpoint").value, 10) || 1}
-                            : {stack:name, compose});
+    try{
+      await dockerRun("deploy:" + name, "Deploying " + name, "deploy_stack",
+                      {stack:name, compose:body, portainer:through === "portainer"});
+      toast("Stack " + name + " deployed", "ok");
+    }catch(error){ toast("Stack " + name + " failed", "danger", String(error.message || error)); }
+    await dockerLoad();
   }));
   $("sk-no").addEventListener("click", () => $("modal").close());
   $("modal").showModal();
@@ -1804,7 +2292,7 @@ document.body.addEventListener("click", async (event) => {
     return openShell();
   }
   if(data.docker){
-    DK.node = data.docker;
+    if(DK.node !== data.docker){ DK.node = data.docker; dockerReset(); }
     $("dk-node").value = data.docker;
     ROUTER.go("docker");
     return dockerLoad();
@@ -1825,60 +2313,6 @@ document.body.addEventListener("click", async (event) => {
     toast("Update started on " + plural(started.length, "node"),
           started.length ? "ok" : "warn");
     return poll();
-  }
-  if(data.stackAct){
-    const name = data.stack;
-    if(data.stackAct === "update"){
-      return dockerJob("Stack " + name, "stack", {stack:name, action:"update"});
-    }
-    return withBusy(button, async () => {
-      try{
-        await dockerCall("stack", {stack:name, action:data.stackAct});
-        toast("Stack " + name + " " + data.stackAct + "ed", "ok");
-      }catch(error){ toast(String(error.message || error), "danger"); }
-      await dockerLoad();
-    });
-  }
-  if(data.imgRm){
-    const agreed = await confirmAction({title:"Remove this image?",
-      body:'<p class="muted small">The daemon refuses while a container uses it.</p>',
-      confirmLabel:"Remove", danger:true});
-    if(!agreed) return;
-    return withBusy(button, async () => {
-      try{ await dockerCall("remove_image", {image:data.imgRm}); }
-      catch(error){ toast(String(error.message || error), "danger"); }
-      try{ DK.images = (await dockerCall("images")).items || []; }catch(_){ /* kept */ }
-      paintDocker();
-    });
-  }
-  if(data.ctLogs) return dockerLogs(data.ctLogs);
-  if(data.ctAct){
-    if(data.ctAct === "remove"){
-      const agreed = await confirmAction({title:"Remove this container?",
-        body:'<p class="muted small">It is stopped and deleted. Anything it wrote outside a ' +
-          "volume goes with it.</p>", confirmLabel:"Remove", danger:true});
-      if(!agreed) return;
-    }
-    return withBusy(button, async () => {
-      try{
-        await dockerCall("act", {id:data.ct, action:data.ctAct});
-      }catch(error){ toast(String(error.message || error), "danger"); }
-      await dockerLoad();
-    });
-  }
-  if(data.ptAct){
-    if(data.ptAct === "redeploy"){
-      return dockerJob("Portainer redeploy", "portainer_stack",
-                       {id:parseInt(data.pt, 10), action:"redeploy"});
-    }
-    return withBusy(button, async () => {
-      try{
-        await dockerCall("portainer_stack",
-                         {id:parseInt(data.pt, 10), action:data.ptAct});
-        DK.portainer = (await dockerCall("portainer_stacks")).items || [];
-        paintDocker();
-      }catch(error){ toast(String(error.message || error), "danger"); }
-    });
   }
 });
 // ---- an invitation minted by somebody else ---------------------------------
@@ -1969,28 +2403,61 @@ $("ssh-key").addEventListener("change", paintKeys);
 $("group-new").addEventListener("click", () => groupDialog(""));
 $("dk-node").addEventListener("change", () => {
   DK.node = $("dk-node").value;
-  DK.images = []; DK.volumes = []; DK.networks = []; DK.stats = {}; DK.portainer = [];
+  dockerReset();
   dockerLoad();
 });
 $("dk-refresh").addEventListener("click", (event) => withBusy(event.target, async () => {
+  DK.images = null; DK.volumes = null; DK.networks = null;
   await dockerLoad();
-  // The two lists nothing else needs: read on demand rather than on every
-  // refresh of the panel.
-  try{ DK.images = (await dockerCall("images")).items || []; }catch(_){ DK.images = []; }
-  try{ DK.volumes = (await dockerCall("volumes")).items || []; }catch(_){ DK.volumes = []; }
-  try{ DK.networks = (await dockerCall("networks")).items || []; }catch(_){ DK.networks = []; }
-  if(DK.overview && DK.overview.portainer){
-    try{ DK.portainer = (await dockerCall("portainer_stacks")).items || []; }
-    catch(_){ DK.portainer = []; }
-  }
-  paintDocker();
 }));
 // Read when the panel is opened, not on every poll: this is a round trip to
 // somebody else's machine, and a tab nobody is looking at should cost nothing.
-ROUTER.onChange = (section) => {
-  if(section === "docker" && DK.node && DK.overview === null) dockerLoad();
+ROUTER.onChange = (section, sub) => {
+  if(section === "docker" && DK.node){
+    if(DK.overview === null) dockerLoad(); else dockerLoadTab(sub);
+  }
   if(section === "logs") refreshLogs();
 };
+$("panel-docker").addEventListener("click", (event) => {
+  const scope = event.target.closest("[data-dk-scope]");
+  if(scope){ DK.scope = scope.dataset.dkScope; paintDocker(); return; }
+  const button = event.target.closest("[data-dk]");
+  if(!button) return;
+  const data = button.dataset;
+  const act = {
+    update: () => updateStack(data.stack),
+    stack: () => stackAct(data.stack, data.action, button),
+    file: () => stackFile(data.stack),
+    output: () => {
+      const result = DK.results[data.stack];
+      if(result) textDialog(data.stack + " · last update", "", result.output || result.text);
+    },
+    logs: () => dockerLogs(data.id, data.label),
+    act: () => containerAct(data.id, data.action, data.label, button),
+    remove: () => containerAct(data.id, "remove", data.label, button),
+    recreate: () => recreateContainer(data.id, data.label),
+    rmi: () => removeImage(data.image, button),
+    "pt-probe": () => portainerProbe(button),
+    "pt-connect": () => portainerConnect(button),
+    "pt-forget": () => portainerForget(button),
+  }[data.dk];
+  if(act) act();
+});
+// The switch that decides what Update also brings up. Written the moment it
+// changes, because a preference that needs a second button to save it is one
+// that is routinely lost.
+$("panel-docker").addEventListener("change", async (event) => {
+  const box = event.target.closest("[data-dk-pick]");
+  if(!box) return;
+  const chosen = dockerChosen();
+  if(box.checked) chosen.add(box.dataset.dkPick); else chosen.delete(box.dataset.dkPick);
+  await api("/api/fleet/stacks", "POST", {node:DK.node, stacks:[...chosen]});
+  poll();
+});
+$("dk-stack-filter").addEventListener("input", paintDocker);
+$("dk-ct-filter").addEventListener("input", paintDocker);
+$("dk-check").addEventListener("click", () => checkUpdates(false));
+$("dk-update-all").addEventListener("click", updateAll);
 $("dk-stack-new").addEventListener("click", () => stackDialog());
 $("dk-container-new").addEventListener("click", () => runDialog());
 $("dk-pull-form").addEventListener("submit", async (event) => {
@@ -1998,51 +2465,25 @@ $("dk-pull-form").addEventListener("submit", async (event) => {
   const image = $("dk-pull").value.trim();
   if(!image) return;
   $("dk-pull").value = "";
-  await dockerJob("Pull of " + image, "pull", {image});
-});
-$("pt-save").addEventListener("click", (event) => withBusy(event.target, async () => {
-  const url = $("pt-url").value.trim();
-  const token = $("pt-token").value;
-  if(!url || !token){
-    setMessage("pt-msg", "An address and a token are required.", true); return;
-  }
+  toast("Pulling " + image + "…");
   try{
-    const answer = await dockerCall("portainer",
-      {url, token, fingerprint:$("pt-fp").value.trim()});
-    // Never echoed back: the field is cleared here because the token now lives
-    // in that node's drawer and nothing reads it out again.
-    $("pt-token").value = "";
-    const items = answer.items || [];
-    setMessage("pt-msg", "Saved" + (answer.info && answer.info.pinned ? ", pinned" : "") +
-      " — " + plural(items.length, "environment") + " visible.");
-    DK.portainer = (await dockerCall("portainer_stacks")).items || [];
-    paintDocker();
-  }catch(error){ setMessage("pt-msg", String(error.message || error), true); }
-}));
-$("pt-forget").addEventListener("click", (event) => withBusy(event.target, async () => {
-  const agreed = await confirmAction({title:"Forget that Portainer?",
-    body:'<p class="muted small">The address and token are deleted from that node\'s drawer. ' +
-      "Its stacks keep running; this console just stops being able to redeploy them.</p>",
-    confirmLabel:"Forget", danger:true});
+    const info = (await dockerRun("pull", "Pulling " + image, "pull", {image})).info || {};
+    toast("Pulled " + (info.image || image), "ok");
+  }catch(error){ toast(String(error.message || error), "danger"); }
+  await dockerLoadTab("images", true);
+});
+async function removeImage(image, button){
+  const agreed = await confirmAction({title:"Remove this image?",
+    body:'<p class="mono small">' + esc(image) + "</p>" +
+      '<p class="muted small">The daemon refuses while a container uses it.</p>',
+    confirmLabel:"Remove", danger:true});
   if(!agreed) return;
-  try{
-    await dockerCall("portainer", {clear:true});
-    DK.portainer = [];
-    setMessage("pt-msg", "Forgotten.");
-    await dockerLoad();
-  }catch(error){ setMessage("pt-msg", String(error.message || error), true); }
-}));
-// The tick that decides what Update also brings up. Written the moment it
-// changes, because a preference that needs a second button to save it is one
-// that is routinely lost.
-$("dk-stacks").addEventListener("change", async (event) => {
-  const box = event.target.closest("[data-stack-pick]");
-  if(!box) return;
-  const chosen = $$("#dk-stacks [data-stack-pick]")
-    .filter((entry) => entry.checked).map((entry) => entry.dataset.stackPick);
-  await api("/api/fleet/stacks", "POST", {node:DK.node, stacks:chosen});
-  poll();
-});
+  return withBusy(button, async () => {
+    try{ await dockerCall("remove_image", {image}); }
+    catch(error){ toast(String(error.message || error), "danger"); }
+    await dockerLoadTab("images", true);
+  });
+}
 
 $("ssh-sudo").addEventListener("change", syncSudoFields);
 $("deploy-btn").addEventListener("click", deploy);
@@ -2110,7 +2551,9 @@ async function enter(token){
   $("shell").classList.remove("hidden");
   mountShell();
   CONTEXT.confirm();
-  ROUTER.start(() => {});
+  // No handler passed: the one set beside the panels is the handler, and a
+  // fresh one here would replace it.
+  ROUTER.start();
   await poll();
   await loadKeys();
   // The interval in the top bar drives this page too. It used to be markup with

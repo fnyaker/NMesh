@@ -1,5 +1,7 @@
 """
-Docker and Portainer: the validation in front of them, and the wire under them.
+Docker's Engine API and Portainer's: the validation in front of them, and the
+wire under them. What is built on them — stacks, updates — is
+`test_fleet_stacks.py`'s.
 
 Two things are worth proving here and they are not the same thing.
 
@@ -102,35 +104,6 @@ class TestNamesAndBounds:
             "INJECT": "a\nSECOND=b",
         }})
         assert body["Env"] == ["GOOD=1"]
-
-
-class TestStacksFromLabels:
-    def test_containers_group_into_the_projects_that_created_them(self):
-        rows = [
-            {"id": "a", "name": "web", "project": "site", "service": "web",
-             "state": "running", "image": "nginx", "portainer": ""},
-            {"id": "b", "name": "db", "project": "site", "service": "db",
-             "state": "exited", "image": "pg", "portainer": ""},
-            {"id": "c", "name": "loose", "project": "", "service": "",
-             "state": "running", "image": "busybox", "portainer": ""},
-            {"id": "d", "name": "pt", "project": "other", "service": "app",
-             "state": "running", "image": "img", "portainer": "other"},
-        ]
-        stacks = docker.group_stacks(rows)
-        assert [stack["name"] for stack in stacks] == ["other", "site"]
-        site = stacks[1]
-        assert site["total"] == 2 and site["running"] == 1
-        assert {entry["service"] for entry in site["services"]} == {"web", "db"}
-        # A container in no project is in no stack — not in one called "".
-        assert all(stack["name"] for stack in stacks)
-        assert stacks[0]["portainer"] == "other"
-
-    def test_a_compose_file_label_that_is_not_a_path_is_dropped(self):
-        assert docker.compose_files("/srv/a.yml,/srv/b.yml") == ["/srv/a.yml", "/srv/b.yml"]
-        assert docker.compose_files("a.yml") == []
-        assert docker.compose_files("/srv/a.yml,relative.yml") == ["/srv/a.yml"]
-        assert docker.compose_files("") == []
-        assert docker.compose_files("/a\nb.yml") == []
 
 
 class TestLogStream:
@@ -293,13 +266,164 @@ class TestEngineClient:
 # Portainer
 # ---------------------------------------------------------------------------
 
+class TestEngineClientBeyondTheBasics:
+    async def test_an_engine_that_dropped_our_version_is_asked_again_in_its_own(self):
+        """An engine raises its minimum API version over the years. Asking
+        `/version` before every call would cost a round trip each time for an
+        answer that changes once in a machine's life; the refusal names it."""
+        refusal = json.dumps({"message": "client version 1.41 is too old. "
+                              "Minimum supported API version is 1.44, please "
+                              "upgrade your client to a newer version"}).encode()
+        daemon = _Daemon([_answer(refusal, status=400), _answer(b'{"Version":"30.0"}'),
+                          _answer(b'{"Version":"30.0"}')])
+        await daemon.start()
+        saved = dict(docker._api)
+        try:
+            assert (await docker.call("GET", "/version"))["Version"] == "30.0"
+            await docker.call("GET", "/version")
+            assert [line.split()[1] for line, _ in daemon.requests] == [
+                "/v1.41/version", "/v1.44/version", "/v1.44/version"]
+        finally:
+            docker._api.update(saved)
+            await daemon.stop()
+
+    async def test_a_400_that_is_not_about_the_version_is_not_retried(self):
+        daemon = _Daemon([_answer(b'{"message":"bad parameter"}', status=400)])
+        await daemon.start()
+        try:
+            with pytest.raises(docker.DockerError) as failure:
+                await docker.call("GET", "/version")
+            assert "bad parameter" in str(failure.value)
+            assert len(daemon.requests) == 1
+        finally:
+            await daemon.stop()
+
+    def test_a_reference_splits_where_docker_splits_it(self):
+        """A registry's port is a colon too: `127.0.0.1:5000/app` has no tag."""
+        assert docker.split_reference("127.0.0.1:5000/app") == ("127.0.0.1:5000/app", "", "")
+        assert docker.split_reference("127.0.0.1:5000/app:2") == ("127.0.0.1:5000/app", "2", "")
+        assert docker.split_reference("nginx") == ("nginx", "", "")
+        assert docker.split_reference("img:1@sha256:ab") == ("img", "1", "sha256:ab")
+        assert docker.registry_of("nginx") == "docker.io"
+        assert docker.registry_of("owner/app") == "docker.io"
+        assert docker.registry_of("ghcr.io/owner/app") == "ghcr.io"
+        assert docker.registry_of("localhost/app") == "localhost"
+
+    async def test_a_pull_by_digest_asks_for_the_digest(self):
+        digest = "sha256:" + "a" * 64
+        daemon = _Daemon([_answer(b'{"status":"done"}'), _answer(b'{"status":"done"}')])
+        await daemon.start()
+        try:
+            assert (await docker.pull("img@" + digest))["image"] == "img@" + digest
+            assert (await docker.pull("127.0.0.1:5000/app"))["image"] == "127.0.0.1:5000/app:latest"
+            first, second = (line for line, _ in daemon.requests)
+            assert "fromImage=img%40sha256%3A" in first and "tag=" not in first
+            assert "fromImage=127.0.0.1%3A5000%2Fapp&tag=latest" in second
+        finally:
+            await daemon.stop()
+
+    def test_a_private_registry_is_reached_with_this_accounts_own_login(self, tmp_path,
+                                                                         monkeypatch):
+        import base64
+        token = base64.b64encode(b"deploy:hunter2").decode()
+        (tmp_path / "config.json").write_text(json.dumps(
+            {"auths": {"ghcr.io": {"auth": token}}}))
+        monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+        header = docker._auth_header("ghcr.io/owner/app:1")
+        assert header and header[0].startswith("X-Registry-Auth: ")
+        blob = json.loads(base64.urlsafe_b64decode(header[0].split(": ", 1)[1]))
+        assert blob == {"username": "deploy", "password": "hunter2", "serveraddress": "ghcr.io"}
+        # Another registry is not handed this one's password.
+        assert docker._auth_header("docker.io/library/nginx") == ()
+        assert docker._auth_header("quay.io/x/y") == ()
+
+    def test_a_login_file_that_is_not_one_costs_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+        for content in ("", "not json", "[]", '{"auths": 3}',
+                        '{"auths": {"ghcr.io": {"auth": "%%%"}}}'):
+            (tmp_path / "config.json").write_text(content)
+            assert docker._auth_header("ghcr.io/a/b") == ()
+
+    async def test_an_archive_gives_its_files_and_nothing_else(self):
+        """Read through the daemon because a volume's files are root's. A link
+        is never followed, a name that climbs is never a key, and nothing is
+        written anywhere."""
+        import io
+        import tarfile
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            def add(name, data=b"", kind=tarfile.REGTYPE, link=""):
+                info = tarfile.TarInfo(name)
+                info.type, info.linkname, info.size = kind, link, len(data)
+                archive.addfile(info, io.BytesIO(data) if data else None)
+            add("1", kind=tarfile.DIRTYPE)
+            add("1/docker-compose.yml", b"services: {}\n")
+            add("1/stack.env", b"A=1\n")
+            add("1/link", kind=tarfile.SYMTYPE, link="/etc/shadow")
+            add("1/../../escape", b"x")
+        daemon = _Daemon([_answer(buffer.getvalue())])
+        await daemon.start()
+        try:
+            held = await docker.read_archive("portainer", "/data/compose/1")
+            assert held == {"docker-compose.yml": b"services: {}\n", "stack.env": b"A=1\n"}
+            assert "path=/data/compose/1" in daemon.requests[0][0]
+        finally:
+            await daemon.stop()
+
+    async def test_an_archive_path_that_is_not_one_never_reaches_the_socket(self):
+        daemon = _Daemon([])
+        await daemon.start()
+        try:
+            for container, path in (("portainer", "relative"), ("portainer", "/a/../etc"),
+                                    ("bad name", "/data"), ("portainer", "/a\0b")):
+                with pytest.raises(docker.DockerError):
+                    await docker.read_archive(container, path)
+            assert daemon.requests == []
+        finally:
+            await daemon.stop()
+
+    async def test_an_archive_that_is_not_one_is_a_dockererror(self):
+        daemon = _Daemon([_answer(b"definitely not a tar file" * 40)])
+        await daemon.start()
+        try:
+            with pytest.raises(docker.DockerError):
+                await docker.read_archive("portainer", "/data")
+        finally:
+            await daemon.stop()
+
+    async def test_the_registry_digest_is_read_and_checked(self):
+        good = "sha256:" + "b" * 64
+        daemon = _Daemon([_answer(json.dumps({"Descriptor": {"digest": good}}).encode()),
+                          _answer(b'{"Descriptor": {"digest": "md5:xyz"}}'),
+                          _answer(b'[]')])
+        await daemon.start()
+        try:
+            assert await docker.remote_digest("nginx:1") == good
+            for _ in range(2):
+                with pytest.raises(docker.DockerError):
+                    await docker.remote_digest("nginx:1")
+            assert daemon.requests[0][0].split()[1].endswith("/distribution/nginx:1/json")
+        finally:
+            await daemon.stop()
+
+
 class TestPortainerConfiguration:
     def test_an_address_is_a_scheme_and_a_host_and_nothing_more(self):
         assert portainer.clean_url("https://portainer.lan:9443") == "https://portainer.lan:9443"
-        assert portainer.clean_url("http://10.0.0.5:9000/") == "http://10.0.0.5:9000"
+        assert portainer.clean_url("https://10.0.0.5:9443/") == "https://10.0.0.5:9443"
         for bad in ("", "portainer.lan", "ftp://x", "https://x/api/stacks",
                     "https://x?a=b", "https://" + "x" * 300, None,
                     "https://a b"):
+            assert portainer.clean_url(bad) == ""
+
+    def test_a_token_travels_in_the_clear_only_to_this_machine(self):
+        """Plain HTTP carries the token as written. On loopback there is no
+        wire to read it from; anywhere else there is."""
+        for good in ("http://127.0.0.1:9000", "http://localhost:9000",
+                     "http://[::1]:9000", "http://127.0.0.2:9000"):
+            assert portainer.clean_url(good) == good
+        for bad in ("http://192.0.2.4:9000", "http://portainer.lan:9000",
+                    "http://[2001:db8::1]:9000", "http://localhost.example:9000"):
             assert portainer.clean_url(bad) == ""
 
     def test_a_token_that_could_be_a_second_header_is_refused(self):
@@ -383,27 +507,94 @@ class TestPortainerCalls:
         redeploys the version it already had."""
         stack = {"id": 3, "endpoint": 1, "name": "site", "git": True,
                  "git_ref": "main"}
-        server, client = await self._client([_answer(b'{"Name":"site"}')])
+        detail = {"Id": 3, "Env": [], "GitConfig": {"URL": "https://git/x",
+                                                    "ReferenceName": "main"}}
+        server, client = await self._client([_answer(json.dumps(detail).encode()),
+                                             _answer(b'{"Name":"site"}')])
         try:
             await client.redeploy(stack)
-            line, _headers, body = server.requests[0]
+            line, _headers, body = server.requests[1]
             assert line.startswith("PUT /api/stacks/3/git/redeploy?endpointId=1")
-            assert json.loads(body)["PullImage"] is True
+            sent = json.loads(body)
+            assert sent["PullImage"] is True and sent["RepositoryReferenceName"] == "main"
+            assert sent["RepositoryAuthentication"] is False
         finally:
             await server.stop()
 
     async def test_a_file_stack_is_redeployed_with_its_file(self):
         server, client = await self._client([
+            _answer(b'{"Id":3,"Env":[]}'),
             _answer(json.dumps({"StackFileContent": "services: {}"}).encode()),
             _answer(b'{"Name":"site"}'),
         ])
         try:
             await client.redeploy({"id": 3, "endpoint": 1, "name": "site",
                                    "git": False})
-            assert server.requests[0][0].startswith("GET /api/stacks/3/file")
-            line, _headers, body = server.requests[1]
+            assert server.requests[0][0].startswith("GET /api/stacks/3 ")
+            assert server.requests[1][0].startswith("GET /api/stacks/3/file")
+            line, _headers, body = server.requests[2]
             assert line.startswith("PUT /api/stacks/3?endpointId=1")
             assert json.loads(body)["StackFileContent"] == "services: {}"
+            assert json.loads(body)["PullImage"] is True
+        finally:
+            await server.stop()
+
+    async def test_a_redeploy_hands_the_stacks_environment_back(self):
+        """Portainer replaces a stack's environment with what a redeploy
+        carries. An empty list there is every variable of the stack erased, and
+        the containers recreated without them."""
+        env = [{"name": "DB_PASSWORD", "value": "s3cret"}, {"name": "TZ", "value": "UTC"}]
+        server, client = await self._client([
+            _answer(json.dumps({"Id": 3, "Env": env}).encode()),
+            _answer(json.dumps({"StackFileContent": "services: {}"}).encode()),
+            _answer(b'{"Name":"site"}'),
+        ])
+        try:
+            done = await client.redeploy({"id": 3, "endpoint": 1, "name": "site"})
+            assert json.loads(server.requests[2][2])["Env"] == env
+            # Handed back to Portainer, and to nobody else.
+            assert "s3cret" not in json.dumps(done)
+        finally:
+            await server.stop()
+
+    async def test_a_git_stack_keeps_the_credentials_portainer_stored(self):
+        """Saying "no authentication" on a redeploy makes Portainer forget the
+        repository's credentials, and the next pull of a private repository
+        fails. Asking for them with an empty password makes it use its own."""
+        detail = {"Id": 3, "Env": [], "GitConfig": {
+            "URL": "https://git/x", "ReferenceName": "refs/heads/main",
+            "Authentication": {"Username": "deploy", "Password": ""}}}
+        server, client = await self._client([_answer(json.dumps(detail).encode()),
+                                             _answer(b'{"Name":"site"}')])
+        try:
+            await client.redeploy({"id": 3, "endpoint": 1, "name": "site", "git": True})
+            sent = json.loads(server.requests[1][2])
+            assert sent["RepositoryAuthentication"] is True
+            assert sent["RepositoryUsername"] == "deploy"
+            assert sent["RepositoryPassword"] == ""
+            assert sent["RepositoryReferenceName"] == "refs/heads/main"
+        finally:
+            await server.stop()
+
+    async def test_a_probe_reports_the_version_and_sends_no_token(self):
+        server = _PortainerServer([_answer(b'{"Version":"2.45.2","InstanceID":"x"}')])
+        await server.start()
+        try:
+            seen = await portainer.probe(f"http://127.0.0.1:{server.port}")
+            assert seen["version"] == "2.45.2" and seen["fingerprint"] == ""
+            line, headers, _body = server.requests[0]
+            assert line.startswith("GET /api/system/status")
+            assert "x-api-key" not in headers
+        finally:
+            await server.stop()
+
+    async def test_a_probe_of_something_else_says_so(self):
+        server = _PortainerServer([_answer(b'<html>hello</html>')])
+        await server.start()
+        try:
+            with pytest.raises(portainer.PortainerError) as failure:
+                await portainer.probe(f"http://127.0.0.1:{server.port}")
+            assert "not as Portainer" in str(failure.value)
         finally:
             await server.stop()
 
@@ -445,30 +636,6 @@ class TestPortainerCalls:
         assert "Portainer" in str(failure.value)
 
 
-class TestWhereAComposeFileLands:
-    """A file that decides what runs on a machine belongs with that node's own
-    state — backed up and wiped with it, never in `/tmp` and never at a path
-    somebody sent."""
-
-    def test_it_is_under_the_nodes_data_directory(self):
-        assert docker.stack_dir("/var/lib/nmesh") == "/var/lib/nmesh/stacks"
-
-    def test_and_falls_back_to_the_accounts_own_directory(self):
-        assert docker.stack_dir().endswith("/.nmesh/stacks")
-
-    async def test_a_name_that_could_climb_out_never_reaches_a_path(self, tmp_path):
-        for bad in ("../../etc/cron.d", "/etc/nmesh", "a/b", "", "."):
-            with pytest.raises(docker.DockerError):
-                await docker.deploy_stack(bad, "services: {}", root=str(tmp_path))
-        assert list(tmp_path.iterdir()) == []
-
-    async def test_an_empty_or_oversized_compose_file_is_refused(self, tmp_path):
-        for bad in ("", "   ", "x" * (docker.MAX_COMPOSE + 1), "a\0b"):
-            with pytest.raises(docker.DockerError):
-                await docker.deploy_stack("ok", bad, root=str(tmp_path))
-        assert list(tmp_path.iterdir()) == []
-
-
 def test_a_log_reply_is_cut_to_fit_the_frame_that_carries_it():
     """A reply too long to trim is not a truncated answer — it is a reply nobody
     receives at all, because the far side cannot parse half a JSON document.
@@ -485,6 +652,28 @@ def test_a_log_reply_is_cut_to_fit_the_frame_that_carries_it():
     answer = json.loads(blob)
     # Cut from the front: a log is read from its end.
     assert answer["text"] and log.endswith(answer["text"])
+
+
+class TestMatchingAStackToPortainersRecord:
+    def test_by_the_id_its_directory_gave(self):
+        listed = [{"id": 3, "name": "site"}, {"id": 9, "name": "site"}]
+        assert portainer.match({"name": "site", "portainer_id": 9}, listed)["id"] == 9
+        assert portainer.match({"name": "site", "portainer_id": 4}, listed) is None
+
+    def test_by_name_only_when_the_name_is_unambiguous(self):
+        """Two environments may each hold a stack called `site`; updating the
+        other machine's would be updating the wrong machine."""
+        listed = [{"id": 3, "name": "site"}, {"id": 9, "name": "site"},
+                  {"id": 5, "name": "blog"}]
+        assert portainer.match({"name": "blog", "portainer_id": 0}, listed)["id"] == 5
+        assert portainer.match({"name": "site", "portainer_id": 0}, listed) is None
+
+    def test_the_local_environment_is_the_one_on_this_socket(self):
+        endpoints = [{"id": 2, "url": "tcp://192.0.2.9:9001"},
+                     {"id": 7, "url": "unix:///var/run/docker.sock"}]
+        assert portainer.local_endpoint(endpoints) == 7
+        assert portainer.local_endpoint(endpoints[:1]) == 2
+        assert portainer.local_endpoint([]) == 0
 
 
 class TestReachingTheSocket:
@@ -586,3 +775,44 @@ class TestWhatTheDaemonReportsAboutUse:
             assert daemon.requests[0][0].startswith("DELETE /v1.41/images/ghcr.io/o/i:1 ")
         finally:
             await daemon.stop()
+
+
+class TestAPortainerDeploymentInTheBackground:
+    async def _client(self, answers):
+        server = _PortainerServer(answers)
+        await server.start()
+        return server, portainer.Portainer(f"http://127.0.0.1:{server.port}", "ptr_tok")
+
+    async def test_an_update_is_done_when_portainer_says_so(self, monkeypatch):
+        """Recent Portainer answers a redeploy with the stack still deploying
+        and recreates its containers afterwards."""
+        monkeypatch.setattr(portainer, "SETTLE_POLL", 0.01)
+        server, client = await self._client([
+            _answer(b'{"Id":3,"Env":[]}'),
+            _answer(json.dumps({"StackFileContent": "services: {}"}).encode()),
+            _answer(b'{"Name":"site","Status":3}'),
+            _answer(b'{"Status":3}'),
+            _answer(b'{"Status":1,"DeploymentStatus":[{"Status":3},{"Status":1}]}'),
+        ])
+        try:
+            await client.redeploy({"id": 3, "endpoint": 1, "name": "site"})
+            assert len(server.requests) == 5
+        finally:
+            await server.stop()
+
+    async def test_a_deployment_that_failed_is_a_failure(self, monkeypatch):
+        monkeypatch.setattr(portainer, "SETTLE_POLL", 0.01)
+        failed = {"Status": 2, "DeploymentStatus": [
+            {"Status": 3}, {"Status": 4, "Message": "pull access denied"}]}
+        server, client = await self._client([
+            _answer(b'{"Id":3,"Env":[]}'),
+            _answer(json.dumps({"StackFileContent": "services: {}"}).encode()),
+            _answer(b'{"Name":"site","Status":3}'),
+            _answer(json.dumps(failed).encode()),
+        ])
+        try:
+            with pytest.raises(portainer.PortainerError) as failure:
+                await client.redeploy({"id": 3, "endpoint": 1, "name": "site"})
+            assert "pull access denied" in str(failure.value)
+        finally:
+            await server.stop()
