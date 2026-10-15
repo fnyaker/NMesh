@@ -308,6 +308,11 @@ class MeshNode:
         self._e2e_pending_kem: dict[NodeID, bytes] = {}
         self._e2e_pending_nonce: dict[NodeID, bytes] = {}
         self._e2e_pending_data: dict[NodeID, list[bytes]] = {}
+        self._leaf_last: list[NodeID] = []              # the nearest nodes known at the last cycle
+        self._leaf_size = _LEAF_SIZE                    # nearest nodes we insist on a link with
+        self._finger_links = _FINGER_LINKS              # links per distance band
+        self._link_idle = _LINK_IDLE_SECONDS            # seconds a link nobody needs is kept; 0 = never closed
+        self._idle_closed: OrderedDict[NodeID, float] = OrderedDict()   # links we closed for being idle
         self._e2e_attempt: dict[NodeID, float] = {}   # target -> last handshake attempt (monotonic)
         # Responder-side re-key candidates: peer -> (candidate session, expiry).
         # Promoted only by a DATA packet that decrypts under the candidate.
@@ -1981,6 +1986,7 @@ class MeshNode:
             if now >= next_sweep:
                 next_sweep = now + _LINK_KEEPALIVE_INTERVAL
                 self._reap_silent_links()
+                self._prune_idle_links()
                 self._reap_mute_accepted()
                 self._reap_expired_tarpits()
                 self._update_bundles()
@@ -2079,6 +2085,98 @@ class MeshNode:
     def _wake_keepalive(self) -> None:
         """A link arrived, or its cadence changed: do not wait out the tick."""
         self._keepalive_wakeup.set()
+
+    def _links_held_for_good(self) -> set[NodeID]:
+        """The identities whose links are the structure of the mesh: the nearest
+        nodes (`_leaf_last`) and, in each band of distance, the
+        `_finger_links` oldest links. Everything else is there because a
+        conversation or a lookup put it there."""
+        keep = set(self._leaf_last)
+        bands: dict[int, list] = {}
+        for peer in self._authenticated_peers():
+            band = self._id.distance(peer.authenticated_id).bit_length()
+            bands.setdefault(band, []).append(peer)
+        for peers in bands.values():
+            peers.sort(key=lambda p: p.serial)
+            keep.update(p.authenticated_id for p in peers[:self._finger_links])
+        return keep
+
+    def _likely_in_their_leaf(self, node_id: NodeID) -> bool:
+        """Whether we are probably one of the nearest nodes of ``node_id``,
+        from our own table: closing a link its other end insists on only makes
+        it dial back."""
+        mine = node_id.distance(self._id)
+        nearer = 0
+        for entry in self._routing.all_entries():
+            if node_id.distance(entry.node_id) < mine:
+                nearer += 1
+                if nearer >= self._leaf_size:
+                    return False
+        return True
+
+    def _prune_idle_links(self) -> None:
+        """Close the links nobody needs. Never raises, never awaits.
+
+        A link stays open for ever unless something closes it, and every open
+        link costs a probe each way every twenty seconds: at rest that is the
+        whole traffic of a node (measured on 1000 nodes, 36 links and 3.6
+        packets per second, all of it PING and PONG). What a node needs open is
+        its structure — the nearest nodes and a link or two per band of
+        distance — and the links it is using. The rest is closed after
+        `_link_idle` seconds without a conversation, a couple per sweep.
+
+        Left alone: a node we hold several links to (a bundle), a link we are
+        probing or relaying on, one the far end redialled after we closed it,
+        and the last few links we have. A link closed here is **not chased**:
+        it was closed on purpose."""
+        idle = self._link_idle
+        if not idle or not self._leaf_last:
+            return
+        links = self._authenticated_peers()
+        if len(links) <= max(_NEIGHBOR_FLOOR, self._leaf_size):
+            return
+        now = time.monotonic()
+        keep = self._links_held_for_good()
+        per_node: dict[NodeID, int] = {}
+        for peer in self._peers:
+            if peer.authenticated_id is not None:
+                per_node[peer.authenticated_id] = per_node.get(peer.authenticated_id, 0) + 1
+        closing = []
+        for peer in sorted(links, key=lambda p: p.last_used):
+            node_id = peer.authenticated_id
+            if (now - peer.last_used < idle or node_id in keep or peer.peer_wants
+                    or peer.relay_only or peer.probation or per_node.get(node_id, 0) > 1
+                    or self._likely_in_their_leaf(node_id)):
+                continue
+            closing.append(peer)
+            if len(closing) >= _PRUNE_PER_SWEEP:
+                break
+        for peer in closing:
+            if peer not in self._peers:
+                continue
+            self._peers.remove(peer)
+            self._forget_bundle(peer)
+            self._idle_closed[peer.authenticated_id] = now
+            while len(self._idle_closed) > _IDLE_CLOSED_MAX:
+                self._idle_closed.popitem(last=False)
+            reason = f"closed: nobody needed it for {now - peer.last_used:.0f} s"
+            self._log_link_end(peer, reason)
+            self._spawn_bounded(self._release_and_stop(peer, reason))
+        if closing:
+            self._note_change("links")
+            self._note_change("nodes")
+
+    async def _release_and_stop(self, peer: '_Peer', reason: str) -> None:
+        """Say the link is being closed on purpose, to a peer that understands
+        it, and close it."""
+        if self.peer_announces(peer, features.LINK_RELEASE):
+            try:
+                async with asyncio.timeout(1.0):
+                    await peer.send(Packet.create(LINK_RELEASE, self._id.raw,
+                                                  peer.authenticated_id.raw, b""))
+            except Exception:                       # noqa: BLE001 — closing anyway
+                pass
+        await self._safe_stop_peer(peer, reason)
 
     def _reap_silent_links(self) -> None:
         """Cut the links that answer nothing. Never raises, never awaits.
@@ -2489,6 +2587,18 @@ class MeshNode:
         peer.ka_due = min(peer.ka_due,
                           peer.ka_accord_at + self._keepalive_interval(peer))
         self._wake_keepalive()
+
+    async def _handle_link_release(self, peer: '_Peer', packet: Packet) -> None:
+        """The far end is closing this link on purpose and says so, so that its
+        ending is not taken for a loss and chased.
+
+        All it can do is stop us redialling: the flag is read when the link
+        ends, and a peer that says it and does not close costs us nothing."""
+        if peer.authenticated_id is None or peer.session is None:
+            return
+        if packet.payload:
+            return self._charge_abuse(peer)         # it carries nothing
+        peer.released = True
 
     async def _handle_ka_request(self, peer: '_Peer', packet: Packet) -> None:
         """A peer asks this node to slow its probes down on this link.
@@ -3321,7 +3431,7 @@ class MeshNode:
             if now < self._neighbor_retry.get(entry.node_id, (0, 0.0))[1]:
                 continue
             band = self._id.distance(entry.node_id).bit_length()
-            if held.get(band, 0) >= _FINGER_LINKS:
+            if held.get(band, 0) >= self._finger_links:
                 continue
             if band not in best or entry.last_seen > best[band].last_seen:
                 best[band] = entry
@@ -3474,8 +3584,26 @@ class MeshNode:
         searching = force or len(live) < _NEIGHBOR_FLOOR
         promotions = self._neighbor_promotions()
         fingers = self._finger_candidates()
-        if not searching and not promotions and not fingers:
+        # The leaf set: the `_LEAF_SIZE` nearest nodes we know. Greedy routing
+        # ends at the node nearest the target, and that node can only hand a
+        # packet on if it holds a link with the target; and a lookup can only
+        # find a node that its nearest neighbours know. Both need every node
+        # linked to its true nearest, and a node that held three links by luck
+        # of its join was known to three nodes and could be reached by nobody
+        # else. While the set is not all linked, or is not what it was last
+        # cycle, the cycle searches: a lookup of our own id (which is also how
+        # those nodes learn of us) and a dial of what it turned up.
+        leaf = [e.node_id for e in self._routing.get_closest(self._id, self._leaf_size)]
+        linked = {p.authenticated_id for p in self._authenticated_peers()}
+        # One that has refused three times in a row is not waited for: an entry
+        # nobody can reach must not keep the node searching for ever.
+        unsettled = leaf != self._leaf_last or any(
+            i not in linked and self._neighbor_retry.get(i, (0, 0.0))[0] < _LEAF_GIVE_UP
+            for i in leaf)
+        self._leaf_last = leaf
+        if not searching and not promotions and not fingers and not unsettled:
             return
+        searching = searching or unsettled
 
         if searching and self._authenticated_peers():
             try:
@@ -3488,7 +3616,7 @@ class MeshNode:
 
         now = time.monotonic()
         live_ids = {p.authenticated_id for p in self._authenticated_peers()}
-        desired = list(promotions) + fingers
+        desired = list(promotions) + fingers + [i for i in leaf if i not in live_ids]
         if searching:
             desired += [entry.node_id for entry in
                         self._routing.get_closest(self._id, _NEIGHBOR_TARGET)]
@@ -3565,6 +3693,8 @@ class MeshNode:
             return                      # never was a link to a node we can dial
         if peer.relay_only or peer.probation:
             return                      # not this node's link to that node
+        if peer.released:
+            return                      # it told us it was closing this on purpose
         if peer.tarpit_until or peer._malformed > _MAX_MALFORMED:
             return                      # we cut this one; getting it back is not a goal
         if self._cert_store.revocation_for(node_id) is not None:
@@ -4215,6 +4345,21 @@ class MeshNode:
                 out.append(peer)
         return out
 
+    def set_link_budget(self, *, leaf_size: int, finger_links: int, idle_minutes: int) -> dict:
+        """How many links this node holds for good, and how long it keeps the
+        others. See `_prune_idle_links`. Bounded here, so a setting that is
+        wrong costs a refusal and not a mesh."""
+        leaf, fingers, idle = int(leaf_size), int(finger_links), int(idle_minutes)
+        if not 2 <= leaf <= 32:
+            raise ValueError("between 2 and 32 nearest nodes")
+        if not 1 <= fingers <= 4:
+            raise ValueError("between 1 and 4 links per band")
+        if not 0 <= idle <= 1440:
+            raise ValueError("between 0 and 1440 minutes")
+        self._leaf_size, self._finger_links, self._link_idle = leaf, fingers, idle * 60.0
+        self._wake_neighbor_maintenance()
+        return {"leaf_size": leaf, "finger_links": fingers, "idle_minutes": idle}
+
     def set_route_hold(self, seconds: float) -> float:
         """How long a routed identity keeps its first hop; 0 spreads it over
         every measured path. See `_route_lead`."""
@@ -4532,6 +4677,8 @@ class MeshNode:
         for peer in candidates:
             try:
                 await peer.send(outgoing)
+                if packet.type in _CONVERSATION_TYPES:
+                    peer.last_used = time.monotonic()
                 return peer
             except LinkBusy:
                 # Full, not gone: the next candidate gets the packet and this
@@ -5285,6 +5432,12 @@ class MeshNode:
 
     def _log_link_up(self, peer: '_Peer', how: str) -> None:
         """A link authenticated: who, over what, which way round."""
+        now = time.monotonic()
+        peer.last_used = now
+        closed = self._idle_closed.pop(peer.authenticated_id, None)
+        # We closed this node's link for being idle and it came back: it wants
+        # it, and closing it again would only start the same cycle over.
+        peer.peer_wants = closed is not None and now - closed < _PEER_WANTS_TTL
         if not self.logs.enabled:
             return
         self.log("link up", source="peers", topic="link",
@@ -7720,6 +7873,8 @@ class MeshNode:
                 return
             if packet.src_id != peer.authenticated_id.raw:
                 return
+        if packet.type in _CONVERSATION_TYPES:
+            peer.last_used = time.monotonic()
         if packet.type in _ROUTABLE_TYPES:
             if peer.authenticated_id is None:
                 return
@@ -14248,6 +14403,7 @@ _HANDLERS = {
     SPEED_PROBE:       MeshNode._handle_speed_probe,
     SPEED_ECHO:        MeshNode._handle_speed_echo,
     STOP_RELAY:        MeshNode._handle_stop_relay,
+    LINK_RELEASE:      MeshNode._handle_link_release,
     ECHO_REPLY:        MeshNode._handle_echo_reply,
     CERT_RENEW:        MeshNode._handle_cert_renew,
     CERT_RENEWED:      MeshNode._handle_cert_renewed,
@@ -14287,4 +14443,5 @@ _MESSAGE_PLANE = {
     KA_PROPOSE: features.KEEPALIVE, KA_REQUEST: features.KEEPALIVE,
     SPEED_PROBE: features.SPEEDTEST, SPEED_ECHO: features.SPEEDTEST,
     STOP_RELAY: features.STOP_RELAY,
+    LINK_RELEASE: features.LINK_RELEASE,
 }

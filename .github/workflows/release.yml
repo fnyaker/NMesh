@@ -4,7 +4,7 @@ name: Release
 # has passed on that very commit:
 #   - nmesh.pyz         attached to the GitHub release
 #   - Docker image      pushed to GHCR as ghcr.io/<owner>/nmesh:<tag>
-# `:latest` belongs to ci.yml alone (one publisher, one order: BUGSVULNS 109).
+# `:latest` belongs to ci.yml alone (one publisher, one order: BUGSVULNS 111).
 on:
   push:
     tags: [ "v*" ]

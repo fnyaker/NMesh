@@ -556,7 +556,7 @@ post-quantum half of the node's crypto.
 Only the two schemes a node uses are compiled: ML-KEM-768 and ML-DSA-65
 (`OQS_MINIMAL_BUILD`), with the stateful signatures (LMS, XMSS) off by name.
 Every other scheme is code an advisory can land in and no node calls — liboqs
-0.16.0 carries two advisories in its LMS code (BUGSVULNS 113) — and the library
+0.16.0 carries two advisories in its LMS code (BUGSVULNS 115) — and the library
 shrinks from about 26 MB to under 1 MB. The wrapper still loads: the stateful
 signature API it binds to is compiled with no scheme behind it. A library built
 before this change keeps its other schemes until the lock next moves; none of

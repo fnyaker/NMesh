@@ -117,6 +117,21 @@ packets sent and relayed, and the **lateness of the slowest worker's event loop*
 Past a loop lag p99 of a few hundred milliseconds the figures describe the
 machine. It is a measurement tool, not a test: nothing in `pytest` runs it.
 
+Options worth knowing:
+
+* `--fast` replaces `oqs` with `tests/tools/fake_oqs.py`: the same key, signature
+  and ciphertext sizes, hashes instead of lattices. It gave the same figures as
+  the real thing at 240 nodes and reaches 2000 on twelve cores (about 3 MB per
+  simulated node, and a join phase that takes minutes: it is sequential).
+* After the settling time it prints, for every node, how many of its **true**
+  1, 3 and 8 nearest nodes (computed over all ids) it is linked to and has in its
+  routing table. A routing algorithm that depends on that is checked by it
+  directly, not by its side effects.
+* `--explain` says what both ends of each undelivered first contact looked like:
+  links, routing table size, and how many nodes know the receiver.
+* The same seed moves by five first contacts or more from run to run. Compare
+  ranges over several seeds, never one run against one run.
+
 ### Hostile requests at the console's API
 
 `tests/tools/api_fuzz.py` signs in to a **throwaway** node and sends every route
@@ -326,6 +341,12 @@ tests/
 ├── test_loop_backtrack.py                             — a routed packet that
 │     comes back round a cycle leaves by another neighbour, and what that may
 │     cost is bounded (replays, fanout, the book)
+├── test_link_prune.py — idle links closed (structure, links in use, bundles, relay and
+│     probe links, nodes whose leaf we are, redialled links kept), told with
+│     LINK_RELEASE and not chased, bounded; the link budget's bounds
+├── test_neighborhood.py — the maintained neighbourhood, including the leaf set
+│     (searching until the nearest known nodes are all linked, quiet after, bounded,
+│     not kept searching by a node nobody can reach)
 ├── test_routing_stability.py                          — routing regressions:
 │     the size of a FOUND_NODE, acquiring a route outside the receive loop,
 │     the return path learned from traffic, bounded teardown, a first

@@ -187,7 +187,7 @@ class TestTheBuildStamps:
 
 class TestWhatIsCompiled:
     """Only the two schemes a node uses are built. liboqs 0.16.0 carries two
-    advisories in its LMS code (BUGSVULNS 113); a scheme that is not compiled
+    advisories in its LMS code (BUGSVULNS 115); a scheme that is not compiled
     is one no advisory can reach."""
 
     def _configure_args(self, sandbox) -> list:

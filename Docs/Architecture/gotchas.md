@@ -2501,12 +2501,12 @@ running X.
   hazardous stateful signing because "the wrapper fails to load without the
   stateful symbols" — true of the *API* symbols (`OQS_SIG_STFL_*`), which
   0.16.0 compiles with no scheme behind them, not of the schemes. With them on,
-  the library carried two advisories in code no node calls (BUGSVULNS 113). A
+  the library carried two advisories in code no node calls (BUGSVULNS 115). A
   new algorithm in `src/crypto.py` needs its name added there:
   `tests/test_liboqs_lock.py` derives the list from `KEM_ALG`/`DSA_ALG`, and
   the wrapper raises `MechanismNotEnabledError` for anything not built.
 - CI never hands the Docker socket to a tool, and logs in to the registry only
-  after the scan (BUGSVULNS 110): the socket is root on the runner, and the
+  after the scan (BUGSVULNS 112): the socket is root on the runner, and the
   login it would find is the one that pushes `:latest`. A scanner reads a
   `docker save` file (`trivy image --input`) or the registry by digest.
 - Docker: the application image is a **fresh `python:*-slim` stage** that copies

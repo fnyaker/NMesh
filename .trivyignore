@@ -3,6 +3,6 @@
 
 # Both images run as root. The application image's /data volume, the
 # documented /root/.ssh mount and the fleet app's Docker socket all assume it;
-# moving to an unprivileged user is tracked as BUGSVULNS 114, and this line
+# moving to an unprivileged user is tracked as BUGSVULNS 116, and this line
 # goes with it.
 DS-0002

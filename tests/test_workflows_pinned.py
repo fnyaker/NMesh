@@ -96,7 +96,7 @@ def test_a_workspace_relative_reference_is_refused():
 @pytest.mark.parametrize("name", ["base-image.yml", "ci.yml"])
 def test_what_publishes_latest_does_it_one_run_at_a_time(name):
     """Two merges a minute apart once let the older build overwrite the newer
-    `:latest` (BUGSVULNS 100)."""
+    `:latest` (BUGSVULNS 111)."""
     text = (WORKFLOWS / name).read_text()
     assert re.search(r"concurrency:\s*\n\s+group: ", text), name
     assert "cancel-in-progress: false" in text
