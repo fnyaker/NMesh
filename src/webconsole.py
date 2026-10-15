@@ -271,7 +271,7 @@ _MAX_SHELL_HOLDS = 8
 # than forwarded whole: a body passed straight through is every field the far
 # side does not know about, and there is no list of those to reason about.
 _DOCKER_ARGS = ("id", "action", "tail", "image", "spec", "stack", "compose",
-                "url", "token", "fingerprint", "clear", "endpoint")
+                "url", "token", "fingerprint", "clear", "portainer", "rid")
 
 
 class _WebSurface:

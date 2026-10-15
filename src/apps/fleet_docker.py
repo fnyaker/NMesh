@@ -1,20 +1,12 @@
 """
-Docker, and the stacks on top of it — what a managed machine runs in containers.
+Docker's Engine API, spoken over the machine's own socket.
 
-Three ways in, and they are deliberately not interchangeable:
-
-* **The Engine API**, over the machine's own socket. Everything that reads or
-  moves a container goes through it: listing, inspecting, logs, start/stop,
-  pulling an image, creating one. No CLI needed, no shell, no quoting surface.
-* **`docker compose`**, when the binary is there. A *stack* is a compose
-  project, and the only honest way to bring one up to date is to re-run the
-  compose file it was deployed from — pulling images under a project and
-  restarting it is not the same act and quietly does less.
-* **Portainer's API**, when this machine is running one. Portainer deploys
-  through compose and labels what it deploys, so its stacks already show up in
-  the list above; what its API adds is the stack *file* (git or string) and the
-  redeploy that fetches it again. A stack Portainer owns is updated through
-  Portainer, or the next thing Portainer does will undo it.
+Everything that reads or moves a container goes through here: listing,
+inspecting, logs, start/stop, pulling an image, creating a container, reading a
+file out of one. No CLI, no shell, no quoting surface. The stacks built on top
+of these containers — compose projects, Portainer's among them — are
+`fleet_stacks`'s; this module knows containers and images, and nothing about
+who deployed them.
 
 **The socket is root.** A process that can talk to `/var/run/docker.sock` can
 start a privileged container bind-mounting `/`, which is the machine. That is
@@ -24,24 +16,27 @@ module holds no authorisation of its own and must never be handed input that has
 not been through one.
 
 Everything arriving from an operator is hostile input: names, ids, image
-references, compose files, Portainer URLs. Each one is validated against a
-charset and a bound *before* it reaches a socket or an argv, and a value that
-does not validate is refused rather than escaped — there is no escaping here to
-get wrong.
+references, compose files. Each one is validated against a charset and a bound
+*before* it reaches a socket, and a value that does not validate is refused
+rather than escaped — there is no escaping here to get wrong. What the daemon
+answers is hostile input too, for the same reason a peer's is: every shape
+handed on is built field by field and bounded.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import os
 import re
-import shutil
-import time
+import tarfile
+from urllib.parse import quote
 
 # -- bounds -----------------------------------------------------------------
 # Every one of these bounds something an operator, or the daemon, can grow.
 DEFAULT_SOCKET = "/var/run/docker.sock"
-API_VERSION = "v1.41"             # old enough for every engine still supported
+API_VERSION = "1.41"              # old enough for every engine still supported
 CALL_TIMEOUT = 30.0               # one Engine API call
 PULL_TIMEOUT = 900.0              # an image pull is minutes, not seconds
 COMPOSE_TIMEOUT = 1800.0          # `compose up` builds and pulls
@@ -52,25 +47,22 @@ MAX_IMAGES = 250
 MAX_VOLUMES = 250
 MAX_NETWORKS = 100
 MAX_STATS = 40                    # containers sampled at once; each sample takes ~1 s
-MAX_STACKS = 100
 MAX_LOG_TAIL = 2000               # lines
 # What a reply may carry back. Sized to fit one frame *after* JSON escaping:
 # `_dump_json` drops whole list entries to make a reply fit, and a string is not
 # a list — a log too long to trim is a reply nobody receives at all.
 MAX_LOG_BYTES = 32_000
 MAX_COMPOSE = 40_000              # a compose file, so one reply frame still fits
+MAX_ARCHIVE = 2 * 1024 * 1024     # a directory read out of a container
+MAX_ARCHIVE_MEMBERS = 64
 MAX_ENV = 64                      # variables on a container we create
 MAX_PORTS = 32
 MAX_MOUNTS = 32
 
-# Labels compose writes on everything it creates. They are the whole reason a
-# "stack" can be recovered from a running machine without a database.
+# Labels compose writes on everything it creates. Read here only to say which
+# project a container belongs to; what a project *is* is `fleet_stacks`'s.
 LABEL_PROJECT = "com.docker.compose.project"
 LABEL_SERVICE = "com.docker.compose.service"
-LABEL_CONFIG = "com.docker.compose.project.config_files"
-LABEL_WORKDIR = "com.docker.compose.project.working_dir"
-# Portainer's own, on the stacks it owns.
-LABEL_PORTAINER = "io.portainer.stack.name"
 
 _ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _IMAGE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,255}\Z")
@@ -257,10 +249,6 @@ def available() -> bool:
     return bool(where)
 
 
-def compose_available() -> bool:
-    return shutil.which("docker") is not None
-
-
 async def _open() -> tuple:
     kind, where = endpoint()
     try:
@@ -367,16 +355,46 @@ def build_request(method: str, target: str, host: str, payload: bytes,
     return ("\r\n".join(lines) + "\r\n\r\n").encode("utf-8") + payload
 
 
+# The API version spoken, raised once if the daemon says ours is too old. An
+# engine drops old versions over time; asking `/version` first would be a round
+# trip on every call for an answer that changes once a machine's lifetime.
+_api = {"version": API_VERSION}
+_TOO_OLD = re.compile(r"[Mm]inimum supported API version is (\d{1,2}\.\d{1,3})")
+
+
 async def call(method: str, path: str, body=None, *,
-               timeout: float = CALL_TIMEOUT, raw: bool = False):
+               timeout: float = CALL_TIMEOUT, raw: bool = False,
+               headers: tuple = ()):
     """One Engine API call. Returns parsed JSON, or bytes when ``raw``.
 
     Raises :class:`DockerError` and nothing else: a caller of this is answering
     an operator over the mesh, and an unexpected exception there is a handler
     that stops handling."""
     payload = b"" if body is None else json.dumps(body).encode("utf-8")
-    head = build_request(method, f"/{API_VERSION}{path}", "docker", payload)
+    for _attempt in range(2):
+        status, data = await _exchange(method, path, payload, timeout, headers)
+        if status == 400:
+            wanted = _TOO_OLD.search(data[:400].decode("utf-8", "replace"))
+            if wanted and wanted.group(1) != _api["version"]:
+                _api["version"] = wanted.group(1)
+                continue
+        break
+    if status >= 400:
+        raise DockerError(_message(data, status))
+    if raw:
+        return data
+    if not data:
+        return None
+    try:
+        return json.loads(data)
+    except ValueError:
+        raise DockerError("the daemon answered something unreadable") from None
 
+
+async def _exchange(method: str, path: str, payload: bytes, timeout: float,
+                    headers: tuple) -> tuple[int, bytes]:
+    head = build_request(method, f"/v{_api['version']}{path}", "docker", payload,
+                         extra=headers)
     reader, writer = await _open()
     try:
         writer.write(head)
@@ -394,17 +412,7 @@ async def call(method: str, path: str, body=None, *,
             await writer.wait_closed()
         except (OSError, asyncio.TimeoutError):
             pass
-
-    if status >= 400:
-        raise DockerError(_message(data, status))
-    if raw:
-        return data
-    if not data:
-        return None
-    try:
-        return json.loads(data)
-    except ValueError:
-        raise DockerError("the daemon answered something unreadable") from None
+    return status, data
 
 
 def _message(data: bytes, status: int) -> str:
@@ -454,18 +462,21 @@ def _container_row(entry: dict) -> dict:
         "status": _short(entry.get("Status"), 96),
         "created": entry.get("Created") if isinstance(entry.get("Created"), int) else 0,
         "ports": ports[:8],
+        "image_id": _short(entry.get("ImageID"), 80),
         "project": _short(labels.get(LABEL_PROJECT), 64),
         "service": _short(labels.get(LABEL_SERVICE), 64),
-        "portainer": _short(labels.get(LABEL_PORTAINER), 64),
     }
 
 
-async def containers(all_of_them: bool = True) -> list[dict]:
+async def raw_containers(all_of_them: bool = True) -> list[dict]:
+    """The daemon's own list, bounded, for a caller that reads the labels."""
     raw = await call("GET", "/containers/json?all=" + ("1" if all_of_them else "0"))
-    if not isinstance(raw, list):
-        return []
-    return [_container_row(entry) for entry in raw[:MAX_CONTAINERS]
+    return [entry for entry in (raw if isinstance(raw, list) else [])[:MAX_CONTAINERS]
             if isinstance(entry, dict)]
+
+
+async def containers(all_of_them: bool = True) -> list[dict]:
+    return [_container_row(entry) for entry in await raw_containers(all_of_them)]
 
 
 async def images() -> list[dict]:
@@ -579,7 +590,6 @@ async def overview() -> dict:
         "containers": info.get("Containers") if isinstance(info.get("Containers"), int) else 0,
         "running": info.get("ContainersRunning") if isinstance(info.get("ContainersRunning"), int) else 0,
         "images": info.get("Images") if isinstance(info.get("Images"), int) else 0,
-        "compose": compose_available(),
     }
 
 
@@ -672,19 +682,77 @@ async def act(container: str, action: str) -> dict:
     return {"container": ident, "action": action}
 
 
+def split_reference(reference: str) -> tuple[str, str, str]:
+    """``registry/owner/name:tag@digest`` → (repository, tag, digest).
+
+    The tag is the last colon *after* the last slash: a registry's port is a
+    colon too, and ``127.0.0.1:5000/app`` has no tag at all."""
+    reference, _, digest = reference.partition("@")
+    slash = reference.rfind("/")
+    colon = reference.rfind(":")
+    if colon > slash:
+        return reference[:colon], reference[colon + 1:], digest
+    return reference, "", digest
+
+
+def registry_of(reference: str) -> str:
+    """The registry a reference names, as `docker login` keys it."""
+    first, sep, _rest = reference.partition("/")
+    if sep and ("." in first or ":" in first or first == "localhost"):
+        return first
+    return "docker.io"
+
+
+def _auth_header(reference: str) -> tuple:
+    """`X-Registry-Auth` for a private registry, from this account's own
+    `docker login`.
+
+    Read from the node's account and nowhere else, never sent anywhere but the
+    local daemon, and never part of an answer. A credential helper keeps its
+    secrets out of the file, so a registry logged into through one is pulled
+    anonymously here — and says so in the daemon's refusal."""
+    folder = os.environ.get("DOCKER_CONFIG") or os.path.expanduser("~/.docker")
+    try:
+        with open(os.path.join(folder, "config.json"), "rb") as handle:
+            config = json.loads(handle.read(64 * 1024))
+    except (OSError, ValueError):
+        return ()
+    auths = config.get("auths") if isinstance(config, dict) else None
+    if not isinstance(auths, dict):
+        return ()
+    registry = registry_of(reference)
+    keys = ("https://index.docker.io/v1/", "docker.io", "index.docker.io") \
+        if registry == "docker.io" else (registry, "https://" + registry)
+    for key in keys:
+        entry = auths.get(key)
+        token = entry.get("auth") if isinstance(entry, dict) else None
+        if not isinstance(token, str):
+            continue
+        try:
+            user, _, secret = base64.b64decode(token, validate=True).decode().partition(":")
+        except (ValueError, UnicodeDecodeError):
+            return ()
+        blob = json.dumps({"username": user, "password": secret,
+                           "serveraddress": key}).encode()
+        return ("X-Registry-Auth: " + base64.urlsafe_b64encode(blob).decode(),)
+    return ()
+
+
 async def pull(image: str) -> dict:
     """Fetch an image. Minutes long, and the answer is a stream of progress."""
     reference = clean_image(image)
-    if not reference:
+    if not reference or ".." in reference:
         raise DockerError("that image name is not usable")
-    name, _, tag = reference.rpartition(":")
-    if not name or "/" in tag:
-        name, tag = reference, "latest"
-    from urllib.parse import quote
-    raw = await call(
-        "POST",
-        f"/images/create?fromImage={quote(name, safe='')}&tag={quote(tag, safe='')}",
-        body=None, timeout=PULL_TIMEOUT, raw=True)
+    repository, tag, digest = split_reference(reference)
+    if digest:
+        query = f"fromImage={quote(repository + '@' + digest, safe='')}"
+        named = f"{repository}@{digest}"
+    else:
+        tag = tag or "latest"
+        query = f"fromImage={quote(repository, safe='')}&tag={quote(tag, safe='')}"
+        named = f"{repository}:{tag}"
+    raw = await call("POST", f"/images/create?{query}", body=None,
+                     timeout=PULL_TIMEOUT, raw=True, headers=_auth_header(reference))
     text = (raw or b"").decode("utf-8", "replace")
     # Docker reports a failed pull inside a 200 body, one JSON object per line.
     for line in reversed(text.strip().splitlines()[-20:]):
@@ -694,7 +762,7 @@ async def pull(image: str) -> dict:
             continue
         if isinstance(entry, dict) and entry.get("error"):
             raise DockerError(_short(entry["error"], 200))
-    return {"image": f"{name}:{tag}"}
+    return {"image": named}
 
 
 async def create(spec: dict) -> dict:
@@ -719,217 +787,83 @@ async def create(spec: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Stacks
+# Reads that stay on this machine
 # ---------------------------------------------------------------------------
 #
-# A stack is a compose project, and a compose project is recoverable from a
-# running machine because compose labels everything it creates. No database, no
-# second source of truth — what is running *is* the list. Portainer deploys
-# through compose too, so its stacks appear here with no special case; what
-# tells them apart is the label it adds, and that decides who is allowed to
-# update them.
+# What `fleet_stacks` needs to recreate a container or find a stack's file. The
+# raw documents below are the daemon's own and never leave this node whole —
+# a container's configuration routinely carries its secrets.
 
-def group_stacks(rows: list[dict]) -> list[dict]:
-    """Containers → the projects they belong to."""
-    projects: dict = {}
-    for row in rows:
-        name = row.get("project") or ""
-        if not name:
-            continue
-        stack = projects.setdefault(name, {
-            "name": name, "services": [], "running": 0, "total": 0,
-            "portainer": row.get("portainer") or "",
-        })
-        if len(stack["services"]) < 64:
-            stack["services"].append({
-                "service": row.get("service") or row.get("name"),
-                "container": row["id"], "state": row.get("state"),
-                "image": row.get("image"),
-            })
-        stack["total"] += 1
-        if row.get("state") == "running":
-            stack["running"] += 1
-        if row.get("portainer"):
-            stack["portainer"] = row["portainer"]
-    ordered = sorted(projects.values(), key=lambda entry: entry["name"])
-    return ordered[:MAX_STACKS]
+async def container_raw(container: str) -> dict:
+    ident = clean_id(container)
+    if not ident:
+        raise DockerError("that is not a container")
+    raw = await call("GET", f"/containers/{ident}/json")
+    if not isinstance(raw, dict):
+        raise DockerError("the daemon described that container in no usable way")
+    return raw
 
 
-async def stacks() -> list[dict]:
-    rows = await containers(True)
-    found = group_stacks(rows)
-    # Where the compose file lives, so an update can re-run it. Read from the
-    # labels of one container per project rather than guessed.
-    config: dict = {}
-    raw = await call("GET", "/containers/json?all=1")
-    for entry in (raw if isinstance(raw, list) else [])[:MAX_CONTAINERS]:
-        labels = _labels(entry.get("Labels")) if isinstance(entry, dict) else {}
-        project = _short(labels.get(LABEL_PROJECT), 64)
-        if project and project not in config:
-            config[project] = {
-                "files": _short(labels.get(LABEL_CONFIG), 1024),
-                "workdir": _short(labels.get(LABEL_WORKDIR), 512),
-            }
-    for stack in found:
-        stack.update(config.get(stack["name"], {"files": "", "workdir": ""}))
-    return found
+async def image_raw(reference: str) -> dict | None:
+    """An image's own document, or None when this machine does not hold it."""
+    ident = clean_image(reference)
+    if not ident or ".." in ident:
+        raise DockerError("that is not an image")
+    try:
+        raw = await call("GET", f"/images/{ident}/json")
+    except DockerError as exc:
+        if "No such image" in str(exc) or "not found" in str(exc).lower():
+            return None
+        raise
+    return raw if isinstance(raw, dict) else None
 
 
-def compose_files(files: str) -> list[str]:
-    """The compose files a project was deployed from, as compose wrote them.
+async def remote_digest(reference: str) -> str:
+    """What the registry serves under that reference right now, asked through
+    the daemon — which holds the network path and the registry's trust, and
+    reads only the manifest: nothing is downloaded."""
+    ident = clean_image(reference)
+    if not ident or ".." in ident:
+        raise DockerError("that is not an image")
+    raw = await call("GET", f"/distribution/{ident}/json", timeout=20.0,
+                     headers=_auth_header(ident))
+    descriptor = raw.get("Descriptor") if isinstance(raw, dict) else None
+    digest = descriptor.get("digest") if isinstance(descriptor, dict) else None
+    if not isinstance(digest, str) or not re.match(r"\Asha256:[0-9a-f]{64}\Z", digest):
+        raise DockerError("the registry answered no digest")
+    return digest
 
-    The label is a comma-separated list of absolute paths. Anything that is not
-    one is dropped rather than passed to an argv — the label is written by the
-    daemon, but a daemon is a machine and this runs as root."""
-    out = []
-    for path in (files or "").split(","):
-        path = path.strip()
-        if _PATH_RE.match(path) and len(out) < 8:
-            out.append(path)
+
+async def read_archive(container: str, path: str) -> dict[str, bytes]:
+    """The regular files under a path inside a container, by name relative to
+    the directory read.
+
+    Through the daemon's archive route, because the files a container keeps in
+    its volumes are root's on the host and this node's account is not. Bounded
+    in bytes and in members; a link, a device or a name that climbs is skipped,
+    never followed — nothing here is written to disk."""
+    ident = clean_id(container)
+    if not ident or not isinstance(path, str) or not path.startswith("/") \
+            or ".." in path or len(path) > 512 or "\0" in path:
+        raise DockerError("that is not something to read")
+    raw = await call("GET", f"/containers/{ident}/archive?path={quote(path, safe='/')}",
+                     raw=True)
+    if len(raw) > MAX_ARCHIVE:
+        raise DockerError("that directory is too large to read")
+    out: dict[str, bytes] = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            for index, member in enumerate(archive):
+                if index >= MAX_ARCHIVE_MEMBERS:
+                    break
+                if not member.isreg() or member.size > MAX_ARCHIVE:
+                    continue
+                parts = member.name.split("/")
+                if member.name.startswith("/") or ".." in parts:
+                    continue
+                handle = archive.extractfile(member)
+                if handle is not None:
+                    out["/".join(parts[1:])] = handle.read(MAX_ARCHIVE)
+    except (tarfile.TarError, EOFError, OSError):
+        raise DockerError("the daemon sent an archive that does not read") from None
     return out
-
-
-async def _run(argv: list[str], *, cwd: str | None = None,
-               timeout: float = COMPOSE_TIMEOUT, on_output=None) -> tuple[int, str]:
-    """Run a command, bounded, never through a shell.
-
-    `on_output` is handed each line as it arrives: a compose pull is minutes of
-    silence otherwise, and silence is indistinguishable from a hang."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd or None,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            stdin=asyncio.subprocess.DEVNULL)
-    except (OSError, ValueError) as exc:
-        raise DockerError(f"could not run docker ({type(exc).__name__})") from None
-    collected: list[str] = []
-    size = 0
-
-    async def drain() -> None:
-        nonlocal size
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                return
-            text = line.decode("utf-8", "replace").rstrip("\n")
-            if size < MAX_LOG_BYTES:
-                collected.append(text)
-                size += len(text) + 1
-            if on_output is not None:
-                try:
-                    on_output(text)
-                except Exception:
-                    pass
-
-    try:
-        await asyncio.wait_for(asyncio.gather(drain(), proc.wait()), timeout)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        raise DockerError("that took too long and was stopped") from None
-    return proc.returncode or 0, "\n".join(collected)[-MAX_LOG_BYTES:]
-
-
-def _compose_argv(project: str, files: list[str], *rest: str) -> list[str]:
-    argv = ["docker", "compose", "--project-name", project]
-    for path in files:
-        argv += ["-f", path]
-    return argv + list(rest)
-
-
-async def stack_up(project: str, files: list[str], workdir: str = "",
-                   *, pull_first: bool = True, on_output=None) -> dict:
-    """Bring a compose project up to date: pull, then re-run its compose file.
-
-    Pulling under a project and restarting it is *not* this act and quietly does
-    less — a container keeps running the image it was created from until it is
-    recreated. So `up -d` is the operation, and it is the compose file that
-    decides what "up to date" means."""
-    name = clean_id(project)
-    if not name:
-        raise DockerError("that is not a stack")
-    if not compose_available():
-        raise DockerError("this machine has no docker compose")
-    if not files:
-        raise DockerError("that stack has no compose file on this machine")
-    cwd = workdir if _PATH_RE.match(workdir or "") and os.path.isdir(workdir or "") else None
-    if pull_first:
-        code, text = await _run(_compose_argv(name, files, "pull"),
-                                cwd=cwd, on_output=on_output)
-        if code != 0:
-            raise DockerError(f"pulling that stack failed: {text[-200:]}")
-    code, text = await _run(_compose_argv(name, files, "up", "-d", "--remove-orphans"),
-                            cwd=cwd, on_output=on_output)
-    if code != 0:
-        raise DockerError(f"bringing that stack up failed: {text[-200:]}")
-    return {"stack": name, "output": text[-4000:]}
-
-
-async def stack_act(project: str, files: list[str], action: str,
-                    workdir: str = "", *, on_output=None) -> dict:
-    """start / stop / restart / down, through compose when it is there.
-
-    Without compose the same three are still possible container by container —
-    it is `down` and `up` that need the file, because they create and destroy.
-    """
-    name = clean_id(project)
-    if not name:
-        raise DockerError("that is not a stack")
-    if action not in ("start", "stop", "restart", "down"):
-        raise DockerError("that is not something to do to a stack")
-    if compose_available() and files:
-        cwd = workdir if _PATH_RE.match(workdir or "") and os.path.isdir(workdir or "") else None
-        code, text = await _run(_compose_argv(name, files, action),
-                                cwd=cwd, timeout=COMPOSE_TIMEOUT, on_output=on_output)
-        if code != 0:
-            raise DockerError(f"that stack refused to {action}: {text[-200:]}")
-        return {"stack": name, "action": action, "output": text[-4000:]}
-    if action == "down":
-        raise DockerError("taking a stack down needs its compose file")
-    rows = [row for row in await containers(True) if row.get("project") == name]
-    if not rows:
-        raise DockerError("no container on this machine belongs to that stack")
-    for row in rows:
-        await act(row["id"], action)
-    return {"stack": name, "action": action, "containers": len(rows)}
-
-
-async def deploy_stack(project: str, content: str, *, root: str = "",
-                       on_output=None) -> dict:
-    """Deploy a stack from a compose file an operator wrote.
-
-    The file is written under a directory of this node's own, named for the
-    project, so a redeploy later finds it exactly where compose recorded it —
-    and so nothing this deploys can be made to overwrite a path chosen by
-    whoever sent the file: the only thing from the wire that reaches the path is
-    a name that passed :func:`clean_id`."""
-    name = clean_id(project)
-    if not name:
-        raise DockerError("that is not a stack name")
-    body = clean_compose(content)
-    if not body:
-        raise DockerError("that compose file is empty or too large")
-    if not compose_available():
-        raise DockerError("this machine has no docker compose")
-    directory = os.path.join(stack_dir(root), name)
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    path = os.path.join(directory, "docker-compose.yml")
-    tmp = path + ".new"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        os.chmod(tmp, 0o600)
-        handle.write(body)
-    os.replace(tmp, path)
-    return await stack_up(name, [path], directory, on_output=on_output)
-
-
-def stack_dir(root: str = "") -> str:
-    """Where compose files this node deployed are kept.
-
-    Under the node's own data directory when it has one — the same place its
-    identity and its session store live, so a compose file that decides what
-    runs on this machine is backed up and wiped with the rest of its state.
-    Never `/tmp`, and never a path from the wire."""
-    base = root or os.path.expanduser("~/.nmesh")
-    return os.path.join(base, "stacks")

@@ -67,7 +67,7 @@ from ..app_guard import AppGuard, Limit
 from ..app_channel import builtin_id
 from ..node_id import NodeID
 from . import (fleet_console, fleet_docker, fleet_files, fleet_host,
-               fleet_portainer, fleet_provision, fleet_ssh)
+               fleet_portainer, fleet_provision, fleet_ssh, fleet_stacks)
 from .fleet_state import (CAPABILITIES, FleetState, _is_node_hex, clean_caps,
                           clean_label, clean_stack_names)
 
@@ -190,11 +190,12 @@ SCAN_TIMEOUT = 300.0
 INVITE_TTL_DEFAULT = 300.0
 INVITE_TTL_MAX = 6 * 3600.0
 MAX_KEY_DATA = 64 * 1024          # an uploaded private key, bounded
-# Docker. The engine calls are quick; the ones that pull images are minutes, and
-# they are named here rather than guessed at the call site.
-DOCKER_TIMEOUT = 60.0
-DOCKER_SLOW_TIMEOUT = 1800.0      # a pull, a `compose up`, a Portainer redeploy
-MAX_DOCKER_CALLS = 2              # docker operations we host at once, per peer
+# Docker. The reads are one round trip; an update pulls images for minutes and
+# holds a slot for all of them, so the two are counted apart — a page must still
+# be able to read while a stack it started is being brought up to date.
+MAX_DOCKER_CALLS = 4              # docker operations we host at once, per peer
+MAX_DOCKER_SLOW = 2               # of which pulls, updates and deploys
+_DOCKER_SLOW_OPS = ("pull", "deploy", "deploy_stack", "check", "recreate")
 # Lines of a stack's own output forwarded while an update runs. A `compose pull`
 # is a wall of progress bars; what an operator needs is that it is moving, and
 # every frame past that is a task queued against `MAX_INFLIGHT` for nothing.
@@ -541,7 +542,9 @@ class FleetApp:
         self._reaper: asyncio.Task | None = None
         self._shells: dict[bytes, _Shell] = {}          # agent side
         self._open_shells: dict[bytes, NodeID] = {}     # operator side
-        self._docker_calls: dict[bytes, int] = {}       # agent side, per peer
+        # agent side, per peer: (operations held, of which slow)
+        self._docker_calls: dict[bytes, tuple[int, int]] = {}
+        self._stacks_busy: set[str] = set()             # stacks being changed
         self._inflight: dict[str, tuple[NodeID, str, float]] = {}
         self._jobs: set[asyncio.Task] = set()
         # Remote console. Agent side: the loopback client that replays a call
@@ -2024,7 +2027,7 @@ class FleetApp:
                              "name": f"stack {name}",
                              "elapsed": round(time.monotonic() - started, 1)}})
                 try:
-                    await self._update_one_stack(name, src, rid, kind="update")
+                    await self._update_one_stack(name, src, rid)
                     done.append(name)
                 except fleet_docker.DockerError as exc:
                     ok, status, failed = False, -1, f"{name}: {exc}"[:200]
@@ -2144,15 +2147,16 @@ class FleetApp:
         # Bounded per peer, like the console relay and the file plane: a pull is
         # minutes of somebody else's disk and network, and "several at once" is
         # not something an operator ever wanted.
-        held = self._docker_calls.get(src.raw, 0)
-        if held >= MAX_DOCKER_CALLS:
+        slow = _docker_slow(op, document)
+        held, held_slow = self._docker_calls.get(src.raw, (0, 0))
+        if held >= MAX_DOCKER_CALLS or (slow and held_slow >= MAX_DOCKER_SLOW):
             self._fail(src, rid, "too many docker operations already running")
             return
-        self._docker_calls[src.raw] = held + 1
-        self._spawn(self._run_docker(src, rid, op, document))
+        self._docker_calls[src.raw] = (held + 1, held_slow + int(slow))
+        self._spawn(self._run_docker(src, rid, op, document, slow))
 
     async def _run_docker(self, src: NodeID, rid: str, op: str,
-                          document: dict) -> None:
+                          document: dict, slow: bool = False) -> None:
         try:
             data = await _DOCKER_OPS[op](self, src, rid, document)
         except fleet_docker.DockerError as exc:
@@ -2164,9 +2168,10 @@ class FleetApp:
             self._fail(src, rid, f"that failed ({type(exc).__name__})")
             return
         finally:
-            held = self._docker_calls.get(src.raw, 1) - 1
+            held, held_slow = self._docker_calls.get(src.raw, (1, int(slow)))
+            held, held_slow = held - 1, held_slow - int(slow)
             if held > 0:
-                self._docker_calls[src.raw] = held
+                self._docker_calls[src.raw] = (held, max(held_slow, 0))
             else:
                 self._docker_calls.pop(src.raw, None)
         if data is None:
@@ -2189,14 +2194,31 @@ class FleetApp:
     # -- the operations ---------------------------------------------------
 
     async def _docker_overview(self, _src, _rid, _document) -> dict:
+        """What this machine's docker is, and what manages it — said rather
+        than raised when there is none, because "no docker here" is an answer
+        a page draws, not a failure it reports."""
+        portainer = self._portainer_state()
         if not fleet_docker.available():
-            raise fleet_docker.DockerError("this machine runs no docker")
-        info = await fleet_docker.overview()
-        info["portainer"] = bool(self._portainer_config())
+            return {"info": {"engine": False, "portainer": portainer,
+                             "problem": "this machine runs no docker"}}
+        try:
+            info = await fleet_docker.overview()
+            entries = await fleet_docker.raw_containers(True)
+        except fleet_docker.DockerError as exc:
+            return {"info": {"engine": False, "portainer": portainer,
+                             "problem": str(exc)[:200]}}
+        argv, version = await fleet_stacks.compose()
+        found = fleet_stacks.find_portainer(entries)
+        portainer.update(server=found["server"], agent=found["agent"])
+        info.update(engine=True, compose=version if argv else "",
+                    stacks=len(fleet_stacks.discover(entries, root=self._state_dir)),
+                    portainer=portainer)
         return {"info": info}
 
     async def _docker_containers(self, _src, _rid, _document) -> dict:
-        return {"items": await fleet_docker.containers(True)}
+        items = await fleet_docker.containers(True)
+        await fleet_stacks.name_images(items, "id")
+        return {"items": items}
 
     async def _docker_container(self, _src, _rid, document) -> dict:
         return {"info": await fleet_docker.inspect(document.get("id"))}
@@ -2232,44 +2254,93 @@ class FleetApp:
         return {"info": await fleet_docker.create(spec if isinstance(spec, dict) else {})}
 
     async def _docker_stacks(self, _src, _rid, _document) -> dict:
-        items = await fleet_docker.stacks()
-        # A stack Portainer owns is updated through Portainer, so the list says
-        # which ones those are — an operator choosing "update" on one of them is
-        # choosing between two different acts, and has to be able to see that.
-        portainer = self._portainer()
-        managed: dict = {}
-        if portainer is not None:
-            try:
-                for entry in await portainer.stacks():
-                    managed[entry["name"]] = entry
-            except fleet_docker.DockerError:
-                managed = {}                # unreachable is not fatal here
+        """Every stack on this machine, each saying who owns it and how
+        *Update* would bring it up to date."""
+        entries = await fleet_docker.raw_containers(True)
+        items = fleet_stacks.discover(entries, root=self._state_dir)
         for stack in items:
-            match = managed.get(stack["name"]) or managed.get(stack.get("portainer") or "")
-            if match:
-                stack["portainer_id"] = match["id"]
-                stack["portainer_endpoint"] = match["endpoint"]
-                stack["git"] = match["git"]
-        return {"items": items, "info": {"compose": fleet_docker.compose_available(),
-                                         "portainer": portainer is not None}}
+            await fleet_stacks.name_images(stack["services"])
+        argv, version = await fleet_stacks.compose()
+        listed, problem = await self._portainer_stacks()
+        for stack in items:
+            record = fleet_portainer.match(stack, listed) if listed is not None else None
+            stack["portainer_api"] = record is not None
+            if record is not None:
+                stack["portainer_id"] = record["id"]
+                stack["git"] = record["git"]
+            stack.update(fleet_stacks.update_method(
+                stack, portainer_api=record is not None, compose_argv=argv))
+        # What Portainer holds and nothing runs: a stopped Portainer stack has
+        # no container to be found by, and is still somebody's stack — if it
+        # is this machine's. One Portainer manages other machines through
+        # their agents, and their stacks are theirs.
+        seen = {stack.get("portainer_id") for stack in items}
+        local = await self._portainer_local(listed, seen)
+        for record in listed or []:
+            if record["id"] not in seen and not record["active"] \
+                    and record["endpoint"] == local \
+                    and len(items) < fleet_stacks.MAX_STACKS:
+                items.append({"name": record["name"], "owner": "portainer",
+                              "portainer_id": record["id"], "portainer_api": True,
+                              "git": record["git"], "services": [], "running": 0,
+                              "total": 0, "files": [], "workdir": "",
+                              "files_ok": False, "nmesh": False,
+                              "method": "portainer", "why": "stopped in Portainer"})
+        return {"items": items,
+                "info": {"compose": version if argv else "",
+                         "portainer": self._portainer_state(),
+                         "portainer_problem": problem}}
+
+    async def _docker_check(self, _src, _rid, document) -> dict:
+        entries = await fleet_docker.raw_containers(True)
+        stack = document.get("stack")
+        if isinstance(stack, str) and stack:
+            entries = [entry for entry in entries
+                       if (entry.get("Labels") or {}).get(fleet_stacks.LABEL_PROJECT) == stack]
+        return {"info": await fleet_stacks.check(entries)}
+
+    async def _docker_recreate(self, _src, _rid, document) -> dict:
+        return {"info": await fleet_stacks.recreate(document.get("id"))}
 
     async def _docker_stack(self, src, rid, document) -> dict:
         name = clean_stack_names([document.get("stack")])
         if not name:
             raise fleet_docker.DockerError("that is not a stack")
         action = str(document.get("action"))[:16]
-        if action == "update":
-            return {"info": await self._update_one_stack(name[0], src, rid)}
-        found = await self._stack_record(name[0])
-        return {"info": await fleet_docker.stack_act(
-            name[0], fleet_docker.compose_files(found.get("files", "")), action,
-            found.get("workdir", ""))}
+        if action not in ("start", "stop", "restart", "down", "update"):
+            raise fleet_docker.DockerError("that is not something to do to a stack")
+        return {"info": await self._stack_do(name[0], action)}
+
+    async def _docker_stack_file(self, _src, _rid, document) -> dict:
+        name = clean_stack_names([document.get("stack")])
+        if not name:
+            raise fleet_docker.DockerError("that is not a stack")
+        stack = await self._stack_record(name[0])
+        if stack.get("owner") == "portainer":
+            portainer = self._portainer()
+            listed, _problem = await self._portainer_stacks()
+            record = fleet_portainer.match(stack, listed or [])
+            if portainer is not None and record is not None:
+                return {"info": {"path": f"Portainer stack {record['id']}",
+                                 "text": await portainer.file(record["id"]),
+                                 "source": "portainer"}}
+            entries = await fleet_docker.raw_containers(True)
+            server = fleet_stacks.find_portainer(entries)["server"]
+            return {"info": await fleet_stacks.read_file(
+                stack, server=server["id"] if server else "")}
+        return {"info": await fleet_stacks.read_file(stack)}
 
     async def _docker_deploy_stack(self, _src, _rid, document) -> dict:
         name = clean_stack_names([document.get("stack")])
         if not name:
             raise fleet_docker.DockerError("that is not a stack name")
-        return {"info": await fleet_docker.deploy_stack(
+        if document.get("portainer") is True:
+            portainer = self._require_portainer()
+            endpoint = fleet_portainer.local_endpoint(await portainer.endpoints())
+            done = await portainer.deploy(name[0], document.get("compose"), endpoint)
+            done["through"] = "portainer"
+            return {"info": done}
+        return {"info": await fleet_stacks.deploy(
             name[0], document.get("compose"), root=self._state_dir)}
 
     async def _docker_portainer_set(self, _src, rid, document) -> dict:
@@ -2281,7 +2352,7 @@ class FleetApp:
         than of using it."""
         if document.get("clear") is True:
             self._store_portainer(None)
-            return {"info": {"configured": False}}
+            return {"info": self._portainer_state()}
         config = {
             "url": fleet_portainer.clean_url(document.get("url")),
             "token": fleet_portainer.clean_token(document.get("token")),
@@ -2290,50 +2361,30 @@ class FleetApp:
         }
         if not config["url"] or not config["token"]:
             raise fleet_docker.DockerError(
-                "a Portainer needs an https address and an access token")
+                "a Portainer needs an https address (http only on this machine's "
+                "loopback) and an access token")
         portainer = fleet_portainer.Portainer(
             config["url"], config["token"], fingerprint=config["fingerprint"])
         # Proved before it is stored: a configuration that has never worked is
         # a button that fails later, somewhere an operator is not looking.
         endpoints = await portainer.endpoints()
         self._store_portainer(config)
-        return {"info": {"configured": True, "url": config["url"],
-                         "pinned": bool(config["fingerprint"])},
-                "items": endpoints}
+        return {"info": self._portainer_state(), "items": endpoints}
 
-    async def _docker_portainer_stacks(self, _src, _rid, _document) -> dict:
-        portainer = self._require_portainer()
-        return {"items": await portainer.stacks(),
-                "info": {"url": self._portainer_config().get("url", "")}}
-
-    async def _docker_portainer_stack(self, _src, _rid, document) -> dict:
-        portainer = self._require_portainer()
-        action = str(document.get("action"))[:16]
-        wanted = document.get("id")
-        found = None
-        for entry in await portainer.stacks():
-            if entry["id"] == wanted:
-                found = entry
-                break
-        if found is None:
-            raise fleet_docker.DockerError("Portainer has no such stack")
-        if action == "redeploy":
-            return {"info": await portainer.redeploy(found)}
-        return {"info": await portainer.act(found["id"], found["endpoint"], action)}
-
-    async def _docker_portainer_deploy(self, _src, _rid, document) -> dict:
-        portainer = self._require_portainer()
-        name = document.get("stack")
-        return {"info": await portainer.deploy(
-            name if isinstance(name, str) else "",
-            document.get("compose"),
-            document.get("endpoint"))}
+    async def _docker_portainer_probe(self, _src, _rid, document) -> dict:
+        return {"info": await fleet_portainer.probe(document.get("url"))}
 
     # -- Portainer configuration (this node's own) -------------------------
 
     def _portainer_config(self) -> dict:
         raw = self.state.read_secret(_PORTAINER_KEY)
         return raw if isinstance(raw, dict) and raw.get("url") else {}
+
+    def _portainer_state(self) -> dict:
+        """What may be said about this node's Portainer: where, never how."""
+        config = self._portainer_config()
+        return {"connected": bool(config), "url": config.get("url", ""),
+                "pinned": bool(config.get("fingerprint"))}
 
     def _store_portainer(self, config: dict | None) -> None:
         self.state.write_secret(_PORTAINER_KEY, config)
@@ -2352,53 +2403,114 @@ class FleetApp:
     def _require_portainer(self):
         portainer = self._portainer()
         if portainer is None:
-            raise fleet_docker.DockerError("no Portainer is configured here")
+            raise fleet_docker.DockerError("no Portainer is connected here")
         return portainer
 
-    # -- bringing one stack up to date ------------------------------------
+    async def _portainer_stacks(self) -> tuple[list | None, str]:
+        """Portainer's stacks, or None and why — an unreachable Portainer
+        degrades a stack to the Engine's way of updating it, it does not hide
+        the list."""
+        portainer = self._portainer()
+        if portainer is None:
+            return None, ""
+        try:
+            return await portainer.stacks(), ""
+        except fleet_docker.DockerError as exc:
+            return None, str(exc)[:200]
+
+    async def _portainer_local(self, listed, seen: set) -> int:
+        """Which of Portainer's environments is this machine: the one holding
+        a stack that runs here, else the one on this machine's socket."""
+        for record in listed or []:
+            if record["id"] in seen:
+                return record["endpoint"]
+        portainer = self._portainer()
+        if not listed or portainer is None:
+            return 0
+        try:
+            return fleet_portainer.local_endpoint(await portainer.endpoints())
+        except fleet_docker.DockerError:
+            return 0
+
+    # -- one stack ----------------------------------------------------------
 
     async def _stack_record(self, name: str) -> dict:
-        for stack in await fleet_docker.stacks():
+        entries = await fleet_docker.raw_containers(True)
+        for stack in fleet_stacks.discover(entries, root=self._state_dir):
             if stack["name"] == name:
                 return stack
         raise fleet_docker.DockerError("no stack of that name runs here")
 
-    async def _update_one_stack(self, name: str, src: NodeID, rid: str,
-                                *, kind: str = "docker") -> dict:
-        """Update a stack the way whoever owns it would.
+    async def _stack_do(self, name: str, action: str, say=None) -> dict:
+        """Do one thing to a stack, the way whoever owns it would.
 
-        Portainer first, when Portainer owns it: running `compose up` behind its
-        back leaves its record stale and the next thing it does undoes the
-        update. Otherwise compose, with the file the project was deployed from —
-        pulling images under a project and restarting it is *not* this act and
-        quietly does less, because a container keeps running the image it was
-        created from until it is recreated."""
-        found = await self._stack_record(name)
-        portainer = self._portainer()
+        Portainer first, when Portainer owns it and is connected: anything done
+        behind its back leaves its record stale. Then compose, with the file
+        the project came from. Then the Engine, container by container — which
+        is all that is left when neither is there, and is said to be."""
+        if name in self._stacks_busy:
+            raise fleet_docker.DockerError("that stack is already being changed")
+        self._stacks_busy.add(name)
+        try:
+            return await self._stack_do_now(name, action, say)
+        finally:
+            self._stacks_busy.discard(name)
+
+    async def _stack_do_now(self, name: str, action: str, say) -> dict:
+        listed, _problem = await self._portainer_stacks()
+        try:
+            stack = await self._stack_record(name)
+        except fleet_docker.DockerError:
+            # Stopped in Portainer: nothing runs, but Portainer can start it.
+            named = [entry for entry in listed or [] if entry["name"] == name]
+            if not named or action not in ("start", "update"):
+                raise
+            stack = {"name": name, "owner": "portainer", "portainer_id": named[0]["id"]}
+        record = fleet_portainer.match(stack, listed) if listed is not None else None
+        portainer = self._portainer() if record is not None else None
         if portainer is not None:
-            for entry in await portainer.stacks():
-                if entry["name"] == name:
-                    done = await portainer.redeploy(entry)
-                    done["through"] = "portainer"
-                    return done
-        # Streamed only where there is a stream to carry it. On the docker
-        # plane a reply *is* the answer — `_on_docker_reply` claims the request
-        # id and forgets it — so a progress frame there would consume the very
-        # rid the result has to come back under.
+            if action == "update":
+                return await portainer.redeploy(record)
+            if action == "down":
+                raise fleet_docker.DockerError(
+                    "Portainer owns that stack; remove it in Portainer")
+            if action == "restart":
+                await portainer.act(record["id"], record["endpoint"], "stop")
+                action = "start"
+            done = await portainer.act(record["id"], record["endpoint"], action)
+            done.update(stack=name, through="portainer")
+            return done
+        argv, _version = await fleet_stacks.compose()
+        method = fleet_stacks.update_method(stack, portainer_api=False, compose_argv=argv)
+        if action == "update":
+            if method["method"] == "compose":
+                return await fleet_stacks.compose_update(stack, say=say)
+            done = await fleet_stacks.engine_update(stack, say=say)
+            if done["failed"]:
+                raise fleet_docker.DockerError("; ".join(
+                    f"{step['service']}: {step.get('why', 'failed')}"
+                    for step in done["steps"] if step["result"] == "failed")[:240])
+            return done
+        if method["method"] == "compose":
+            return await fleet_stacks.compose_act(stack, action, say=say)
+        if action == "down":
+            raise fleet_docker.DockerError("taking a stack down needs its compose file")
+        return await fleet_stacks.engine_act(stack, action)
+
+    async def _update_one_stack(self, name: str, src: NodeID, rid: str) -> dict:
+        """One stack of a node-wide *Update*, its progress streamed on the
+        update's own channel — the docker plane has none: a reply there *is*
+        the answer, and `_on_docker_reply` forgets the rid once it lands."""
         sent = [0]
 
         def say(line: str) -> None:
-            if kind != "update" or sent[0] >= _STACK_OUTPUT_LINES:
+            if sent[0] >= _STACK_OUTPUT_LINES:
                 return
             sent[0] += 1
             self._reply(src, UPDATE_OUTPUT,
-                        {"rid": rid, "kind": kind, "text": line[:UPDATE_CHUNK]})
+                        {"rid": rid, "kind": "update", "text": line[:UPDATE_CHUNK]})
 
-        done = await fleet_docker.stack_up(
-            name, fleet_docker.compose_files(found.get("files", "")),
-            found.get("workdir", ""), on_output=say)
-        done["through"] = "compose"
-        return done
+        return await self._stack_do(name, "update", say)
 
     # ======================================================================
     # Shell
@@ -3596,12 +3708,19 @@ _DOCKER_OPS = {
     "deploy": FleetApp._docker_deploy,
     "stacks": FleetApp._docker_stacks,
     "stack": FleetApp._docker_stack,
+    "stack_file": FleetApp._docker_stack_file,
+    "check": FleetApp._docker_check,
+    "recreate": FleetApp._docker_recreate,
     "deploy_stack": FleetApp._docker_deploy_stack,
     "portainer": FleetApp._docker_portainer_set,
-    "portainer_stacks": FleetApp._docker_portainer_stacks,
-    "portainer_stack": FleetApp._docker_portainer_stack,
-    "portainer_deploy": FleetApp._docker_portainer_deploy,
+    "portainer_probe": FleetApp._docker_portainer_probe,
 }
+
+
+def _docker_slow(op: str, document: dict) -> bool:
+    """Whether an operation pulls images or waits on a redeploy — minutes,
+    not a round trip."""
+    return op in _DOCKER_SLOW_OPS or (op == "stack" and document.get("action") == "update")
 
 
 # Dispatch tables, built once. Keeping them beside the handlers makes the set of

@@ -798,6 +798,173 @@ manages becomes a way to reach the nodes *it* manages. `relation` may travel
 because it answers about one node the caller already named; these answer about
 all of them.
 
+## Docker: stacks, and bringing them up to date (Fleet → Docker)
+
+The `docker` right, on one machine at a time. Everything is read from what the
+machine runs — there is no database of stacks anywhere, ours or anybody's — and
+the code is split along that line: `fleet_docker.py` speaks the Engine API over
+the machine's socket, `fleet_stacks.py` turns its containers into stacks and
+updates them, `fleet_portainer.py` speaks Portainer's API.
+
+### Finding the stacks, and who owns each one
+
+A **stack** is a compose project. Compose labels every container it creates with
+its project, its service, the files it read and the directory it read them from,
+so one `GET /containers/json` is enough to rebuild the list. Each stack then has
+an **owner**:
+
+| Owner | Recognised by | Its file lives |
+|---|---|---|
+| **portainer** | its directory is `/data/compose/<id>` | in Portainer's volume and database |
+| **compose** | anything else | on the machine, where the label says |
+
+Portainer **labels nothing of its own** on a stack's containers (measured on
+Portainer CE 2.45): it runs compose with its stack directory, which is a path
+inside its own container. That path is what gives it away, and the number in it
+is Portainer's stack id — used to match the stack to Portainer's record exactly
+rather than by a name that another environment may reuse.
+
+A **Portainer server** on the machine is found from its container
+(`io.portainer.server=true`, or the `portainer/portainer[-ce|-ee]` image), with
+the address it publishes as seen from the machine itself (`https://127.0.0.1:9443`
+for a wildcard bind). A `portainer/agent` container is noted too: that machine's
+stacks are deployed by a Portainer elsewhere. None of this needs a credential.
+
+`docker compose` is *asked* (`docker compose version`, then the old
+`docker-compose`), never assumed from a `docker` binary on the PATH — the CLI is
+very often installed without the plugin. The answer is believed for ten minutes.
+
+### How *Update* brings a stack up to date
+
+Each stack says, before anything is done, which of three acts its Update is and
+why (`method`, `why` in the `stacks` answer):
+
+1. **Portainer** — owner Portainer, and a Portainer connected on that node. Its
+   API does what its own *Pull and redeploy* does: a git stack is redeployed
+   from its reference, a file stack with the file Portainer holds, both with
+   `PullImage`. The stack's **environment is read and handed straight back**:
+   Portainer *replaces* a stack's environment with what a redeploy carries, so
+   an empty list there erases it (BUGSVULNS 110). A git stack whose credentials
+   Portainer stored is asked to use them (authentication on, empty password);
+   saying "no authentication" makes Portainer forget them. Recent Portainer
+   answers a redeploy while it is still deploying (status 3) and recreates the
+   containers afterwards, so the update is done only once Portainer says so
+   (polled every `SETTLE_POLL`, 2 s); a failed deployment is reported with
+   Portainer's own message.
+2. **Compose** — owner compose, its files readable by the node's account, and
+   compose installed: `compose pull` (`--ignore-buildable` from 2.15), then
+   `compose up -d`, with `--project-name`, `--project-directory` and every `-f`
+   the labels recorded. **No `--remove-orphans`**: a service dropped from the
+   file is somebody's decision about their data, not a side effect of an update.
+3. **Engine** — everything else: a Portainer stack with no Portainer connected,
+   a file the node cannot read, no compose. Each image the stack's containers
+   were created from is pulled **once**, and each container whose image moved is
+   recreated (below). A service that cannot be updated costs only itself; the
+   update as a whole then fails, naming each one and why.
+
+A Portainer stack is **never** updated by re-running compose on a copy of
+Portainer's directory, though that directory can be read through the Engine: a
+relative bind (`./data`, which Portainer resolves to `/data/compose/<id>/data` on
+the *host*) and an `env_file: stack.env` resolve against a different directory,
+and the containers come back configured differently — the compose hash of such a
+service changes, measured. The Engine way keeps exactly what runs.
+
+### Recreating a container through the Engine
+
+`fleet_stacks.recreate`: the container's own configuration (`GET
+/containers/<id>/json`), less what the **old image** supplied, becomes the body of
+its replacement — so the new image's environment, command, labels, ports and
+volumes apply as they would to a container created fresh, and what the container
+was *given* is kept. In detail:
+
+- environment entries, labels, exposed ports and volumes equal to the old
+  image's are dropped; `Entrypoint` likewise, and `Cmd` only when the entrypoint
+  is the image's too (`--entrypoint` clears the image's command, so a command
+  beside a custom entrypoint was given);
+- the hostname is dropped when it is the old container's id (the daemon's
+  default), kept when somebody chose it;
+- **anonymous volumes are carried over by name** — as a bind for one the image
+  declared, as the missing `Source` of one compose declared in `HostConfig.Mounts`
+  — or the replacement would start with an empty one;
+- network aliases are kept without the old short id; static addresses
+  (`IPAMConfig`) are kept; the primary network is attached at create time and the
+  others joined after (an Engine before API 1.44 attaches one at create);
+- `com.docker.compose.image` is set to the new image id, so compose does not read
+  the container as diverged and recreate it again.
+
+The sequence is stop, rename the old one aside, create, join networks, start, and
+check the new one is **still running after `SETTLE` (5 s)**. If anything fails, or
+the new one stopped, it is deleted and the old one renamed back and restarted:
+a bad image costs seconds of downtime, not the service. Only then is the old one
+deleted — without `v=1`, so its volumes stay. A container named by digest, or by
+image id, is `pinned` and left alone; one that another container shares a network
+with (`network_mode: container:…`) is refused, because recreating it alone would
+strand its partner.
+
+### Checking for updates
+
+`check` asks, for each image reference the machine's containers use (at most
+`MAX_CHECKS`, six at a time), what the registry serves under it now — through the
+daemon's `GET /distribution/<ref>/json`, which reads a manifest and downloads
+nothing — and compares it with the image's `RepoDigests`. Each container is then
+`current`, `outdated`, `pulled` (a newer image is already here and the container
+still runs the old one), `pinned`, `local` (never came from a registry) or
+`unknown` (the registry would not say, with its reason). A container listed by
+image id is looked up by the name it was created from: that is exactly the one
+whose tag has moved on.
+
+A private registry is reached with the node account's own `docker login`
+(`~/.docker/config.json`, `auths`), sent to the local daemon as `X-Registry-Auth`
+and nowhere else. Credentials kept by a credential helper are not in that file,
+so such a registry is asked anonymously and says so in its refusal.
+
+### Connecting a Portainer
+
+Optional, per node, and only useful for stacks Portainer owns. The panel offers
+the address the Portainer container publishes; **Read its certificate** (`op:
+portainer_probe`) connects without a token, reads the version Portainer reports
+at `/api/system/status` and the SHA-256 of the certificate it presents, and the
+operator pins that fingerprint — the self-signed certificate of a Portainer on a
+private network is accepted only as an anchor somebody chose. Plain HTTP is
+accepted only to the machine's own loopback. The token is then proved (an
+`/api/endpoints` call) before it is stored in the encrypted drawer, and is never
+read back over the mesh: what comes back is `{connected, url, pinned}`.
+
+A stopped Portainer stack has no container to be found by; with Portainer
+connected, those of **this machine's** environment are listed too (Portainer
+manages other machines through their agents, and their stacks are theirs).
+
+### Start, stop, restart, the file, a new stack
+
+Start, stop and restart follow the same owner: Portainer's API (which has no
+restart, so a stop and a start), else compose with the file, else container by
+container with dependencies (`com.docker.compose.depends_on`) started first and
+stopped last. *Down* needs the compose file and is refused for a Portainer stack.
+
+**File** shows the compose file a stack came from: Portainer's through its API, or
+read out of the Portainer container through the Engine's archive route when none
+is connected (the volume's files are root's on the host; the node's account is
+not), or the file on disk. Only the compose file: the `stack.env` beside it holds
+the stack's variables, and values do not travel — names do.
+
+**Deploy a stack** writes the file under the node's own state
+(`<state>/stacks/<name>/docker-compose.yml`, mode 600) and runs `compose up -d`;
+or, with Portainer connected, hands it to Portainer on this machine's environment,
+which then owns it.
+
+### On the page
+
+One machine at a time, five views: **Stacks** (a card per stack — owner, state,
+what Update will do, the services with their image status, and the switch that
+adds it to the machine's *Update*), **Containers** (all, or only those outside a
+stack; a standalone container has its own Update), **Images**, **Volumes &
+networks**, and **Portainer**. The summary above them says which engine and which
+compose run there, whether a Portainer is found or connected, and how many
+containers are behind after a check. A long act — an update, a check, a pull, a
+deploy — shows on its card with its elapsed time and is asked about every two
+seconds (`op: answer`) until the node replies; an update's result stays on the
+card, with its output.
+
 ## Groups: pointing at several machines at once
 
 A group is **this console's own name** for a set of machines. It says nothing to
@@ -1217,11 +1384,19 @@ per container verb: that would be twenty entries in the dispatch table for one
 capability, and the capability is the gate. An operation that is not in the table
 is refused by name.
 
-The reads a Docker panel needs beyond the container list are operations too:
+The operations: `overview`, `containers`, `container`, `logs`, `act`, `images`,
 `stats` (CPU share and memory of up to `MAX_STATS` running containers, sampled
-side by side and shown when they arrive), `volumes`, `networks`, and
-`remove_image` (a name that is not an image, or that contains `..` because it
-becomes part of a request path, never reaches the socket).
+side by side and shown when they arrive), `volumes`, `networks`, `remove_image`
+(a name that is not an image, or that contains `..` because it becomes part of a
+request path, never reaches the socket), `pull`, `deploy` (one container),
+`stacks`, `stack` (`start`, `stop`, `restart`, `down`, `update`), `stack_file`,
+`check`, `recreate`, `deploy_stack`, `portainer` (connect or forget) and
+`portainer_probe`. What each does is the Docker section above.
+
+`pull`, `deploy`, `deploy_stack`, `check`, `recreate` and `stack` with
+`update` are **slow**: counted against `MAX_DOCKER_SLOW` as well as
+`MAX_DOCKER_CALLS`, so a page can still read a machine whose stacks are being
+updated. One stack is changed by one act at a time (`_stacks_busy`).
 
 **No new mesh packet type**: everything travels in `DATA`, section
 `builtin_id("fleet")`. The node's management plane is untouched.
@@ -1253,7 +1428,10 @@ accepted only if they answer a `rid` **we** issued, for that kind of action,
 | `MAX_FILE_CALLS` | 8 file operations hosted at once, per peer |
 | `MAX_UPLOADS` / `UPLOAD_IDLE` | 2 uploads per operator / reaped after 300 s |
 | `MAX_GRANT_SESSIONS` | 4 passwordless console sessions per operator |
-| `MAX_DOCKER_CALLS` | 2 docker operations hosted at once, per peer |
+| `MAX_DOCKER_CALLS` / `MAX_DOCKER_SLOW` | 4 docker operations hosted at once per peer, of which 2 slow ones (pulls, updates, checks, deploys) |
+| `MAX_CHECKS` / `CHECK_CONCURRENCY` | 40 image references asked of registries per check, 6 at a time |
+| `SETTLE` | 5 s a recreated container must stay up, or the old one is put back |
+| `MAX_ARCHIVE` | 2 MiB, 64 members read out of a container (a Portainer stack's directory) |
 | `MAX_UPDATE_STACKS` | 32 stacks one node's *Update* may also bring up |
 | `MAX_GROUPS` / `MAX_GROUP_NODES` | 32 groups / 512 nodes in one |
 | `MAX_RESPONSE` (docker) | 4 MB read from one Engine API answer |
@@ -1334,7 +1512,7 @@ All behind the console session (Bearer or cookie). Details:
 |---|---|---|
 | GET | `/api/fleet/state?since=` | snapshot (nodes, notifications, log, capabilities, facts, **jobs**, scans) |
 | GET | `/api/fleet/shell?sid=&offset=[&wait=1]` | terminal bytes (base64); `wait=1` holds the answer until there are some |
-| POST | `/api/fleet/docker` | `{node, op, …}` → one docker operation. The reads are waited on; the ones that pull images hand back a `rid` and are watched in the job list |
+| POST | `/api/fleet/docker` | `{node, op, …}` → one docker operation. The reads are waited on; the slow ones (pulls, updates, checks, deploys) hand back a `rid`, and `{node, op: "answer", rid}` returns their answer once it is in, `{pending: true}` until then |
 | POST | `/api/fleet/stacks` | `{node, stacks[]}` → which stacks *Update* also brings up there |
 | POST | `/api/fleet/groups` | `{op:set\|remove\|node, …}` → groups, local to this console |
 | POST | `/api/fleet/update-group` | `{group}` → *Update* on every node in it |
@@ -1384,6 +1562,17 @@ All behind the console session (Bearer or cookie). Details:
   secret leaks nowhere, the bootstrap is not an injection surface, and the
   publishers a pre-authorisation carries are bounded, de-duplicated, and dropped
   when they are not keys.
+- [`tests/test_fleet_docker.py`](../../tests/test_fleet_docker.py) — the Engine
+  client against a socket that answers like a daemon (both framings, an error
+  inside a 200, an oversized answer, an engine that dropped our API version, an
+  archive carrying a link or a climbing name) and Portainer's client (the
+  environment handed back on a redeploy, stored git credentials kept, a probe
+  that sends no token, HTTP only to loopback).
+- [`tests/test_fleet_stacks.py`](../../tests/test_fleet_stacks.py) — stacks from
+  labels (a Portainer stack known by its directory), the update each stack gets,
+  the replacement of a container (what the old image supplied left out,
+  anonymous volumes and aliases kept, the old one put back when the new one does
+  not stay up), the states a check tells apart, and the compose argv.
 - [`tests/test_console_fleet.py`](../../tests/test_console_fleet.py) — routes and
   app toggles.
 - [`tests/integration/test_fleet.py`](../../tests/integration/test_fleet.py) —

@@ -4163,3 +4163,103 @@ so the only symptom was that later builds broke.
 in progress, so they finish in the order they were queued and the newest commit
 publishes last. The base was republished from `main` by hand.
 
+
+## 110 — high — Fleet never recognised a Portainer stack, and updating one through Portainer erased its environment
+
+> **Status — fixed.** Tests: `tests/test_fleet_stacks.py::TestFindingStacks`
+> (`test_portainer_is_known_by_the_directory_it_deploys_from`),
+> `tests/test_fleet_docker.py::TestPortainerCalls`
+> (`test_a_redeploy_hands_the_stacks_environment_back`,
+> `test_a_git_stack_keeps_the_credentials_portainer_stored`).
+
+**Where** — `src/apps/fleet_docker.py` (`group_stacks`, the
+`io.portainer.stack.name` label), `src/apps/fleet_portainer.py`
+(`Portainer.redeploy`).
+
+**What happens** — three defects on one path.
+
+1. A Portainer stack was recognised by an `io.portainer.stack.name` label that
+   Portainer does not write (checked on Portainer CE 2.45.2: its stack
+   containers carry compose's labels and no `io.portainer.*` one). Every
+   Portainer stack was shown as a compose project, and its *Update* ran
+   `docker compose -f /data/compose/<id>/docker-compose.yml` on the host, where
+   that path does not exist — it is inside Portainer's container. A Portainer
+   running on the machine was not detected either: only an address and token
+   typed by hand made it visible.
+2. With a Portainer configured, `redeploy` sent `"Env": []`. Portainer replaces
+   a stack's environment with the one a redeploy carries, so every variable of
+   the stack was erased and its containers recreated without them. Reproduced
+   on a scratch Portainer: a stack with `GREETING=hello` came back with
+   `GREETING=` after one redeploy in the old shape. Database passwords and
+   similar are typically held there: the stack restarts broken, and the
+   values are gone from Portainer.
+3. A git stack was redeployed with `RepositoryAuthentication: false`, which per
+   Portainer's API makes it forget the repository credentials it stored; the
+   next pull of a private repository then fails. Not reproduced here (no git
+   server in the test environment) — the fix follows the API's documented
+   behaviour and sends the stored username with an empty password, which asks
+   Portainer to use its own.
+
+**Fixed** — a Portainer stack is known by its directory, `/data/compose/<id>`,
+and matched to Portainer's record by that id; a Portainer server or agent on the
+machine is found from its container with no credential. A redeploy reads the
+stack's environment and git authentication from `GET /api/stacks/<id>` and hands
+them back. Without a connected Portainer, a Portainer stack is updated through
+the Engine (each image pulled, each container whose image moved recreated with
+its own settings), never through compose on a copy of Portainer's directory —
+see `gotchas.md`, "Docker: who owns a stack".
+
+## 111 — medium — A stack update was reported failed after 25 seconds while it went on running
+
+> **Status — fixed.** Tests: `tests/test_fleet.py::TestDockerPlane`
+> (`test_which_operations_are_slow`, `test_a_long_update_leaves_room_to_read`).
+
+**Where** — `src/apps/fleet_web.py` (`_DOCKER_SLOW`), `src/apps/fleet.py`
+(`MAX_DOCKER_CALLS`).
+
+**What happens** — the console waited 25 s for every docker operation except
+four that pull images; a stack update (`op: stack, action: update`) was not one
+of the four. Any update longer than 25 s — every one that pulls an image —
+answered the page "that node did not answer" and the toast said it failed, while
+the update carried on and finished later. Two operations at once were allowed
+per operator, so one update and one page refresh exhausted them: the panel could
+not read the machine whose stack it was updating.
+
+**Fixed** — the update is slow: started, then asked about (`op: answer`) until
+the node replies. The far side counts slow operations apart
+(`MAX_DOCKER_SLOW = 2`) within `MAX_DOCKER_CALLS = 4`, and one stack is changed
+by one act at a time.
+
+## 112 — low — The Docker and Logs panels did not load when opened
+
+> **Status — fixed.** No unit test: the page script has no harness; checked in a
+> browser against a live node.
+
+**Where** — `src/webassets/fleet.py`, `enter()`.
+
+**What happens** — `enter()` called `ROUTER.start(() => {})`. `start` keeps the
+handler it is given, so it replaced the `ROUTER.onChange` the page had set beside
+its panels — the one that reads a machine's docker when the Docker panel is
+opened and refreshes the Logs panel. Opening either showed whatever an earlier
+action had left, or nothing until *Refresh* was pressed.
+
+**Fixed** — `ROUTER.start()` with no argument.
+
+## 113 — low — A Portainer token could be configured over plain HTTP to any host, and compose was assumed from a `docker` binary
+
+> **Status — fixed.** Tests: `tests/test_fleet_docker.py::TestPortainerConfiguration`
+> (`test_a_token_travels_in_the_clear_only_to_this_machine`),
+> `tests/test_fleet_stacks.py::TestCompose`.
+
+**Where** — `src/apps/fleet_portainer.py` (`clean_url`),
+`src/apps/fleet_docker.py` (`compose_available`).
+
+**What happens** — `http://` was accepted for any Portainer address, so the
+access token (Portainer's administrator API key, typically) crossed the network
+in the clear on every call. Separately, "this machine has docker compose" was
+answered by `shutil.which("docker")`; the CLI is very often installed without
+the compose plugin, so stacks were offered a compose update that then failed.
+
+**Fixed** — plain HTTP only to a loopback address; anything else is HTTPS with
+its chain verified or its certificate pinned. Compose is asked for its version
+(`docker compose`, then `docker-compose`) and the answer kept ten minutes.

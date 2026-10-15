@@ -24,7 +24,7 @@ from src.apps.fleet import (
     console_path_refusal,
 )
 from src.apps.fleet_state import CAPABILITIES, FleetState
-from src.apps import fleet_files, fleet_provision
+from src.apps import fleet_docker, fleet_files, fleet_provision
 from src.crypto import CryptoIdentity
 from src.node_id import NodeID
 
@@ -1194,12 +1194,189 @@ class TestDockerPlane:
         once" is not something an operator ever wanted, and it is exactly what
         a flood would ask for."""
         await enrol(operator, agent, caps=["docker"])
-        agent.app._docker_calls[operator.id.raw] = fleet.MAX_DOCKER_CALLS
+        agent.app._docker_calls[operator.id.raw] = (fleet.MAX_DOCKER_CALLS, 0)
         await operator.app.request_docker(agent.id, "containers")
         await deliver(operator, agent)
         await deliver(agent, operator)
         failures = [e for e in operator.drain_events() if isinstance(e, Failure)]
         assert failures and "too many docker" in failures[0].error
+
+    async def test_a_long_update_leaves_room_to_read(self, operator, agent):
+        """An update holds its slot for minutes. Counted with the reads, two
+        updates would leave the page unable to draw the very stacks it is
+        updating; counted apart, the slow ones are bounded on their own."""
+        await enrol(operator, agent, caps=["docker"])
+        agent.app._docker_calls[operator.id.raw] = (fleet.MAX_DOCKER_SLOW, fleet.MAX_DOCKER_SLOW)
+        ran = []
+
+        async def overview(self, src, rid, document):
+            ran.append("overview")
+            return {"info": {}}
+        original = fleet._DOCKER_OPS["overview"]
+        fleet._DOCKER_OPS["overview"] = overview
+        try:
+            await operator.app.request_docker(agent.id, "stack", stack="site", action="update")
+            await operator.app.request_docker(agent.id, "overview")
+            await deliver(operator, agent)
+            await asyncio.sleep(0)
+            await deliver(agent, operator)
+        finally:
+            fleet._DOCKER_OPS["overview"] = original
+        failures = [e for e in operator.drain_events() if isinstance(e, Failure)]
+        assert len(failures) == 1 and "too many docker" in failures[0].error
+        assert ran == ["overview"]
+
+    def test_which_operations_are_slow(self):
+        assert fleet._docker_slow("stack", {"action": "update"})
+        assert not fleet._docker_slow("stack", {"action": "stop"})
+        for op in ("pull", "check", "recreate", "deploy_stack", "deploy"):
+            assert fleet._docker_slow(op, {})
+        for op in ("stacks", "containers", "overview", "logs", "stack_file"):
+            assert not fleet._docker_slow(op, {})
+
+
+class _FakePortainer:
+    def __init__(self, listed):
+        self.listed = listed
+        self.done = []
+
+    async def stacks(self):
+        return self.listed
+
+    async def redeploy(self, record):
+        self.done.append(("redeploy", record["id"]))
+        return {"stack": record["name"], "through": "portainer"}
+
+    async def act(self, stack_id, endpoint_id, action):
+        self.done.append((action, stack_id))
+        return {"stack": stack_id, "action": action}
+
+
+class TestOneStackTheWayItsOwnerWould:
+    """Which act a stack gets. Portainer when it owns the stack and is
+    connected; compose with a readable file; the Engine otherwise — and never
+    two of them at once on one stack."""
+
+    def _stack(self, owner="portainer", **extra):
+        stack = {"name": "blog", "owner": owner, "portainer_id": 7 if owner == "portainer" else 0,
+                 "files": ["/data/compose/7/docker-compose.yml"], "workdir": "/data/compose/7",
+                 "files_ok": False, "services": [{"service": "web", "container": "c1"}]}
+        stack.update(extra)
+        return stack
+
+    def _wire(self, agent, monkeypatch, stack, portainer=None, compose=None):
+        from src.apps import fleet_stacks
+        calls = []
+
+        async def record(name):
+            return stack
+
+        async def engine_update(found, *, say=None):
+            calls.append(("engine", found["name"]))
+            return {"stack": found["name"], "through": "engine", "steps": [],
+                    "updated": 0, "failed": 0}
+
+        async def compose_update(found, *, say=None):
+            calls.append(("compose", found["name"]))
+            return {"stack": found["name"], "through": "compose"}
+
+        async def compose_probe():
+            return compose, "2.29.1" if compose else ""
+
+        monkeypatch.setattr(agent.app, "_stack_record", record)
+        monkeypatch.setattr(agent.app, "_portainer", lambda: portainer)
+        monkeypatch.setattr(fleet_stacks, "engine_update", engine_update)
+        monkeypatch.setattr(fleet_stacks, "compose_update", compose_update)
+        monkeypatch.setattr(fleet_stacks, "compose", compose_probe)
+        return calls
+
+    async def test_a_portainer_stack_goes_through_a_connected_portainer(self, agent,
+                                                                       monkeypatch):
+        portainer = _FakePortainer([{"id": 7, "name": "blog", "endpoint": 1,
+                                     "active": True, "git": False}])
+        calls = self._wire(agent, monkeypatch, self._stack(), portainer)
+        done = await agent.app._stack_do("blog", "update")
+        assert done["through"] == "portainer" and portainer.done == [("redeploy", 7)]
+        assert calls == []
+
+    async def test_and_through_the_engine_when_none_is_connected(self, agent, monkeypatch):
+        calls = self._wire(agent, monkeypatch, self._stack(), None, ["docker", "compose"])
+        done = await agent.app._stack_do("blog", "update")
+        assert done["through"] == "engine" and calls == [("engine", "blog")]
+
+    async def test_a_portainer_that_does_not_know_the_stack_is_not_asked(self, agent,
+                                                                        monkeypatch):
+        portainer = _FakePortainer([{"id": 8, "name": "blog", "endpoint": 1,
+                                     "active": True, "git": False}])
+        calls = self._wire(agent, monkeypatch, self._stack(), portainer)
+        await agent.app._stack_do("blog", "update")
+        assert portainer.done == [] and calls == [("engine", "blog")]
+
+    async def test_a_compose_stack_goes_through_compose(self, agent, monkeypatch):
+        stack = self._stack("compose", files=["/srv/blog/docker-compose.yml"],
+                            workdir="/srv/blog", files_ok=True)
+        calls = self._wire(agent, monkeypatch, stack, None, ["docker", "compose"])
+        await agent.app._stack_do("blog", "update")
+        assert calls == [("compose", "blog")]
+
+    async def test_a_failed_service_fails_the_update(self, agent, monkeypatch):
+        from src.apps import fleet_stacks
+        self._wire(agent, monkeypatch, self._stack(), None, None)
+
+        async def engine_update(found, *, say=None):
+            return {"stack": "blog", "through": "engine", "updated": 0, "failed": 1,
+                    "steps": [{"service": "web", "result": "failed", "why": "no space left"}]}
+        monkeypatch.setattr(fleet_stacks, "engine_update", engine_update)
+        with pytest.raises(fleet_docker.DockerError) as failure:
+            await agent.app._stack_do("blog", "update")
+        assert "web: no space left" in str(failure.value)
+
+    async def test_portainer_has_no_restart_so_it_is_a_stop_and_a_start(self, agent,
+                                                                        monkeypatch):
+        portainer = _FakePortainer([{"id": 7, "name": "blog", "endpoint": 1,
+                                     "active": True, "git": False}])
+        self._wire(agent, monkeypatch, self._stack(), portainer)
+        await agent.app._stack_do("blog", "restart")
+        assert portainer.done == [("stop", 7), ("start", 7)]
+
+    async def test_a_portainer_stack_is_not_taken_down_behind_its_back(self, agent,
+                                                                       monkeypatch):
+        portainer = _FakePortainer([{"id": 7, "name": "blog", "endpoint": 1,
+                                     "active": True, "git": False}])
+        self._wire(agent, monkeypatch, self._stack(), portainer)
+        with pytest.raises(fleet_docker.DockerError):
+            await agent.app._stack_do("blog", "down")
+        assert portainer.done == []
+
+    async def test_one_stack_is_changed_by_one_act_at_a_time(self, agent, monkeypatch):
+        from src.apps import fleet_stacks
+        self._wire(agent, monkeypatch, self._stack(), None, None)
+        gate = asyncio.Event()
+
+        async def slow(found, *, say=None):
+            await gate.wait()
+            return {"stack": "blog", "through": "engine", "steps": [], "updated": 0, "failed": 0}
+        monkeypatch.setattr(fleet_stacks, "engine_update", slow)
+        first = asyncio.ensure_future(agent.app._stack_do("blog", "update"))
+        await asyncio.sleep(0)
+        with pytest.raises(fleet_docker.DockerError) as failure:
+            await agent.app._stack_do("blog", "update")
+        assert "already being changed" in str(failure.value)
+        gate.set()
+        await first
+        assert agent.app._stacks_busy == set()
+
+    async def test_no_docker_is_an_answer_not_a_failure(self, agent, monkeypatch):
+        monkeypatch.setattr(fleet_docker, "available", lambda: False)
+        answer = await agent.app._docker_overview(None, "", {})
+        assert answer["info"]["engine"] is False and answer["info"]["problem"]
+
+    async def test_the_token_never_comes_back(self, agent):
+        agent.app._store_portainer({"url": "https://127.0.0.1:9443", "token": "ptr_secret",
+                                    "fingerprint": "ab" * 32})
+        state = agent.app._portainer_state()
+        assert state == {"connected": True, "url": "https://127.0.0.1:9443", "pinned": True}
+        assert "ptr_secret" not in repr(state)
 
 
 class TestUpdateWithStacks:
