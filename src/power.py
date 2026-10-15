@@ -33,6 +33,9 @@ FIELDS = (
     "update_check_minutes",
     "update_when_active",
     "route_hold_minutes",
+    "leaf_size",
+    "finger_links",
+    "link_idle_minutes",
 )
 
 LOWEST = 1
@@ -49,47 +52,54 @@ HIGHEST = 10
 # Step 6 is exactly the defaults in `config.SETTINGS`, so a node nobody touched
 # reads as "Balanced" rather than "custom" (`test_the_default_is_a_step`).
 PROFILES = {
-    1: ("Minimal", "Spends as little as it can. Connections are checked about "
-        "once a minute, two connections to one node are never combined, and "
-        "updates are looked for once a day, only while the node is in use. "
-        "A node reached through a relay keeps it for an hour.",
-        (2000, 5000, 60000, 120000, False, False, 1440, True, 60)),
+    1: ("Minimal", "Spends as little as it can. Connections checked about once a "
+        "minute, never combined. Updates daily, only in use. Four near "
+        "neighbours; other links close after two idle minutes.",
+        (2000, 5000, 60000, 120000, False, False, 1440, True, 60, 4, 1, 2)),
     2: ("Frugal", "Connections checked every 45 seconds or so, never "
         "combined. Updates twice a day, only while the node is in use. A "
-        "relay is kept for an hour.",
-        (1500, 5000, 45000, 90000, False, False, 720, True, 60)),
+        "relay is kept for an hour."
+        " Keeps few links, and closes the others after three idle minutes.",
+        (1500, 5000, 45000, 90000, False, False, 720, True, 60, 4, 1, 3)),
     3: ("Saving", "Connections checked every half minute at rest. Two "
         "connections to one node may be combined, tested twice a second at "
         "most. Updates every four hours while in use. A relay is kept "
-        "for half an hour.",
-        (500, 3000, 30000, 60000, False, False, 240, True, 30)),
+        "for half an hour."
+        " Closes links nobody is using after five minutes.",
+        (500, 3000, 30000, 60000, False, False, 240, True, 30, 6, 1, 5)),
     4: ("Light", "Connections checked every 25 seconds at rest. Hourly "
-        "updates while in use. A relay is kept for half an hour.",
-        (250, 2000, 25000, 40000, False, False, 60, True, 30)),
+        "updates while in use. A relay is kept for half an hour."
+        " Closes links nobody is using after eight minutes.",
+        (250, 2000, 25000, 40000, False, False, 60, True, 30, 6, 1, 8)),
     5: ("Moderate", "A little quieter than the defaults at rest. Updates "
-        "every half hour. A relay is kept for a quarter of an hour.",
-        (200, 1000, 20000, 30000, False, False, 30, False, 15)),
-    6: ("Balanced", "The defaults. Connections checked every 15 to 20 "
-        "seconds at rest, extra work only while somebody is using the node, "
-        "updates every five minutes. A node reached through a relay "
-        "moves to another one every ten minutes.",
-        (100, 1000, 15000, 20000, False, False, 5, False, 10)),
+        "every half hour. A relay is kept for a quarter of an hour."
+        " Closes links nobody is using after ten minutes, and keeps one per distance band.",
+        (200, 1000, 20000, 30000, False, False, 30, False, 15, 8, 1, 10)),
+    6: ("Balanced", "The defaults. Connections checked every 15 to 20 seconds, "
+        "updates every five minutes, relays change every ten. Eight "
+        "near neighbours, two links per distance band; other links "
+        "close after ten idle minutes.",
+        (100, 1000, 15000, 20000, False, False, 5, False, 10, 8, 2, 10)),
     7: ("Responsive", "Connections checked every ten seconds, and a live "
         "connection moves to a faster address of the same node when one "
-        "measures better.",
-        (100, 1000, 10000, 15000, False, True, 5, False, 10)),
+        "measures better."
+        " Idle links are kept twenty minutes.",
+        (100, 1000, 10000, 15000, False, True, 5, False, 10, 8, 2, 20)),
     8: ("Fast", "Two connections to one node stay combined even when nobody "
         "is using this one, so the second is ready the moment traffic starts. "
-        "Relays change every five minutes.",
-        (100, 500, 8000, 12000, True, True, 5, False, 5)),
+        "Relays change every five minutes."
+        " Idle links are kept half an hour.",
+        (100, 500, 8000, 12000, True, True, 5, False, 5, 8, 2, 30)),
     9: ("Faster", "Connections checked every five seconds at rest, up to "
         "twenty times a second while combined. Updates every two minutes. "
-        "Relays change every two minutes.",
-        (50, 500, 5000, 10000, True, True, 2, False, 2)),
-    10: ("Maximum", "Notices trouble and recovers as fast as it can, "
-         "whatever it costs, and spreads what goes through relays over all "
-         "of them at once. For a machine on mains with bandwidth to spare.",
-         (50, 300, 3000, 6000, True, True, 1, False, 0)),
+        "Relays change every two minutes."
+        " Idle links are kept an hour, with ten near neighbours.",
+        (50, 500, 5000, 10000, True, True, 2, False, 2, 10, 2, 60)),
+    10: ("Maximum", "Notices trouble and recovers as fast as it can, and "
+         "spreads what goes through relays over all of them. Never "
+         "closes a link; twelve near neighbours, three links per "
+         "band. For a machine on mains.",
+         (50, 300, 3000, 6000, True, True, 1, False, 0, 12, 3, 0)),
 }
 
 
