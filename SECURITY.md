@@ -30,6 +30,14 @@ gh attestation verify nmesh.pyz --repo fnyaker/NMesh
 gh attestation verify oci://ghcr.io/fnyaker/nmesh:latest --repo fnyaker/NMesh
 ```
 
+Each image also carries an attested SBOM (CycloneDX), the list of what it
+contains:
+
+```
+gh attestation verify oci://ghcr.io/fnyaker/nmesh:latest --repo fnyaker/NMesh \
+    --predicate-type https://cyclonedx.org/bom
+```
+
 That proves where a file came from, not that its code is right; what a node
 installs from the mesh is decided by the publishers its operator pinned
 ([`Docs/Updates/guide`](Docs/Updates/guide)).
@@ -45,14 +53,28 @@ installs from the mesh is decided by the publishers its operator pinned
   credential format is refused.
 - **Dependabot** alerts and security updates for the dependencies of
   `requirements.txt`, the base image and the workflow actions.
-- Every workflow action is pinned to a full commit SHA, and each workflow starts
-  with no token permission, granting each job only what it uses.
+- Every workflow action is pinned to a full commit SHA, Dependabot offers a new
+  one only once it is a week old, and each workflow starts with no token
+  permission, granting each job only what it uses. **zizmor** checks the
+  workflows themselves on every change and weekly.
+- **gitleaks** scans the whole history for secrets, beyond the provider formats
+  GitHub's scanning knows; **hadolint** and Trivy's misconfiguration rules check
+  both Dockerfiles.
+- An image of this repository is used by CI — to run the suite, to build on,
+  to scan — only once its provenance attestation proves which workflow on
+  `main` built it, and then by that digest. A release publishes only a commit
+  the suite passed on.
 - liboqs is compiled only from the commit and archive digest in
-  `scripts/liboqs.lock`, and a node with no liboqs refuses to start rather than
-  let the wrapper fetch one; the base image installs a hash-locked package set
-  (`docker/requirements.lock`) that `pip-audit` checks every week.
+  `scripts/liboqs.lock`, with only the two schemes a node uses (ML-KEM-768,
+  ML-DSA-65), and a node with no liboqs refuses to start rather than let the
+  wrapper fetch one. liboqs's own advisories are checked against the locked
+  version on every change and every week. The base image installs a
+  hash-locked package set (`docker/requirements.lock`) that `pip-audit` checks
+  the same way.
 - The image a node runs carries no compiler or build tools, and is scanned by
-  Trivy on every build and every week: a fixable HIGH or CRITICAL fails it.
+  Trivy on every build, every release and every week: a fixable HIGH or
+  CRITICAL, or a secret, fails it. The scanner reads a saved copy of the image
+  and never holds the Docker socket or a registry login.
 - The console is scanned by OWASP ZAP every week, its API included and signed
   in, against a throwaway node.
 - **OpenSSF Scorecard** grades how the repository itself is kept, weekly,

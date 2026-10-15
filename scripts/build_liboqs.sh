@@ -88,16 +88,20 @@ fi
 GENERATOR=()
 command -v ninja >/dev/null 2>&1 && GENERATOR=(-GNinja)
 
-# The wrapper's own feature set (the stateful signature symbols must exist or
-# it fails to load), minus OpenSSL so no dev headers are needed.
+# The two algorithms a node uses (src/crypto.py) and nothing else: every other
+# scheme is code an advisory can land in and no node can call. The stateful
+# signature API the wrapper loads is compiled without any scheme behind it;
+# the schemes themselves stay off, by name, should a release turn one on.
+# No OpenSSL, so no dev headers are needed.
 cmake -S "$SRC" -B "$WORK/build" "${GENERATOR[@]}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON \
     -DOQS_BUILD_ONLY_LIB=ON \
     -DOQS_USE_OPENSSL=OFF \
-    -DOQS_ENABLE_SIG_STFL_LMS=ON \
-    -DOQS_ENABLE_SIG_STFL_XMSS=ON \
-    -DOQS_HAZARDOUS_EXPERIMENTAL_ENABLE_SIG_STFL_KEY_SIG_GEN=ON \
+    "-DOQS_MINIMAL_BUILD=KEM_ml_kem_768;SIG_ml_dsa_65" \
+    -DOQS_ENABLE_SIG_STFL_LMS=OFF \
+    -DOQS_ENABLE_SIG_STFL_XMSS=OFF \
+    -DOQS_HAZARDOUS_EXPERIMENTAL_ENABLE_SIG_STFL_KEY_SIG_GEN=OFF \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     || die "cmake configure failed"
 cmake --build "$WORK/build" --parallel "$JOBS" || die "build failed"

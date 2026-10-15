@@ -1,8 +1,10 @@
 name: Release
 
-# Builds distributable artifacts on a version tag (e.g. v0.1.0):
+# Builds distributable artifacts on a version tag (e.g. v0.1.0), once the suite
+# has passed on that very commit:
 #   - nmesh.pyz         attached to the GitHub release
-#   - Docker image      pushed to GHCR (ghcr.io/<owner>/nmesh)
+#   - Docker image      pushed to GHCR as ghcr.io/<owner>/nmesh:<tag>
+# `:latest` belongs to ci.yml alone (one publisher, one order: BUGSVULNS 109).
 on:
   push:
     tags: [ "v*" ]
@@ -10,13 +12,24 @@ on:
 permissions: {}
 
 jobs:
+  test:
+    uses: $/.github/workflows/tests.yml
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+
   pyz:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -35,44 +48,94 @@ jobs:
         with:
           name: nmesh-pyz
           path: nmesh.pyz
+      # The runner's own `gh`, rather than a third-party action holding a token
+      # that can write releases.
       - name: Attach to release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        with:
-          files: nmesh.pyz
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" nmesh.pyz --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" nmesh.pyz --verify-tag \
+              --title "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+          fi
 
   docker:
+    needs: test
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-docker-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
     steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Lowercase image name
+      - name: Image names (lowercased)
         id: img
-        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        run: |
+          echo "app=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "base=ghcr.io/${GITHUB_REPOSITORY,,}-base" >> "$GITHUB_OUTPUT"
+      - name: Provide the base image (published and verified, else built here)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_NAME: ${{ steps.img.outputs.base }}
+        run: |
+          base="$(.github/scripts/provide-base.sh "$BASE_NAME:latest")"
+          echo "BASE=$base" >> "$GITHUB_ENV"
+      - name: Build the application image
+        env:
+          APP: ${{ steps.img.outputs.app }}
+        run: |
+          docker build -f docker/Dockerfile --build-arg BASE_IMAGE="$BASE" \
+            -t "$APP:$GITHUB_REF_NAME" .
+      # The same gate as ci.yml's, on the image this tag publishes.
+      - name: Scan the image, and list what it carries
+        env:
+          APP: ${{ steps.img.outputs.app }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/scan"
+          docker save "$APP:$GITHUB_REF_NAME" -o "$RUNNER_TEMP/scan/image.tar"
+          docker run --rm -v "$RUNNER_TEMP/scan:/scan" \
+            aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --input /scan/image.tar --cache-dir /scan/cache --scanners vuln,secret \
+            --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 --no-progress
+          docker run --rm -v "$RUNNER_TEMP/scan:/scan" \
+            aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --input /scan/image.tar --cache-dir /scan/cache --format cyclonedx \
+            --output /scan/sbom.cdx.json --no-progress
+          rm -f "$RUNNER_TEMP/scan/image.tar"
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push
+      - name: Push
         id: push
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: docker/Dockerfile
-          push: true
-          tags: |
-            ${{ steps.img.outputs.name }}:latest
-            ${{ steps.img.outputs.name }}:${{ github.ref_name }}
+        env:
+          APP: ${{ steps.img.outputs.app }}
+        run: |
+          docker push "$APP:$GITHUB_REF_NAME"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$APP:$GITHUB_REF_NAME" | cut -d@ -f2)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ${{ steps.img.outputs.name }}
+          subject-name: ${{ steps.img.outputs.app }}
           subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.img.outputs.app }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/scan/sbom.cdx.json
           push-to-registry: true

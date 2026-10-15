@@ -8,62 +8,21 @@ on:
 permissions: {}
 
 jobs:
-  # Run the suite inside the published base image, which already carries a
-  # compiled liboqs + all deps (see docker/Dockerfile.base, base-image.yml). That
-  # avoids recompiling the heavy C library on every run and tests on the exact
-  # runtime the app ships with. If the base isn't reachable (first bootstrap, or
-  # a fork PR without package read) we build it once locally so CI still goes
-  # green — same pull-or-build fallback as the docker job below.
   test:
-    runs-on: ubuntu-latest
+    uses: $/.github/workflows/tests.yml
     permissions:
       contents: read
       packages: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Base image name (lowercased)
-        id: img
-        run: echo "base=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-base" >> "$GITHUB_OUTPUT"
-
-      - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Provide the base image (prebuilt liboqs; build once if unreachable)
-        run: |
-          BASE='${{ steps.img.outputs.base }}:latest'
-          if docker pull "$BASE" 2>/dev/null; then
-            echo "using published base image with prebuilt liboqs: $BASE"
-          else
-            echo "base image not reachable — building it locally"
-            docker build -f docker/Dockerfile.base -t "$BASE" .
-          fi
-          echo "BASE=$BASE" >> "$GITHUB_ENV"
-
-      - name: Unit tests (in the base image — liboqs already compiled)
-        run: |
-          docker run --rm -v "$PWD:/app" -w /app "$BASE" \
-            sh -c "python -c 'import oqs; print(\"liboqs ready (prebuilt)\")' && pytest -q"
-
-      - name: Integration tests
-        run: docker run --rm -v "$PWD:/app" -w /app "$BASE" pytest tests/integration -q
+      attestations: read
 
   # Build the application image on every run so a broken Dockerfile fails CI,
   # and publish it to GHCR (ghcr.io/<owner>/nmesh) only on pushes to main — PRs
   # (including from forks) build but never push, since they lack write creds.
   #
   # The heavy liboqs layer lives in a separate base image built by
-  # base-image.yml. Here we reuse the published base (pulling it) and only when
-  # it isn't reachable — first bootstrap, or a fork PR without package access —
-  # build it locally so CI still goes green. The app image then layers only the
-  # NMesh code on top, so this job is fast whenever the base is available.
+  # base-image.yml, reused here once its provenance is verified, and built here
+  # otherwise (.github/scripts/provide-base.sh). The app image layers only the
+  # NMesh code on top of exactly the base that was verified.
   docker:
     needs: test
     runs-on: ubuntu-latest
@@ -77,6 +36,12 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # Outbound connections of a job that can publish the image every node
+      # pulls, listed in the run's summary (audit: recorded, not yet refused).
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -84,11 +49,49 @@ jobs:
       - name: Image names (lowercased)
         id: img
         run: |
-          repo=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
-          echo "app=ghcr.io/$repo" >> "$GITHUB_OUTPUT"
-          echo "base=ghcr.io/$repo-base" >> "$GITHUB_OUTPUT"
+          echo "app=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "base=ghcr.io/${GITHUB_REPOSITORY,,}-base" >> "$GITHUB_OUTPUT"
 
-      - name: Log in to GHCR
+      - name: Provide the base image (published and verified, else built here)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_NAME: ${{ steps.img.outputs.base }}
+        run: |
+          base="$(.github/scripts/provide-base.sh "$BASE_NAME:latest")"
+          echo "BASE=$base" >> "$GITHUB_ENV"
+
+      - name: Build the application image
+        env:
+          APP: ${{ steps.img.outputs.app }}
+        run: |
+          docker build -f docker/Dockerfile \
+            --build-arg BASE_IMAGE="$BASE" \
+            -t "$APP:latest" -t "$APP:$GITHUB_SHA" .
+
+      # A vulnerability the distribution or a package has already fixed, or a
+      # secret, left in the image a node runs, fails the build. A vulnerability
+      # with no fix yet is listed and let through: nothing here could do better
+      # than wait for it. Trivy runs from its image pinned by digest (v0.75.0),
+      # on a saved copy of the image and never with the Docker socket: the
+      # socket is root on the runner, and the registry login comes later.
+      - name: Scan the application image, and list what it carries
+        env:
+          APP: ${{ steps.img.outputs.app }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/scan"
+          docker save "$APP:latest" -o "$RUNNER_TEMP/scan/image.tar"
+          docker run --rm -v "$RUNNER_TEMP/scan:/scan" \
+            aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --input /scan/image.tar --cache-dir /scan/cache --scanners vuln,secret \
+            --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 --no-progress
+          docker run --rm -v "$RUNNER_TEMP/scan:/scan" \
+            aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --input /scan/image.tar --cache-dir /scan/cache --format cyclonedx \
+            --output /scan/sbom.cdx.json --no-progress
+          rm -f "$RUNNER_TEMP/scan/image.tar"
+
+      - name: Log in to GHCR (main only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -96,49 +99,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Provide the base image (pull if published, else build locally)
-        run: |
-          BASE='${{ steps.img.outputs.base }}:latest'
-          if docker pull "$BASE" 2>/dev/null; then
-            echo "using published base image $BASE"
-          else
-            echo "base image not reachable — building it locally"
-            docker build -f docker/Dockerfile.base -t "$BASE" .
-          fi
-
-      - name: Build the application image
-        run: |
-          docker build -f docker/Dockerfile \
-            --build-arg BASE_IMAGE='${{ steps.img.outputs.base }}:latest' \
-            -t '${{ steps.img.outputs.app }}:latest' \
-            -t '${{ steps.img.outputs.app }}:${{ github.sha }}' .
-
-      # A vulnerability the distribution or a package has already fixed, left in
-      # the image a node runs, fails the build. One with no fix yet is listed
-      # and let through: nothing here could do better than wait for it.
-      # Trivy runs from its image pinned by digest (v0.75.0), not an action.
-      - name: Scan the application image
-        run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
-            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
-            --exit-code 1 --no-progress '${{ steps.img.outputs.app }}:latest'
-
       - name: Push the application image (main only)
         id: push
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          APP: ${{ steps.img.outputs.app }}
         run: |
-          docker push '${{ steps.img.outputs.app }}:latest'
-          docker push '${{ steps.img.outputs.app }}:${{ github.sha }}'
-          digest="$(docker inspect --format '{{index .RepoDigests 0}}' '${{ steps.img.outputs.app }}:latest' | cut -d@ -f2)"
+          docker push "$APP:latest"
+          docker push "$APP:$GITHUB_SHA"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$APP:latest" | cut -d@ -f2)"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       # The image every container node pulls, attested: which commit and which
-      # workflow built it (`gh attestation verify oci://<image> --repo <owner>/NMesh`).
-      - name: Attest the application image (main only)
+      # workflow built it (`gh attestation verify oci://<image> --repo <owner>/NMesh`),
+      # and what it carries (the SBOM the scan above produced).
+      - name: Attest the application image's provenance (main only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.img.outputs.app }}
           subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest the application image's SBOM (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.img.outputs.app }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/scan/sbom.cdx.json
           push-to-registry: true

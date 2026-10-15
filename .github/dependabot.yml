@@ -1,11 +1,23 @@
 # Workflow actions are pinned to a commit SHA (tests/test_workflows_pinned.py);
 # Dependabot is what moves the pin, as a reviewable PR, when an action releases.
+#
+# A release is offered only once it is a week old (`cooldown`): a hijacked
+# publisher's release is usually found and pulled within days, and a pin moved
+# the day it appeared is how it reaches the jobs that publish. Security updates
+# are not held back.
+#
+# The pip entry reads requirements.txt. The hash-locked set the image installs
+# (docker/requirements.lock) is in a format Dependabot does not update; it is
+# moved with `uv pip compile --generate-hashes`, and audit.yml's pip-audit fails
+# on a known vulnerability in it, on every change and every week.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]
@@ -14,9 +26,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
 
   - package-ecosystem: docker
     directory: /docker
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7

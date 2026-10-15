@@ -137,12 +137,20 @@ python tests/tools/api_fuzz.py https://127.0.0.1:8787 <password> --rounds 3
 GitHub CI (`.github/workflows/ci.yml`) runs the unit tests and then the
 integration tests on every push to `main` and every pull request.
 
+The suite itself is `tests.yml`, a reusable workflow: `ci.yml` calls it on
+every change, and `release.yml` calls it before it publishes anything, so a
+release is a commit the suite passed on.
+
 The tests run **inside the base image** (`docker/Dockerfile.base`, published by
 `base-image.yml`), which already carries a **compiled liboqs** and every
-dependency. So the heavy C library is no longer rebuilt on every run, and we
-test on the exact runtime the app ships with (Python 3.14). If the base image is
-not reachable (first bootstrap, or a fork PR with no package access), CI builds
-it once locally to stay green — the same fallback as the `docker` job.
+dependency. So the C library is not rebuilt on every run, and we test on the
+exact runtime the app ships with (Python 3.14). The published base is used only
+once its provenance checks out — attested by `base-image.yml`, run from `main`
+(`.github/scripts/pull-verified.sh`) — and then by the digest that was checked.
+If it is unreachable or unproven (first bootstrap, a fork PR with no package
+access, a base published before it was attested), CI builds it here
+(`.github/scripts/provide-base.sh`); every job that uses the base, the fuzzer
+and the console scan included, goes through that script.
 
 Alongside it, GitHub runs **CodeQL** (`codeql.yml`: extended queries on
 Python, JavaScript and the workflows, plus `.github/codeql/nmesh`, the same
@@ -151,7 +159,29 @@ security queries with mesh input as their source), **secret scanning** with push
 action in a workflow is pinned to a full commit SHA and every workflow starts
 from `permissions: {}`, granting each job its own; `tests/test_workflows_pinned.py`
 refuses a tag reference or a missing `permissions: {}`. A new action goes in by
-SHA with its version as a comment (`@<sha> # v4.4.0`); Dependabot moves the pin.
+SHA with its version as a comment (`@<sha> # v4.4.0`); Dependabot moves the pin,
+and offers a release only once it is a week old (`cooldown`). A workflow of
+this repository is called as `$/.github/workflows/…` (the self-repository
+form), never `./…`, which is read from whatever the workspace holds by then.
+
+`repo-checks.yml` checks what builds and ships the code, on every change and
+weekly, each tool from its image pinned by digest:
+
+- **zizmor** over the workflows: template injection, excessive permissions, a
+  pin whose version comment lies, an action found vulnerable after it was
+  pinned. Any finding fails; one set aside goes in `.github/zizmor.yml` with its
+  reason. Run it locally with `uvx zizmor .github/workflows`.
+- **gitleaks** over the whole history, not only the tip: a key committed and
+  deleted is still in every clone. A fixture that looks like a key is listed by
+  fingerprint in `.gitleaksignore`.
+- **hadolint** and **Trivy's misconfiguration rules** over both Dockerfiles; a
+  rule set aside is in `.hadolint.yaml` or `.trivyignore`, with its reason.
+
+The publishing jobs (`base-image.yml`, `ci.yml`'s `docker`, `release.yml`)
+start with StepSecurity's Harden-Runner in `audit` mode: every outbound
+connection the job makes is listed in the run's summary. That is a record, not
+a barrier; `block` with an allow-list is the next step, once the lists from a
+few runs say what the jobs legitimately reach.
 
 `.github/codeql/nmesh/NMeshSources.qll` is where the mesh is declared as
 remote input: bytes an asyncio protocol or stream hands over, a spooled frame,
@@ -167,11 +197,22 @@ codeql database analyze /tmp/nmesh-db .github/codeql/nmesh/queries --format=sari
 ```
 
 The `docker` job scans the image it built with Trivy (pinned by digest) and
-fails on a HIGH or CRITICAL vulnerability that has a fix; one with none yet is
-listed and let through. `audit.yml` scans the published image the same way
-every Monday, since a fix released after the last build is news nothing in the
-tree carries. `tests/test_workflows_pinned.py` refuses a `docker run` of a
-registry image not pinned by digest.
+fails on a HIGH or CRITICAL vulnerability that has a fix, or on a secret; a
+vulnerability with none yet is listed and let through. Trivy reads a saved copy
+of the image (`docker save`, `--input`) and is never given the Docker socket —
+the socket is root on the runner — and the registry login comes only after the
+scan, so nothing the scanner runs could reach a credential that pushes. The
+same scan writes the image's SBOM (CycloneDX), attested beside its provenance
+(`actions/attest-sbom`). `release.yml` does the same for the image a tag
+publishes, and leaves `:latest` to `ci.yml`. `audit.yml` scans the published
+image every Monday, once its provenance is checked, since a fix released after
+the last build is news nothing in the tree carries; `base-image.yml` lists the
+base's vulnerabilities without gating on them (no node runs the base).
+`tests/test_workflows_pinned.py` refuses a `docker run` of a registry image not
+pinned by digest, a `docker pull` outside the verifying scripts, the socket
+handed to anything, a login before a scan, and a release job that does not
+wait for the suite; `tests/test_ci_scripts.py` drives the verifying scripts
+with a `docker` and a `gh` that answer each way.
 
 ### The repository itself (`scorecard.yml`) and what it ships
 
@@ -225,10 +266,19 @@ peer input gets a target in the same commit.
 
 `audit.yml` runs `pip-audit` over `docker/requirements.lock`, the hash-locked set
 the base image installs, on every change and every Monday.
+It also reads **liboqs's own advisories** (`tests/tools/liboqs_advisories.py`):
+liboqs is C built from source, so no package index — and so neither
+Dependabot, nor pip-audit, nor an image scanner — ever sees it. An advisory
+whose range holds the locked version fails, unless `scripts/liboqs.accepted`
+names it with the reason it cannot reach a node; an exception the lock has
+outgrown is reported for removal. `tests/test_liboqs_advisories.py` holds the
+range reading offline.
 `tests/test_liboqs_lock.py` holds `scripts/liboqs.lock`, `requirements.txt`
 and that lock together, and runs `scripts/build_liboqs.sh` offline against a
 moved tag and a tampered archive; `NMESH_NETWORK_TESTS=1` also checks the
-locked digest against the archive GitHub serves today.
+locked digest against the archive GitHub serves today. The same file checks
+that only the two schemes a node uses are compiled (`OQS_MINIMAL_BUILD`), with
+the stateful signatures off.
 
 ### `[gwN] node down: Not properly terminated`
 

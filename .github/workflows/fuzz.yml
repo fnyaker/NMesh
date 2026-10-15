@@ -21,19 +21,23 @@ jobs:
     permissions:
       contents: read
       packages: read
+      attestations: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Base image name (lowercased)
-        id: img
-        run: echo "base=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-base" >> "$GITHUB_OUTPUT"
+      - name: Provide the base image (published and verified, else built here)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base="$(.github/scripts/provide-base.sh "ghcr.io/${GITHUB_REPOSITORY,,}-base:latest")"
+          echo "BASE=$base" >> "$GITHUB_ENV"
       - name: Fuzz every target
         env:
           SECONDS_PER_TARGET: ${{ inputs.seconds || '30' }}
         run: |
           case "$SECONDS_PER_TARGET" in ''|*[!0-9]*) echo "seconds must be a number"; exit 2;; esac
-          docker run --rm -v "$PWD:/app" -w /app '${{ steps.img.outputs.base }}:latest' \
+          docker run --rm -v "$PWD:/app" -w /app "$BASE" \
             python -m tests.fuzz -s "$SECONDS_PER_TARGET" \
             --corpus .fuzz/corpus --findings .fuzz/findings
       - name: Keep what it found

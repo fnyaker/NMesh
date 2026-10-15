@@ -1,0 +1,55 @@
+# The unit and integration suites, inside the base image: called by ci.yml on
+# every change and by release.yml before anything is published, so a release
+# is the commit the suite ran on and not merely one it ran near.
+name: tests
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  # Run the suite inside the base image, which already carries a compiled
+  # liboqs + all deps (see docker/Dockerfile.base, base-image.yml). That avoids
+  # recompiling the C library on every run and tests on the exact runtime the
+  # app ships with. The published base is used only once its provenance is
+  # verified; otherwise (first bootstrap, a fork PR without package read, an
+  # unattested image) it is built here (.github/scripts/provide-base.sh).
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Base image name (lowercased)
+        id: img
+        run: echo "base=ghcr.io/${GITHUB_REPOSITORY,,}-base" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Provide the base image (published and verified, else built here)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_NAME: ${{ steps.img.outputs.base }}
+        run: |
+          base="$(.github/scripts/provide-base.sh "$BASE_NAME:latest")"
+          echo "BASE=$base" >> "$GITHUB_ENV"
+
+      - name: Unit tests (in the base image — liboqs already compiled)
+        run: |
+          docker run --rm -v "$PWD:/app" -w /app "$BASE" \
+            sh -c "python -c 'import oqs; print(\"liboqs ready (prebuilt)\")' && pytest -q"
+
+      - name: Integration tests
+        run: docker run --rm -v "$PWD:/app" -w /app "$BASE" pytest tests/integration -q

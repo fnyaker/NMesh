@@ -29,18 +29,27 @@ permissions: {}
 
 jobs:
   build-base:
+    # A dispatch from another branch would publish `:latest` from it; and
+    # .github/scripts/pull-verified.sh trusts only a base built from main.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Base image name (lowercased)
         id: img
-        run: echo "base=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-base" >> "$GITHUB_OUTPUT"
+        run: echo "base=ghcr.io/${GITHUB_REPOSITORY,,}-base" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -52,9 +61,33 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push base image
+        id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile.base
           push: true
           tags: ${{ steps.img.outputs.base }}:latest
+
+      # Every test runs in this image and the image every node pulls is built
+      # on it: CI uses it only once this attestation proves base-image.yml on
+      # main built it (.github/scripts/pull-verified.sh).
+      - name: Attest the base image's provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.img.outputs.base }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # Listed, not gating: the base carries the compiler liboqs was built
+      # with and is never what a node runs (the application image is a fresh
+      # stage, scanned with a gate by ci.yml).
+      - name: List the base image's known vulnerabilities
+        continue-on-error: true
+        env:
+          BASE: ${{ steps.img.outputs.base }}@${{ steps.push.outputs.digest }}
+        run: |
+          docker run --rm \
+            aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --image-src remote --scanners vuln --severity HIGH,CRITICAL \
+            --ignore-unfixed --no-progress "$BASE"
