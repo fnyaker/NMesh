@@ -2505,6 +2505,13 @@ running X.
   new algorithm in `src/crypto.py` needs its name added there:
   `tests/test_liboqs_lock.py` derives the list from `KEM_ALG`/`DSA_ALG`, and
   the wrapper raises `MechanismNotEnabledError` for anything not built.
+- A **required status check is matched by its name**, and a job run through a
+  reusable workflow reports as `<caller job> / <called job>`. Moving `ci.yml`'s
+  `test` job into a reusable workflow turned the check into `test / test`:
+  every check went green and the PR stayed blocked, waiting for a `test` that
+  no run would ever report. The suite is a composite action instead
+  (`.github/actions/suite`), so the job keeps its name;
+  `tests/test_workflows_pinned.py` holds it.
 - CI never hands the Docker socket to a tool, and logs in to the registry only
   after the scan (BUGSVULNS 112): the socket is root on the runner, and the
   login it would find is the one that pushes `:latest`. A scanner reads a

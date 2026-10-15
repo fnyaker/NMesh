@@ -28,11 +28,20 @@ def _workflows() -> list[pathlib.Path]:
     return sorted(WORKFLOWS.glob("*.y*ml"))
 
 
+def _runs_steps() -> list[pathlib.Path]:
+    """Every file that runs steps: the workflows and this tree's own actions."""
+    return _workflows() + sorted((WORKFLOWS.parent / "actions").glob("*/action.y*ml"))
+
+
+def _name(path: pathlib.Path) -> str:
+    return path.name if path.parent == WORKFLOWS else f"{path.parent.name}/{path.name}"
+
+
 def test_there_are_workflows_to_check():
     assert _workflows()
 
 
-@pytest.mark.parametrize("path", _workflows(), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", _runs_steps(), ids=_name)
 def test_every_action_is_pinned_to_a_commit(path):
     text = path.read_text()
     refs = _USES.findall(text)
@@ -65,7 +74,7 @@ def _images_run(text: str) -> list[str]:
     return images
 
 
-@pytest.mark.parametrize("path", _workflows(), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", _runs_steps(), ids=_name)
 def test_a_third_party_image_is_pinned_by_digest(path):
     """An image built in the job is named through a step output (``$…`` or
     ``'${{ … }}'``); anything else comes from a registry, where a tag moves."""
@@ -89,8 +98,8 @@ def test_a_tag_reference_is_refused():
 
 
 def test_a_workspace_relative_reference_is_refused():
-    assert not _PINNED.match("./.github/workflows/tests.yml")
-    assert _PINNED.match("$/.github/workflows/tests.yml")
+    assert not _PINNED.match("./.github/actions/suite")
+    assert _PINNED.match("$/.github/actions/suite")
 
 
 @pytest.mark.parametrize("name", ["base-image.yml", "ci.yml"])
@@ -114,7 +123,7 @@ def test_the_job_splitter_finds_every_job():
     assert set(_jobs((WORKFLOWS / "ci.yml").read_text())) == {"test", "docker"}
 
 
-@pytest.mark.parametrize("path", _workflows(), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", _runs_steps(), ids=_name)
 def test_no_tool_is_handed_the_docker_socket(path):
     """The socket is root on the runner, and the runner of a publishing job
     holds the registry login: a scanner image pinned on the wrong day could
@@ -130,7 +139,7 @@ def test_a_scan_runs_before_the_registry_login(path):
                 f"{path.name}/{name}: scan first, log in after"
 
 
-@pytest.mark.parametrize("path", _workflows(), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", _runs_steps(), ids=_name)
 def test_an_image_of_this_repository_is_pulled_only_once_proven(path):
     """A pull goes through `.github/scripts/pull-verified.sh` (or
     `provide-base.sh`, which calls it), which checks the attestation and hands
@@ -150,9 +159,20 @@ def test_the_base_image_is_published_from_main_only_and_attested():
     assert "actions/attest-build-provenance@" in text
 
 
+@pytest.mark.parametrize("name", ["ci.yml", "release.yml"])
+def test_the_suite_runs_in_a_job_named_test(name):
+    """Branch protection requires the status check ``test`` by name. A
+    reusable workflow would report as ``test / test`` and the required check
+    would never arrive, so the suite is an action each caller's ``test`` job
+    runs."""
+    jobs = _jobs((WORKFLOWS / name).read_text())
+    assert "uses: $/.github/actions/suite" in jobs["test"]
+    assert "runs-on:" in jobs["test"]
+
+
 def test_a_release_publishes_only_what_the_suite_passed():
     jobs = _jobs((WORKFLOWS / "release.yml").read_text())
-    assert "$/.github/workflows/tests.yml" in jobs["test"]
+    assert "$/.github/actions/suite" in jobs["test"]
     for name, job in jobs.items():
         if name != "test":
             assert re.search(r"^    needs: test$", job, re.M), name
@@ -180,7 +200,7 @@ def test_every_dependabot_update_waits_a_week():
     assert min(waits) >= 7
 
 
-@pytest.mark.parametrize("path", _workflows(), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", _runs_steps(), ids=_name)
 def test_a_failing_command_cannot_hide_inside_an_echo(path):
     """``echo "X=$(check)" >> "$GITHUB_ENV"`` exits with echo's status, so a
     failed provenance check would pass on with ``X`` empty. Assign first —

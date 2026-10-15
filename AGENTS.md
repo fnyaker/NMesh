@@ -515,6 +515,12 @@ scope. Add yours.
   job going on. Caught on the reread before commit. → Assign a command's output
   to a variable first (`x="$(cmd)"` fails under `bash -e`), then use it;
   `tests/test_workflows_pinned.py` refuses the other form.
+- **A required check renamed without asking what required it.** The suite was
+  moved into a reusable workflow, and `ci.yml`'s `test` check became `test /
+  test`; branch protection waits for `test` by name, so the PR sat blocked with
+  every check green until the operator noticed the check never reported. →
+  Before renaming or moving a job, ask whether branch protection names it;
+  a check's name is an interface.
 - **A rate called "at rest" that was a mesh still settling.** About 30 packets
   per second per node was published as idle traffic; it was taken 25 s after
   start, with searches and handshakes still running, and the same mesh sent

@@ -4266,8 +4266,8 @@ minute. It also pushed `:latest`, from a workflow outside the concurrency group
 that orders `ci.yml`'s pushes (111), so a tag on an older commit could put an
 older image back under `:latest`.
 
-**Fixed** — the suite is a reusable workflow (`tests.yml`) both `ci.yml` and
-`release.yml` call; every release job waits for it. The release image is built
+**Fixed** — the suite is one action (`.github/actions/suite`) that the `test`
+job of both `ci.yml` and `release.yml` runs; every release job waits for it. The release image is built
 on a verified base, scanned with the same gate as `ci.yml`'s, given an attested
 SBOM, and pushed under its tag only. The zipapp is attached with the runner's
 own `gh` instead of a third-party action holding a token that writes releases.

@@ -152,9 +152,13 @@ python tests/tools/api_fuzz.py https://127.0.0.1:8787 <password> --rounds 3
 GitHub CI (`.github/workflows/ci.yml`) runs the unit tests and then the
 integration tests on every push to `main` and every pull request.
 
-The suite itself is `tests.yml`, a reusable workflow: `ci.yml` calls it on
-every change, and `release.yml` calls it before it publishes anything, so a
-release is a commit the suite passed on.
+The suite itself is one composite action, `.github/actions/suite`: the `test`
+job of `ci.yml` runs it on every change, and the `test` job of `release.yml`
+before anything is published, so a release is a commit the suite passed on.
+It is an action and not a reusable workflow because branch protection requires
+the status check `test` by name, and a reusable workflow reports its job as
+`test / test` — the required check then never arrives and the PR stays blocked
+with every check green.
 
 The tests run **inside the base image** (`docker/Dockerfile.base`, published by
 `base-image.yml`), which already carries a **compiled liboqs** and every
