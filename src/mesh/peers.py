@@ -115,6 +115,16 @@ class _Peer:
         # A link used only to relay for others (SEEK / RELAY_CARRY) — we do not
         # try to authenticate to it, so its unsolicited CHALLENGE is ignored.
         self.relay_only: bool = False
+        # Last time a conversation (E2E handshake, data) crossed this link, in
+        # either direction or on its way through. Keepalives and lookups do not
+        # count: a link carrying only those is held for nothing.
+        self.last_used: float = 0.0
+        # The far end redialled a link we had closed for being idle: it wants
+        # this one, so it is not ours to close again.
+        self.peer_wants: bool = False
+        # The far end said it was closing this link on purpose: its ending is
+        # not a loss to chase.
+        self.released: bool = False
         # A second link to a node we already reach, opened to measure it
         # (address steering). It is a duplicate on purpose and the pass that
         # opened it closes the loser, so the duplicate reaper leaves it alone.

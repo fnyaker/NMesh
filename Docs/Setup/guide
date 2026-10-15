@@ -553,6 +553,17 @@ must hash to the locked SHA-256. Anything else stops the install — no other
 tag, never `main`. A tag is a pointer its owner can move; this is the
 post-quantum half of the node's crypto.
 
+Only the two schemes a node uses are compiled: ML-KEM-768 and ML-DSA-65
+(`OQS_MINIMAL_BUILD`), with the stateful signatures (LMS, XMSS) off by name.
+Every other scheme is code an advisory can land in and no node calls — liboqs
+0.16.0 carries two advisories in its LMS code (BUGSVULNS 115) — and the library
+shrinks from about 26 MB to under 1 MB. The wrapper still loads: the stateful
+signature API it binds to is compiled with no scheme behind it. A library built
+before this change keeps its other schemes until the lock next moves; none of
+them is reachable from a node. `audit.yml` reads liboqs's own advisories every
+week (`tests/tools/liboqs_advisories.py`); one that names the locked version
+fails it unless `scripts/liboqs.accepted` says why it cannot reach a node.
+
 The wrapper has its own answer to a missing library — clone the tag and
 compile it on the spot, unchecked — so the node never lets it get that far:
 `src/liboqs_guard.py` refuses to import it when there is no library where it

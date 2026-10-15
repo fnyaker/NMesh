@@ -1,0 +1,6 @@
+# gitleaks (repo-checks.yml): findings that are not secrets, by fingerprint.
+# Truncated OpenSSH key headers the fleet tests use as fixtures; none is a key.
+89c8d6d6aa4989e9a3e12f081c7fc8405a5815f6:tests/test_fleet_provision.py:private-key:657
+89c8d6d6aa4989e9a3e12f081c7fc8405a5815f6:tests/test_fleet_state.py:private-key:277
+89c8d6d6aa4989e9a3e12f081c7fc8405a5815f6:tests/test_console_fleet.py:private-key:409
+7f03db166e6b88f111ef1a12582a68fcd47830cc:tests/test_fleet_provision.py:private-key:223

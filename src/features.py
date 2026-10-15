@@ -118,17 +118,22 @@ BLAKE2B_IDS = "msgid_b2b"
 # never sent one — and never judged for not honouring one.
 STOP_RELAY = "stoprelay"
 
+# Telling the far end that a link is being closed on purpose, so that it does
+# not take it for a loss and chase it (`MeshNode._prune_idle_links`). A node that
+# never announced it is simply closed on, as before.
+LINK_RELEASE = "linkrelease"
+
 SPOKEN = frozenset({CORE, KADEMLIA, E2E, DIRECTORY, PSEUDO, CATALOG, RELEASE,
                     PUNCH, REACH, RELAY, RENDEZVOUS, RENEW, REVOKE, ABUSE,
                     KEEPALIVE, MLO, PACKAGES, HANDOVER, SPEEDTEST,
-                    BLAKE2B_IDS, STOP_RELAY})
+                    BLAKE2B_IDS, STOP_RELAY, LINK_RELEASE})
 
 # Planes added *after* this negotiation existed. Silence about one of these is
 # not a node from before the name — it is a node that has never heard of it,
 # and sending it the new thing is exactly what rule 2 forbids. See
 # ``MeshNode.peer_announces``, which is the predicate these are asked through.
 SINCE_NEGOTIATION = frozenset({KEEPALIVE, MLO, PACKAGES, HANDOVER, RENDEZVOUS,
-                               SPEEDTEST, BLAKE2B_IDS, STOP_RELAY})
+                               SPEEDTEST, BLAKE2B_IDS, STOP_RELAY, LINK_RELEASE})
 
 
 class FeatureError(Exception):

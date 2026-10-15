@@ -844,7 +844,7 @@ why (`method`, `why` in the `stacks` answer):
    from its reference, a file stack with the file Portainer holds, both with
    `PullImage`. The stack's **environment is read and handed straight back**:
    Portainer *replaces* a stack's environment with what a redeploy carries, so
-   an empty list there erases it (BUGSVULNS 110). A git stack whose credentials
+   an empty list there erases it (BUGSVULNS 117). A git stack whose credentials
    Portainer stored is asked to use them (authentication on, empty password);
    saying "no authentication" makes Portainer forget them. Recent Portainer
    answers a redeploy while it is still deploying (status 3) and recreates the

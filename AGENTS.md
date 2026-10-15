@@ -160,7 +160,12 @@ Index: [`Docs/Architecture/README.md`](Docs/Architecture/README.md).
   the wrapper is never allowed to fetch it itself (`src/liboqs_guard.py`). The
   base image installs `docker/requirements.lock` under `--require-hashes`, and
   `.github/workflows/audit.yml` checks that set against known advisories every
-  week. A version bump moves the lock, its hashes and its digest together.
+  week, and liboqs against its own advisories. A version bump moves the lock,
+  its hashes and its digest together.
+- **CI tools are dependencies too.** Every action is pinned by commit and every
+  tool image by digest; none is handed the Docker socket, and an image this
+  repository published is used only once its provenance attestation checks out
+  (`.github/scripts/pull-verified.sh`).
 
 ## Contribution discipline
 
@@ -498,6 +503,24 @@ scope. Add yours.
   `cd`'d, which under the test harness was `/usr/bin`; every stamp then looked
   wrong. → A file that decides trust is read from the script's own tree
   (`BASH_SOURCE`), never from the current directory.
+- **An absence asserted on the file's text instead of on what it means.** A
+  test that the release no longer pushes `:latest` was written as `":latest"
+  not in text`; the comment explaining the rule and the base image's tag both
+  contain it, so the test failed on correct code. Caught by the run. → Assert on
+  the thing parsed (here, the tags given to `-t` and `docker push`), and run the
+  new test against both trees before trusting either verdict.
+- **A check whose failure an `echo` swallowed.** Workflows were written as
+  `echo "BASE=$(provide-base.sh …)" >> "$GITHUB_ENV"`: the step's status is
+  `echo`'s, so a failed provenance check would have left `BASE` empty and the
+  job going on. Caught on the reread before commit. → Assign a command's output
+  to a variable first (`x="$(cmd)"` fails under `bash -e`), then use it;
+  `tests/test_workflows_pinned.py` refuses the other form.
+- **A required check renamed without asking what required it.** The suite was
+  moved into a reusable workflow, and `ci.yml`'s `test` check became `test /
+  test`; branch protection waits for `test` by name, so the PR sat blocked with
+  every check green until the operator noticed the check never reported. →
+  Before renaming or moving a job, ask whether branch protection names it;
+  a check's name is an interface.
 - **A rate called "at rest" that was a mesh still settling.** About 30 packets
   per second per node was published as idle traffic; it was taken 25 s after
   start, with searches and handshakes still running, and the same mesh sent

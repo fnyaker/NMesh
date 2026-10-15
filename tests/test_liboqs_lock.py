@@ -183,3 +183,40 @@ class TestTheBuildStamps:
         (sandbox / "prefix").mkdir()
         assert _run(sandbox).returncode != 0
         assert not (sandbox / "prefix" / "nmesh-liboqs.lock").exists()
+
+
+class TestWhatIsCompiled:
+    """Only the two schemes a node uses are built. liboqs 0.16.0 carries two
+    advisories in its LMS code (BUGSVULNS 115); a scheme that is not compiled
+    is one no advisory can reach."""
+
+    def _configure_args(self, sandbox) -> list:
+        args = sandbox / "cmake-args"
+        _tool(sandbox, "git", 'case "$1" in\n'
+              '  clone) for last; do :; done; mkdir -p "$last";;\n'
+              f'  -C) echo {_lock()["LIBOQS_COMMIT"]};;\n'
+              "esac\n")
+        _tool(sandbox, "cmake", f'[ "$1" = -S ] && printf "%s\\n" "$@" > "{args}"\nexit 0\n')
+        _tool(sandbox, "grep", f'exec {shutil.which("grep")} "$@"\n')
+        (sandbox / "prefix").mkdir()
+        result = _run(sandbox)
+        assert result.returncode == 0, result.stderr
+        return args.read_text().splitlines()
+
+    def test_only_the_schemes_the_node_uses(self, sandbox):
+        crypto = (ROOT / "src" / "crypto.py").read_text()
+        kem = re.search(r'^KEM_ALG = "([^"]+)"', crypto, re.M).group(1)
+        dsa = re.search(r'^DSA_ALG = "([^"]+)"', crypto, re.M).group(1)
+        wanted = {"KEM_" + kem.lower().replace("-", "_"),
+                  "SIG_" + dsa.lower().replace("-", "_")}
+        minimal = [arg for arg in self._configure_args(sandbox)
+                   if arg.startswith("-DOQS_MINIMAL_BUILD=")]
+        assert len(minimal) == 1
+        assert set(minimal[0].split("=", 1)[1].split(";")) == wanted
+
+    def test_no_stateful_scheme_and_no_hazardous_signing(self, sandbox):
+        args = self._configure_args(sandbox)
+        for option in ("OQS_ENABLE_SIG_STFL_LMS", "OQS_ENABLE_SIG_STFL_XMSS",
+                       "OQS_HAZARDOUS_EXPERIMENTAL_ENABLE_SIG_STFL_KEY_SIG_GEN"):
+            assert f"-D{option}=OFF" in args, option
+        assert not [arg for arg in args if arg.endswith("=ON") and "STFL" in arg]

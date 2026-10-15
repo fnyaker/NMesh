@@ -124,7 +124,9 @@ _DIRECT_TYPES    = {PING, PONG, OBSERVED_ADDR, PUNCH_REQUEST, PUNCH_RELAY,
                     KA_PROPOSE, KA_REQUEST,
                     # Re-stamped at each hop like a revocation: the record
                     # inside is signed by the destination it speaks for.
-                    STOP_RELAY}
+                    STOP_RELAY,
+                    # About this link only, like the keepalive accord.
+                    LINK_RELEASE}
 # Stop-relay (`stop_relay.py`). How long a request asks to be honoured, how long
 # a relay is given to act on one before still being fed counts against it, the
 # rules a relay holds (in all, and for one destination), how many requests one
@@ -475,6 +477,12 @@ _GOSSIP_FANOUT         = 6
 # the node runs. Failed identities back off independently so dead addresses do
 # not turn maintenance into a dial storm.
 _NEIGHBOR_TARGET          = 5
+_LEAF_SIZE                = 8      # the nearest nodes by XOR this node insists on a link with
+_LINK_IDLE_SECONDS       = 600.0  # a link nobody needs is closed after this long without conversation (0 = never)
+_PEER_WANTS_TTL           = 3600.0 # a node that redialled a link we closed is left holding it for this long
+_IDLE_CLOSED_MAX          = 512    # links we closed for being idle, remembered
+_PRUNE_PER_SWEEP          = 2      # idle links closed at one keepalive sweep
+_LEAF_GIVE_UP             = 3      # failed dials after which a leaf entry stops keeping the node searching
 _FINGER_LINKS             = 2      # links wanted in each distance band that has nodes in it
 _FINGER_DIALS             = 4      # bands filled per maintenance cycle
 # Floor of live maintained links. Below it the node is *searching*: it runs a
@@ -1051,6 +1059,12 @@ __all__ = [
     "_NEIGHBOR_RETRY_MIN",
     "_NEIGHBOR_RETRY_TRACKED",
     "_NEIGHBOR_TARGET",
+    "_LEAF_SIZE",
+    "_LEAF_GIVE_UP",
+    "_LINK_IDLE_SECONDS",
+    "_PEER_WANTS_TTL",
+    "_IDLE_CLOSED_MAX",
+    "_PRUNE_PER_SWEEP",
     "_FINGER_LINKS",
     "_FINGER_DIALS",
     "_NEIGHBOR_WATCH_TRACKED",

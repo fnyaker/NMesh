@@ -1194,7 +1194,7 @@ console cannot produce a file the node would refuse to start on.
 Above the form, one bar with ten steps from *Minimal* to *Maximum*: how much
 this node may spend to stay quick. A step is a named set of **live** settings
 (`src/power.py`: the four keepalive bounds, `mlo_always`, `dynamic_address`,
-`update_check_minutes`, `update_when_active`, `route_hold_minutes`) applied
+`update_check_minutes`, `update_when_active`, `route_hold_minutes`, and the link budget: `leaf_size`, `finger_links`, `link_idle_minutes`) applied
 together through
 `config.profile`, and remembered like any other edit. Dragging previews the
 step's name and a one-sentence description; letting go applies it. Step 6,

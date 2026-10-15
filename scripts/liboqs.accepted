@@ -1,0 +1,9 @@
+# Advisories published against the liboqs in scripts/liboqs.lock that cannot
+# reach a node, each with the reason. Read by tests/tools/liboqs_advisories.py
+# (audit.yml): an advisory naming the locked version and not listed here fails
+# the audit. Review this file whenever the lock moves; the audit names an entry
+# that no longer applies.
+#
+# GHSA id               why a node cannot reach it
+GHSA-xv6c-h66p-6mfq  LMS/HSS signing; LMS is not compiled (build_liboqs.sh builds ML-KEM-768 and ML-DSA-65 only) and no node calls OQS_SIG_STFL_*. Fixed in 0.17.0.
+GHSA-wh5q-mpc8-67wf  LMS/HSS verification; LMS is not compiled (build_liboqs.sh builds ML-KEM-768 and ML-DSA-65 only) and no node calls OQS_SIG_STFL_*. Fixed in 0.17.0.

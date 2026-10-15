@@ -4144,7 +4144,71 @@ without, for 4 to 6 packets per second per node at rest instead of 2.4 to 4.4). 
 machine: the simulator needs more cores than the 8 it has once the mesh is
 chatty, and at rest it is the first number to check again.
 
-## 109 — medium — Two builds raced to publish the base image, and the older won
+## 109 — high — A node was linked to its true nearest neighbour about one time in two, and the others could not be found
+
+> **Status — fixed** (leaf set). Tests:
+> `tests/test_neighborhood.py::TestTheLeafSet`.
+
+**Where** — `src/node.py`: `_maintain_neighbors`.
+
+**What happens** — maintenance only insisted on `_NEIGHBOR_FLOOR` = 3 links, and
+stopped searching once it held them, whichever nodes they were. A node that
+joined through two random members held a handful of links in no particular part
+of the id space, was known to a handful of nodes, and had nobody near it in id
+space that knew it. Both ways of reaching it failed: greedy forwarding ends at
+the node nearest the target and that node had no link to it, and a lookup
+cannot find a node its nearest neighbours have never heard of. The `--explain`
+output of `tests/tools/mesh_sim.py` on 1000 nodes showed it: the undelivered
+first contacts ended at nodes holding 3 to 6 links, with a routing table of 3
+to 9 entries, known to 3 to 7 nodes in the mesh. `leafcheck` measured it
+directly: of each node's true 1, 3 and 8 nearest (computed over all ids), 54 %,
+53 % and 47 % were linked.
+
+Two changes that looked like the fix were measured and changed nothing: looking
+the target up before the first forward (89 and 89 of 100 against 90 and 88, and
+slower), and a rule that looked the target up at a local minimum of the
+distance. The cause was not the way packets are carried.
+
+**Fixed** — the nodes we hold nearest in id space, `_LEAF_SIZE` = 8, are a set
+the node insists on. While they are not all linked, or are not what they were at
+the last cycle, a cycle searches: it looks up its own id (which is also how
+those nodes come to know it) and dials what is missing. One that refused
+`_LEAF_GIVE_UP` times is not waited for, and the usual back-off stretches the
+cycles while nothing changes. On 1000 nodes over twelve processes with the
+crypto stubbed (`--fast`): the true 8 nearest linked 98 % of the time (from
+47 %), first contacts 99, 100 and 100 of 100 over three seeds (from 88 to 92), one retry in a hundred
+(from eleven), the same 4 packets per second per node at rest.
+
+**Still open** — nothing larger than 2000 nodes was run (memory: about 3 MB per
+simulated node). Hostile nodes inserting near ids to hold a victim in the
+searching regime are bounded by `_LEAF_GIVE_UP` and the back-off, but were not
+tried.
+
+## 110 — medium — Every link stayed open for ever, and keeping them open was the whole traffic of an idle node
+
+> **Status — fixed.** Tests: `tests/test_link_prune.py`.
+
+**Where** — `src/node.py`: nothing closed a link that nobody used.
+
+**What happens** — a node on 1000 nodes held 28 to 36 links (the leaf set and
+two links per band of distance, plus every link a conversation or a lookup had
+ever opened) and, with nothing to say, sent 3.6 packets per second and 0.38 KiB/s
+to keep them alive: `PING` and `PONG`, nothing else. The energy and performance
+bar moved the cadence of those probes and not the number of links.
+
+**Fixed** — `_prune_idle_links` (see `routing.md`), the three numbers on the
+bar, and `LINK_RELEASE`. A first version without the message closed links the
+far end then redialled, which cycled: 0.05 handshakes per second per node and
+5 KiB/s, ten times worse than doing nothing. At rest after the settling time on
+1000 nodes: 15 links per node, 1.7 packets per second, 0.22 KiB/s, 99 % of the
+true 8 nearest linked, 100 of 100 first contacts.
+
+**Still open** — the first minutes after a start (the settling time) still cost
+more than the rest: handshakes and the lookups of every new node (29 KiB/s
+per node at 30 nodes, measured earlier). Both ends of a link still
+probe it; one probe each way would halve the rest (the quality estimates of each
+side come from its own probes, so that is not free).
+## 111 — medium — Two builds raced to publish the base image, and the older won
 
 > **Status — fixed.** Tests: `tests/test_workflows_pinned.py`
 > (`test_what_publishes_latest_does_it_one_run_at_a_time`).
@@ -4163,8 +4227,126 @@ so the only symptom was that later builds broke.
 in progress, so they finish in the order they were queued and the newest commit
 publishes last. The base was republished from `main` by hand.
 
+## 112 — medium — The image scanner held the Docker socket on a runner about to push
 
-## 110 — high — Fleet never recognised a Portainer stack, and updating one through Portainer erased its environment
+> **Status — fixed.** Tests: `tests/test_workflows_pinned.py`
+> (`test_no_tool_is_handed_the_docker_socket`,
+> `test_a_scan_runs_before_the_registry_login`).
+
+**Where** — the `docker` job of `.github/workflows/ci.yml`; `audit.yml`'s
+`published-image` the same way.
+
+**What happens** — Trivy ran as `docker run -v /var/run/docker.sock:…`, after
+the job had logged in to GHCR on `main`. The socket is root on the runner: a
+container holding it can start another that mounts the host, and read the
+login the runner had just stored. The scanner is pinned by digest, so a moved
+tag cannot reach it, but a digest is chosen by whoever accepts the Dependabot
+update — and in March 2026 the Trivy project's own release and images were
+replaced with credential stealers for several days. A poisoned scanner pinned
+that week would have been able to push `:latest`, the image every container
+node pulls.
+
+**Fixed** — the image is saved to a file and Trivy reads the file
+(`--input`); the published image is read from the registry by digest
+(`--image-src remote`). No workflow hands the socket to anything, and the
+registry login comes after the scan.
+
+## 113 — medium — A release published an image no test and no scan had seen
+
+> **Status — fixed.** Tests: `tests/test_workflows_pinned.py`
+> (`test_a_release_publishes_only_what_the_suite_passed`,
+> `test_a_release_scans_its_image_and_leaves_latest_to_ci`).
+
+**Where** — `.github/workflows/release.yml`.
+
+**What happens** — a `v*` tag built and pushed the zipapp and the image
+straight away: no suite ran on the tagged commit, no Trivy gate ran on the
+image, and the image was built on whatever `nmesh-base:latest` held that
+minute. It also pushed `:latest`, from a workflow outside the concurrency group
+that orders `ci.yml`'s pushes (111), so a tag on an older commit could put an
+older image back under `:latest`.
+
+**Fixed** — the suite is one action (`.github/actions/suite`) that the `test`
+job of both `ci.yml` and `release.yml` runs; every release job waits for it. The release image is built
+on a verified base, scanned with the same gate as `ci.yml`'s, given an attested
+SBOM, and pushed under its tag only. The zipapp is attached with the runner's
+own `gh` instead of a third-party action holding a token that writes releases.
+
+## 114 — low — The base image every test ran in was never traced to a build
+
+> **Status — fixed.** Tests: `tests/test_ci_scripts.py`,
+> `tests/test_workflows_pinned.py`
+> (`test_an_image_of_this_repository_is_pulled_only_once_proven`,
+> `test_the_base_image_is_published_from_main_only_and_attested`).
+
+**Where** — `.github/workflows/base-image.yml`, and every job that pulled
+`nmesh-base:latest` (`ci.yml`, `fuzz.yml`, `audit.yml`).
+
+**What happens** — the base was published without an attestation and pulled by
+tag. Whoever could write to the package — or run `base-image.yml` from any
+branch, which `workflow_dispatch` allowed — chose the interpreter the suite ran
+in and the `site-packages` and liboqs the application image copies.
+
+**Fixed** — `base-image.yml` publishes from `main` only and attests the image's
+provenance. Jobs take it through `.github/scripts/provide-base.sh`, which uses
+the published base only once `gh attestation verify` proves `base-image.yml`
+on `main` built it, by the digest it checked, and builds the base locally
+otherwise. The published application image is verified the same way (signed by
+`ci.yml`) before the weekly scan and the console scan use it.
+
+## 115 — medium — liboqs 0.16.0 carries two advisories, in code a node never calls
+
+> **Status — fixed for new builds; open for libraries already built.** Tests:
+> `tests/test_liboqs_lock.py` (`TestWhatIsCompiled`),
+> `tests/test_liboqs_advisories.py`.
+
+**Where** — `scripts/build_liboqs.sh`, `scripts/liboqs.lock`.
+
+**What happens** — GHSA-wh5q-mpc8-67wf (an out-of-bounds read in LMS/HSS
+verification) and GHSA-xv6c-h66p-6mfq (LM-OTS key reuse and further memory
+errors in LMS signing) affect liboqs 0.11.0 to 0.16.0, built with
+`OQS_ENABLE_SIG_STFL_LMS` — and the build turned on LMS, XMSS and
+`OQS_HAZARDOUS_EXPERIMENTAL_ENABLE_SIG_STFL_KEY_SIG_GEN`, on the belief that the
+wrapper would not load without them. No node calls a stateful signature, so the
+code was linked and unreachable. Nothing reported it either: liboqs is compiled
+from source, so it is in no package index, and none of Dependabot, pip-audit or
+Trivy can see it. The fix is in 0.17.0, not released when this was written.
+
+**Fixed** — the wrapper loads without them (0.16.0 compiles the stateful
+signature API with no scheme behind it), so the build now compiles only
+ML-KEM-768 and ML-DSA-65 (`OQS_MINIMAL_BUILD`), with LMS, XMSS and the hazardous
+signing off by name: 26 MB of library becomes 600 KB, and the unit suite passes
+on it. `audit.yml` now reads liboqs's advisories against the lock every week;
+these two are listed in `scripts/liboqs.accepted` with that reason.
+
+**Still open** — a library a host built before this change (`start.sh` reuses
+one whose stamp matches the lock) keeps its LMS code until the lock moves; it
+stays unreachable from a node. Moving the lock to 0.17.0 rebuilds it, and the
+audit will then report both exceptions as stale.
+
+## 116 — low — The container runs as root
+
+> **Status — open.**
+
+**Where** — `docker/Dockerfile`, `docker/entrypoint.sh`.
+
+**What happens** — no `USER` is set, so the node, and any shell the fleet app
+opens, run as root inside the container. That is not root on the host under
+Docker's defaults, but it is one kernel bug or one careless mount (the Docker
+socket, which the fleet app can use) away from it, where an unprivileged user
+would also need a privilege escalation. A host install already runs as its own
+account (`install.sh`).
+
+**Why it is not one line** — three things a deployment relies on assume root:
+the `/data` volume of every existing node is owned by root; the documented key
+mount is `/root/.ssh`, and a key kept `0600` by the host's user cannot be read
+by another account in the container; and the fleet app's Docker management talks to a
+mounted socket owned by the host's `docker` group. Dropping privileges in the
+entrypoint (take ownership of `/data`, then `setpriv` to an `nmesh` account
+with the socket's group) has to move all three without breaking a node that
+updates. Trivy's rule DS-0002 is set aside in `.trivyignore` until it does.
+
+## 117 — high — Fleet never recognised a Portainer stack, and updating one through Portainer erased its environment
 
 > **Status — fixed.** Tests: `tests/test_fleet_stacks.py::TestFindingStacks`
 > (`test_portainer_is_known_by_the_directory_it_deploys_from`),
@@ -4209,7 +4391,7 @@ the Engine (each image pulled, each container whose image moved recreated with
 its own settings), never through compose on a copy of Portainer's directory —
 see `gotchas.md`, "Docker: who owns a stack".
 
-## 111 — medium — A stack update was reported failed after 25 seconds while it went on running
+## 118 — medium — A stack update was reported failed after 25 seconds while it went on running
 
 > **Status — fixed.** Tests: `tests/test_fleet.py::TestDockerPlane`
 > (`test_which_operations_are_slow`, `test_a_long_update_leaves_room_to_read`).
@@ -4230,7 +4412,7 @@ the node replies. The far side counts slow operations apart
 (`MAX_DOCKER_SLOW = 2`) within `MAX_DOCKER_CALLS = 4`, and one stack is changed
 by one act at a time.
 
-## 112 — low — The Docker and Logs panels did not load when opened
+## 119 — low — The Docker and Logs panels did not load when opened
 
 > **Status — fixed.** No unit test: the page script has no harness; checked in a
 > browser against a live node.
@@ -4245,7 +4427,7 @@ action had left, or nothing until *Refresh* was pressed.
 
 **Fixed** — `ROUTER.start()` with no argument.
 
-## 113 — low — A Portainer token could be configured over plain HTTP to any host, and compose was assumed from a `docker` binary
+## 120 — low — A Portainer token could be configured over plain HTTP to any host, and compose was assumed from a `docker` binary
 
 > **Status — fixed.** Tests: `tests/test_fleet_docker.py::TestPortainerConfiguration`
 > (`test_a_token_travels_in_the_clear_only_to_this_machine`),

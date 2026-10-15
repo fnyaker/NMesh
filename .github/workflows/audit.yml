@@ -29,25 +29,51 @@ jobs:
           inputs: docker/requirements.lock
           require-hashes: true
 
+  # liboqs is C compiled from source (scripts/liboqs.lock): no package index
+  # lists it, so nothing above sees it. Its advisories are on its own
+  # repository; one that names the locked version fails, unless
+  # scripts/liboqs.accepted says why it cannot reach a node.
+  liboqs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Advisories against the locked liboqs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m tests.tools.liboqs_advisories
+
   # The image already published: a fix released this week for a package in it
-  # is a reason to rebuild, and nothing in the tree says so.
+  # is a reason to rebuild, and nothing in the tree says so. Scanned once it is
+  # proven to be the one ci.yml built, by digest, and never with the socket.
   published-image:
     # Not on a pull request: no change in one can fix an image already out.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: read
+      attestations: read
     steps:
-      - name: Image name (lowercased)
-        id: img
-        run: echo "app=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pull it and check its provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .github/scripts/pull-verified.sh "ghcr.io/${GITHUB_REPOSITORY,,}:latest" ci.yml > "$RUNNER_TEMP/app.ref"
       - name: Scan it
         run: |
-          docker pull '${{ steps.img.outputs.app }}:latest'
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+          APP="$(cat "$RUNNER_TEMP/app.ref")"
+          docker run --rm \
             aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
-            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
-            --exit-code 1 --no-progress '${{ steps.img.outputs.app }}:latest'
+            image --image-src remote --scanners vuln,secret \
+            --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 --no-progress "$APP"
 
   # The console as a browser and an attacker meet it, scanned by OWASP ZAP
   # against a throwaway node: the public pages first, then every API route the
@@ -61,25 +87,27 @@ jobs:
     permissions:
       contents: read
       packages: read
+      attestations: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Image names (lowercased)
-        id: img
+      - name: The published image, proven, and a base to run the tools in
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          repo=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
-          echo "app=ghcr.io/$repo" >> "$GITHUB_OUTPUT"
-          echo "base=ghcr.io/$repo-base" >> "$GITHUB_OUTPUT"
+          .github/scripts/pull-verified.sh "ghcr.io/${GITHUB_REPOSITORY,,}:latest" ci.yml > "$RUNNER_TEMP/app.ref"
+          .github/scripts/provide-base.sh "ghcr.io/${GITHUB_REPOSITORY,,}-base:latest" > "$RUNNER_TEMP/base.ref"
       - name: A node to scan
         run: |
+          APP="$(cat "$RUNNER_TEMP/app.ref")"
           docker network create scan
           password="$(head -c 18 /dev/urandom | base64 | tr -d '/+=')"
           echo "::add-mask::$password"
           echo "CONSOLE_PASSWORD=$password" >> "$GITHUB_ENV"
           docker run -d --name target --network scan \
             -e NMESH_CONSOLE_PASSWORD="$password" -e NMESH_FLEET=1 \
-            '${{ steps.img.outputs.app }}:latest'
+            "$APP"
           for _ in $(seq 1 60); do
             docker logs target 2>&1 | grep -q "Web console" && exit 0
             sleep 1
@@ -87,8 +115,9 @@ jobs:
           docker logs target; exit 1
       - name: Describe its API
         run: |
+          BASE="$(cat "$RUNNER_TEMP/base.ref")"
           mkdir -p zap && chmod 777 zap
-          docker run --rm -v "$PWD:/app" -w /app '${{ steps.img.outputs.base }}:latest' \
+          docker run --rm -v "$PWD:/app" -w /app "$BASE" \
             python -m tests.zap.console_openapi https://target:8787 > zap/openapi.json
       - name: Scan the public pages
         run: |
@@ -97,8 +126,9 @@ jobs:
             zap-baseline.py -t https://target:8787/ -I -J baseline.json
       - name: Scan the API, signed in
         run: |
+          BASE="$(cat "$RUNNER_TEMP/base.ref")"
           token="$(docker run --rm --network scan -e P="$CONSOLE_PASSWORD" \
-            '${{ steps.img.outputs.base }}:latest' python -c \
+            "$BASE" python -c \
             'import json,os,ssl,urllib.request as u; r=u.Request("https://target:8787/api/login", json.dumps({"password":os.environ["P"]}).encode(), {"Content-Type":"application/json"}); print(json.load(u.urlopen(r, context=ssl._create_unverified_context()))["token"])' 2>/dev/null)"
           echo "::add-mask::$token"
           docker run --rm --network scan -v "$PWD/zap:/zap/wrk:rw" \
