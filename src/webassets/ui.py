@@ -1038,6 +1038,20 @@ const ICONS = {
   arrowDown:  '<path d="M12 5v14M6 13l6 6 6-6"/>',
   arrowLeft:  '<path d="M19 12H5M11 6l-6 6 6 6"/>',
   arrowRight: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  plus:       '<path d="M12 5v14M5 12h14"/>',
+  search:     '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
+  star:       '<path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.8-5.2 2.8 1-5.8-4.3-4.1 5.9-.9Z"/>',
+  share:      '<circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="6" r="2.6"/><circle cx="18" cy="18" r="2.6"/><path d="m8.3 10.8 7.4-3.6M8.3 13.2l7.4 3.6"/>',
+  download:   '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
+  upload:     '<path d="M12 16V5M7 9l5-5 5 5M5 20h14"/>',
+  book:       '<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v16H6.5A1.5 1.5 0 0 0 5 20.5ZM5 20.5A1.5 1.5 0 0 0 6.5 22H19v-3"/>',
+  userAdd:    '<circle cx="10" cy="8" r="3.6"/><path d="M3.5 20a6.5 6.5 0 0 1 12-3.4M18 13v6M15 16h6"/>',
+  users:      '<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5a6 6 0 0 1 12 0M16 5.5a3.2 3.2 0 0 1 0 6M18 14.4a6 6 0 0 1 3 5.1"/>',
+  lock:       '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/>',
+  mic:        '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3"/>',
+  play:       '<path d="M7 4.5v15l12-7.5Z"/>',
+  pause:      '<path d="M8 5v14M16 5v14"/>',
+  stop:       '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
 };
 // `title` is what a screen reader announces; without one the icon is decorative
 // and hidden, because a button beside it already carries the label.
@@ -1122,7 +1136,7 @@ const SESSION = {
 // may reach it, so `CHANNEL` needs no list at all (`src/control/plane.py`).
 // These are the routes that have not moved onto the plane yet.
 const ALWAYS_HERE = ["/api/remote/", "/api/login", "/api/logout", "/api/session"];
-const NEEDS_GRANT = [["/api/chat/", "apps"], ["/api/fleet/", "full"]];
+const NEEDS_GRANT = [["/api/chat/", "apps"], ["/api/contacts/", "apps"], ["/api/fleet/", "full"]];
 const local = (path) => ALWAYS_HERE.some((prefix) => path.startsWith(prefix)) ||
   NEEDS_GRANT.some(([prefix, grant]) => path.startsWith(prefix) &&
                                         !CONTEXT.caps.includes(grant));
@@ -1290,8 +1304,11 @@ const CONTEXT = {
     // The note is only true while the grant the page needs is missing.
     const note = $("ctx-note");
     const needs = document.body.dataset.ctxNeeds || "";
-    if(note) note.textContent = needs && this.caps.includes(needs)
-      ? "" : (document.body.dataset.ctxLocal || "");
+    // The sentence is a catalogue key where the page names one, so a page in
+    // another language does not carry the English one in its markup.
+    const said = document.body.dataset.ctxLocalKey
+      ? t(document.body.dataset.ctxLocalKey) : (document.body.dataset.ctxLocal || "");
+    if(note) note.textContent = needs && this.caps.includes(needs) ? "" : said;
     document.body.dataset.appName = this.remote
       ? "NMesh — " + (this.label || shortId(this.node))
       : (document.body.dataset.appHome || document.body.dataset.appName || "NMesh");

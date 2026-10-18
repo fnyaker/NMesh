@@ -3344,13 +3344,15 @@ class ConsoleProxyTimeout(ConsoleProxyError):
 # the console's own surface and already behind its session — except three
 # families, each opened by a grant of its own and by nothing less:
 #
-#   /api/chat/   — someone else's conversations are not part of managing their
-#                  node: `apps` is the grant that says they are.
+#   /api/chat/ and /api/contacts/
+#                — someone else's conversations, and the people they know, are
+#                  not part of managing their node: `apps` is the grant that
+#                  says they are.
 #   /api/fleet/  — a managed node is not a jump host. Without `full`, one grant
 #                  would chain into every node *that* node manages.
 #   /api/remote/ — the proxy driving the proxy, which is `full`'s too: the
 #                  operator reaching on through this node.
-_NEEDS_APPS = ("/api/chat/",)
+_NEEDS_APPS = ("/api/chat/", "/api/contacts/")
 _NEEDS_FULL = ("/api/fleet/", "/api/remote/")
 
 

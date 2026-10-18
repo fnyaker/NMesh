@@ -53,7 +53,7 @@ from .control.modules.settings import write_settings
 from .webassets import (NODE_HTML, NODE_JS, NODE_CSS,
                         PKG_HTML, PKG_JS, PKG_CSS,
                         INDEX_HTML, APP_JS, STYLE_CSS, CHAT_HTML, CHAT_JS,
-                        CHAT_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS,
+                        CHAT_CSS, CONTACTS_HTML, CONTACTS_JS, CONTACTS_CSS, FLEET_HTML, FLEET_JS, FLEET_CSS,
                         TERM_HTML, TERM_JS, TERM_CSS)
 from .webassets.ui import FAVICON_SVG, THEME_JS
 from .apps.fleet import (console_path_refusal as fleet_console_refusal,
@@ -124,6 +124,7 @@ def _safe_filename(name) -> str:
 
 _MAX_BODY = 64 * 1024
 _MAX_APP_BODY = 4 * 1024 * 1024   # larger cap for app publish uploads
+_MAX_CONTACTS_IMPORT = 2 * 1024 * 1024   # a vCard file pasted into the contacts page
 _MAX_CHAT_UPLOAD = 64 * 1024 * 1024   # chat file/avatar uploads (base64)
 _MAX_KEY_UPLOAD = 128 * 1024          # one private key, generously bounded
 # One file pushed to a managed node. `fleet_files.MAX_TRANSFER` (32 MiB) is what
@@ -285,7 +286,7 @@ class _WebSurface:
 
     # Which bundles make up each app's page. The terminal is fleet's: its
     # file browser is the `shell` right through another door.
-    _BUNDLES = {"/chat": ("CHAT_JS",), "/fleet": ("FLEET_JS", "TERM_JS")}
+    _BUNDLES = {"/chat": ("CHAT_JS",), "/contacts": ("CONTACTS_JS",), "/fleet": ("FLEET_JS", "TERM_JS")}
 
     def __init__(self, console) -> None:
         self._console = console
@@ -657,6 +658,11 @@ class WebConsole:
         return self._chat_bridge
 
     @property
+    def _contacts(self):
+        """The live contacts bridge, or None when the app is disabled/absent."""
+        return self._app_host.bridge("contacts") if self._app_host else None
+
+    @property
     def _fleet(self):
         """The live fleet bridge, or None when the app is disabled/absent."""
         return self._app_host.bridge("fleet") if self._app_host else None
@@ -971,6 +977,14 @@ _CHAT_STATIC = {
     "/chat": ("text/html; charset=utf-8", CHAT_HTML),
     "/chat.js": ("application/javascript; charset=utf-8", CHAT_JS),
     "/chat.css": ("text/css; charset=utf-8", CHAT_CSS),
+}
+
+# Contacts sub-page assets, served only when the contacts app is running. Same
+# rule as chat: the page is public, every /api/contacts/* call needs the session.
+_CONTACTS_STATIC = {
+    "/contacts": ("text/html; charset=utf-8", CONTACTS_HTML),
+    "/contacts.js": ("application/javascript; charset=utf-8", CONTACTS_JS),
+    "/contacts.css": ("text/css; charset=utf-8", CONTACTS_CSS),
 }
 
 # Fleet sub-page assets, served only when the fleet app is running. Same rule as
@@ -1363,9 +1377,16 @@ def _make_handler(console: WebConsole):
                 ctype, text = _CHAT_STATIC[path]
                 self._send(200, ctype, text.encode("utf-8"))
                 return
+            if console._contacts is not None and path in _CONTACTS_STATIC:
+                ctype, text = _CONTACTS_STATIC[path]
+                self._send(200, ctype, text.encode("utf-8"))
+                return
             if console._fleet is not None and path in _FLEET_STATIC:
                 ctype, text = _FLEET_STATIC[path]
                 self._send(200, ctype, text.encode("utf-8"))
+                return
+            if path.startswith("/api/contacts/"):
+                self._handle_contacts_get(path)
                 return
             if path.startswith("/api/fleet/"):
                 self._handle_fleet_get(path)
@@ -1553,6 +1574,8 @@ def _make_handler(console: WebConsole):
                 cap = _MAX_APP_BODY
             elif path in ("/api/chat/file", "/api/chat/profile"):
                 cap = _MAX_CHAT_UPLOAD
+            elif path == "/api/contacts/import":
+                cap = _MAX_CONTACTS_IMPORT
             elif path == "/api/fleet/upload":
                 cap = _MAX_FILE_UPLOAD
             elif path == "/api/fleet/keys":
@@ -1797,6 +1820,14 @@ def _make_handler(console: WebConsole):
                     self._json(404, {"error": "not found"})
                     return
                 self._handle_chat_post(path, _parse_json(body))
+                return
+            if path.startswith("/api/contacts/"):
+                if console._contacts is None:
+                    self._json(404, {"error": "not found"})
+                    return
+                status, doc = console._contacts.handle(
+                    path[len("/api/contacts/"):], _parse_json(body) or {})
+                self._json(status, doc)
                 return
             if path.startswith("/api/fleet/"):
                 if console._fleet is None:
@@ -2605,6 +2636,34 @@ def _make_handler(console: WebConsole):
 
         # -- built-in apps (install / enable) -----------------------------
 
+        def _handle_contacts_get(self, path: str) -> None:
+            bridge = console._contacts
+            if bridge is None:
+                self._json(404, {"error": "not found"})
+                return
+            if not self._authed():
+                self._json(401, {"error": "unauthorized"})
+                return
+            query = parse_qs(self.path.partition("?")[2])
+            if path == "/api/contacts/state":
+                self._json(200, bridge.snapshot(
+                    (query.get("book") or [""])[0],
+                    have=(query.get("have") or [""])[0],
+                    proto=console_feed.clean_proto((query.get("proto") or [0])[0])))
+            elif path == "/api/contacts/people":
+                self._json(200, bridge.people(
+                    (query.get("q") or [""])[0], wide=(query.get("wide") or ["1"])[0] != "0"))
+            elif path == "/api/contacts/export":
+                got = bridge.export((query.get("book") or [""])[0])
+                if got is None:
+                    self._json(404, {"error": "not found"})
+                    return
+                name, text = got
+                self._send(200, "text/vcard; charset=utf-8", text.encode("utf-8"),
+                           [("Content-Disposition", f'attachment; filename="{name}"')])
+            else:
+                self._json(404, {"error": "not found"})
+
         def _handle_chat_post(self, path: str, data) -> None:
             chat = console._chat
             data = data or {}
@@ -2680,6 +2739,9 @@ def _make_handler(console: WebConsole):
                     self._json(200, {"results": chat.search_pseudo(pseudo)})
                 else:
                     self._json(404, {"error": "not found"})
+            except PermissionError as exc:
+                self._json(403, {"ok": False, "error": "permission",
+                                 "permission": str(exc)[:64]})
             except Exception as exc:
                 self._json(400, {"ok": False, "error": str(exc)[:200]})
 

@@ -115,8 +115,8 @@ class AppsModule:
             if row.get("operator"):
                 return False            # a person's to call, never an app's
             perms = self._context.provided("perms")
-            need = "control.apps" if row.get("changes") else "readstate.apps"
-            return perms is not None and perms.allows(app_hex, need)
+            return perms is not None and perms.allows(
+                app_hex, app_perms.app_call_need(row))
         if carries_apps(origin):
             return True
         # Every other console is at a distance and holds no `apps` grant —
@@ -351,7 +351,7 @@ def endpoint_rows(context) -> list:
                     "params": row.get("params", []), "changes": row.get("changes", False),
                     "reach": "remote" if row.get("remote") else "local",
                     "background": False,
-                    "permission": "control.apps" if row.get("changes") else "readstate.apps",
+                    "permission": app_perms.app_call_need(row),
                     "apps": True, "tool": "app_" + tool_name(op), "modded_by": "",
                 })
     web = context.provided("web")

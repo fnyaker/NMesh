@@ -4,7 +4,8 @@ NMesh's reference messaging app, built on the data connector. A real end-to-end
 messenger: **profiles** (name, bio, avatar), 1:1 **conversations** and
 **groups**, **replies**, **editing**, **deletion**, **emoji reactions**,
 **delivered/read receipts**, a **typing indicator**, **file and media sharing**
-(chunked + verified, images previewed), **finding people by name** (the node's
+(chunked + verified, images previewed), **voice messages** (Opus), **finding
+people by name** (the node's
 signed pseudos, whole or partial), plus the **real-time stream** of timestamped
 frames —
 the primitive a voice/video call would use. Everything stays **E2E encrypted**;
@@ -144,10 +145,29 @@ sender; a peer's `EDIT`/`DELETE` only ever alters its own messages. A profile
 (bio/avatar) is **learned** from the peer; the **name is not in it** — that
 comes from the node's signed claim, and the node_id stays the real identity.
 
+## Voice messages
+
+The microphone button (shown when the text box is empty and the browser can
+record Opus) records with `MediaRecorder` as **Opus** in WebM or Ogg
+(`audio/webm;codecs=opus`, `audio/ogg;codecs=opus`, 32 kbit/s, five minutes at
+most) and sends it as an ordinary file transfer — chunked, verified, rate
+limited like any other. There is no new wire type: a voice message is a file
+whose name says so, `voice-<milliseconds>.webm|ogg`. The name is the sender's,
+so the receiving node decides (`chat_web.voice_length`): the pattern must match
+exactly, the length is 1 ms to 10 minutes and the file 1 byte to 8 MiB, the size
+must be a plain integer — anything else is shown as the plain file it is, and a
+non-Opus file with a borrowed name is the browser's to refuse. The page fetches
+the bytes through its authenticated `GET /api/chat/file` (so it follows the node
+being driven), plays them from a blob URL (at most 24 held) and shows a play
+button, a seek bar and the length. A browser that cannot record Opus simply has
+no microphone button, and still plays what it receives.
+
 ## The screen
 
 Three panes on one grid: the **conversation list**, the **thread**, and the node
-card of whoever you are talking to. Which of them is on screen is a single
+card of whoever you are talking to. The list has two tabs: **Chats** and
+**Contacts** (the mirror above, one tap to start a conversation, a link to the
+Contacts page). Which of them is on screen is a single
 attribute on the shell — `data-view="list" | "conv" | "peer"` — so at any width
 there is exactly one answer to "what am I looking at", and the panes cannot
 contradict each other.
@@ -157,6 +177,12 @@ takes the conversation's place, because everything in it is *about* the
 conversation. Below 860 the screen shows one pane at a time and the list is the
 navigation — no drawer and no hamburger, the same stance the console takes with
 its tab bar.
+
+A touch screen (`pointer:coarse`) gets larger targets, decided by the pointer
+and not by a user-agent string; the composer swaps its microphone for the send
+button as soon as there is text, and shows only the recorder (cancel, time,
+send) while recording, so a tap cannot send half a sentence typed beside it.
+Every sentence is read from the catalogue — `Docs/I18n/guide`.
 
 Everything is prefixed `ch-`. The design system (`src/webassets/ui.py`) owns the
 generic names, and this page used to redefine `.msg` — quietly changing a shared
@@ -223,9 +249,23 @@ real data.
   writes it through the console (`POST /api/pseudo`), the node signs a claim for
   it, and chat mirrors it back with the rest. Chat's own profile is the **bio
   and avatar**, which it does announce to contacts (`PROFILE`).
-- **Contacts**: `add_contact` / `remove_contact` (a node id — no name is passed,
-  because what a node is called is its own to say). Adding a contact announces
-  my profile to them.
+- **Contacts**: chat has **no address book of its own**. The people it shows are
+  the [contacts app's](contacts), read and written through the permission a
+  person gave chat (`contacts.read` / `contacts.write`, `Docs/AppPermissions/guide`).
+  `ChatBridge.contacts_access()` is one of `write`, `read`, `denied` or
+  `unavailable`, and the page is built for each: *denied* shows a permission card
+  (*Allow*, *Read only*, *Not now*) and the contacts chat already had stay on
+  screen as they were — a node that has not answered loses nothing; the first
+  time chat may **write**, those contacts move into the default book (once,
+  `migrated`); afterwards the list chat renders from is a **mirror** of the books
+  (`ChatState.replace_contacts`), carrying the name its owner gave each node
+  (`label`), refreshed on every poll. `add_contact(id)` saves the node in the
+  books (named from the directory) and announces my profile to them; refused it
+  raises `PermissionError(permission)`, which the console returns as `403
+  {"error":"permission","permission":…}` so the page asks the question instead of
+  failing. Starting a chat does **not** save the person — a conversation and an
+  address book are two decisions — and any conversation shows **Add to
+  contacts** while the node is in no book.
 - **Groups**: `create_group(name, members)` mints a `group_id`, adds me to the
   roster and sends a `GROUP_INVITE` to each member. `send_group_text` **fans**
   the message out to every member (members never relay → no loop, no
@@ -237,7 +277,8 @@ real data.
   unsigned pseudo in a peer-to-peer profile is a peer telling us what to call
   it, which is exactly how impersonation works. That field is gone, and so are
   the old `DIR_QUERY` / `DIR_REPLY` messages it fed.
-- **Search by name** — `search_pseudo(query, wide=…)`, which is the node's own
+- **Search by name** — `search_pseudo(query, wide=…)`: saved contacts first
+  (found by the name their owner gave them, `match = -1`), then the node's own
   ranked search (exact, then prefix, then a word inside the name, then anywhere;
   case- and accent-insensitive), merged with `find_by_pseudo` over the contacts
   already on this screen. `wide=True` also asks the network for the exact name,
@@ -245,7 +286,9 @@ real data.
   [`Docs/Pseudos/guide`](../Pseudos/guide).
 
 All of this is drivable from the console's `/chat` sub-page (identity + copying
-the id, contacts, groups, search). See `Docs/WebConsole/guide`.
+the id, contacts, groups, search). See `Docs/WebConsole/guide`. `/chat#c/<node id>`
+opens (or starts) the conversation with that node; the Contacts page and the
+node card link to it.
 
 ## Audio calls (`src/apps/call.py`)
 

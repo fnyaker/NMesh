@@ -62,6 +62,17 @@ and markup that carries its words as data, translated in one pass at load:
 <input data-i18n-attr="placeholder:common.search;title:common.search">
 ```
 
+A page's `<body>` can name a catalogue key for the note the context bar shows
+when the node being driven has not granted the page its apps
+(`data-ctx-local-key="chat.ctx_local"`); `data-ctx-local` stays for a sentence
+written in place.
+
+`tests/test_i18n.py` also reads the **chat and contacts pages** for every key
+they ask for (`data-i18n`, `data-i18n-attr`, `t("…")`, both arms of
+`t(flag ? "a" : "b")`) and requires each in all seven languages, and every
+refusal code the contacts bridge can send (`contacts.err.<why>`). A page that
+builds a key from a code lists the codes there.
+
 A key nobody defined shows as itself — ugly on purpose. `applyI18n(root)`
 translates markup a page built later.
 

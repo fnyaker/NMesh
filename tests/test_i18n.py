@@ -391,3 +391,42 @@ class TestTheConsoleSpeaks:
     async def test_with_neither_it_is_english(self, tmp_path):
         _, _, text = await self._script(tmp_path, "", "ja")
         assert 'NMESH_LANG="en"' in text
+
+
+class TestEveryKeyAPageAsksForIsDefined:
+    """`t("x.y")` shows `x.y` itself when nobody defined it — on purpose, so a gap
+    is visible. It should be visible here, in a test, and not to a person."""
+
+    @staticmethod
+    def _asked(*sources):
+        keys = set()
+        for text in sources:
+            keys |= set(re.findall(r'data-i18n="([^"]+)"', text))
+            for pairs in re.findall(r'data-i18n-attr="([^"]+)"', text):
+                keys |= {pair.split(":", 1)[1] for pair in pairs.split(";")}
+            keys |= set(re.findall(r'\bt\("([a-z][a-z0-9_.]*[a-z0-9_])"', text))
+            # `t(flag ? "a.b" : "a.c")`: both arms are asked for.
+            for arms in re.findall(r'\bt\(\w+(?: \|\| \w+)? \? "([^"]+)" : "([^"]+)"', text):
+                keys |= set(arms)
+        return keys
+
+    @pytest.mark.parametrize("language", sorted(REQUIRED_FORMS))
+    def test_chat_and_contacts_say_everything_in_every_language(self, language):
+        from src.webassets import chat, contacts
+        asked = self._asked(chat.CHAT_HTML, chat.CHAT_PAGE_JS,
+                            contacts.CONTACTS_HTML, contacts.CONTACTS_PAGE_JS)
+        # What a page builds from a code (`contacts.err.<why>`, `.color.<name>`)
+        # is asked for by prefix; each code the node can send is listed here.
+        for why in ("no_book", "read_only", "no_contact", "empty", "full", "bad_node",
+                    "not_owner", "self", "gone", "permission"):
+            asked.add("contacts.err." + why)
+        for color in ("blue", "green", "teal", "amber", "red", "purple", "pink", "gray"):
+            asked.add("contacts.color." + color)
+        defined = _raw(language)
+        missing = sorted(key for key in asked if key not in defined)
+        assert not missing, missing
+
+    def test_the_node_cannot_send_a_refusal_the_page_has_no_words_for(self):
+        from src.apps import contacts_web
+        for why in contacts_web._CHANGES:
+            assert "contacts.err." + why in _raw("en"), why

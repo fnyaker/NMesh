@@ -1,20 +1,25 @@
 """
 Chat sub-page (/chat).
 
-A full chat client — identity, contact directory, 1:1 and group conversations,
-files, replies and reactions — served by the console and backed by the
-ChatBridge. Same session, same strict CSP: no inline script, no external
-resource.
+A full chat client — identity, 1:1 and group conversations, the people chat may
+know, files, voice messages, replies and reactions — served by the console and
+backed by the ChatBridge. Same session, same strict CSP: no inline script, no
+external resource. Every sentence is read from the catalogue (``t()`` and
+``data-i18n``), so the page speaks the language the person chose.
 
 Three panes, one grid: the conversation list, the thread, and the node card of
 whoever you are talking to. Which of them is on screen is a single attribute
 (``data-view``) rather than a set of classes that can contradict each other, so
-"what am I looking at" has exactly one answer at any width.
+"what am I looking at" has exactly one answer at any width. The stylesheet picks
+one pane (a phone) or the columns (a desktop) from the width, and the pointer
+decides how large a target is: the page never asks which device it is on.
+
+Chat keeps no address book of its own. The people in the second tab are the
+contacts app's, read through the permission the person gave chat.
 
 Everything here is prefixed ``ch-``. The design system in :mod:`.ui` owns the
-generic names, and a page that redefines one of them (this page used to redefine
-``.msg``) silently changes a component for itself alone — which is the drift the
-split exists to prevent.
+generic names, and a page that redefines one of them silently changes a
+component for itself alone — which is the drift the split exists to prevent.
 """
 
 from . import ui
@@ -34,64 +39,81 @@ CHAT_HTML = """<!doctype html>
 </head>
 <body data-app-name="NMesh Chat"
       data-ctx-needs="apps"
-      data-ctx-local="Chat runs on this node — that one has not granted this one its apps.">
+      data-ctx-local="" data-ctx-local-key="chat.ctx_local">
 
 <div id="login" class="gate hidden">
   <form id="login-form">
     <div class="mark" aria-hidden="true">NM</div>
-    <div><p class="eyebrow">Chat</p><h1>Sign in</h1></div>
-    <p class="muted small">Chat uses the console password of this node. Messages are end-to-end
-      encrypted; relays carry them without being able to read them.</p>
-    <label class="field"><span>Console password</span>
+    <div><p class="eyebrow" data-i18n="chat.title"></p><h1 data-i18n="login.title"></h1></div>
+    <p class="muted small" data-i18n="chat.login.hint"></p>
+    <label class="field"><span data-i18n="login.password"></span>
       <input id="password" type="password" autocomplete="current-password" autofocus></label>
-    <button type="submit" class="primary wide">Enter</button>
+    <button type="submit" class="primary wide" data-i18n="login.enter"></button>
     <p id="err" class="msg error" role="alert"></p>
   </form>
 </div>
 
-<a class="skip" href="#main">Skip to the conversation</a>
+<a class="skip" href="#main" data-i18n="chat.skip"></a>
 """ + ui.CTX_BAR + """
 <div id="app" class="ch hidden" data-view="list">
 
-  <!-- ── the conversation list: this page's navigation ──────────────────── -->
-  <aside class="ch-side" aria-label="Conversations">
+  <!-- the conversation list: this page's navigation -->
+  <aside class="ch-side" data-i18n-attr="aria-label:chat.side">
     <header class="ch-side-head">
-      <button id="me-btn" class="ch-me" title="Your profile">
+      <button id="me-btn" class="ch-me" data-i18n-attr="title:chat.profile">
         <span id="me-av-slot" class="ch-av-slot"></span>
         <span class="ch-me-txt">
           <span id="me-name" class="ch-me-name truncate">…</span>
           <span id="me-sub" class="mono ch-me-sub truncate"></span>
         </span>
       </button>
-      <button id="theme-toggle" class="icon" aria-label="Switch theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
-      <button id="new-btn" class="icon" title="New chat" aria-label="New chat"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9M16.4 3.6a2.1 2.1 0 0 1 3 3L7.5 18.5 3.5 19.5l1-4Z"/></svg></button>
+      <button id="theme-toggle" class="icon"></button>
+      <button id="new-btn" class="icon" data-i18n-attr="title:chat.new;aria-label:chat.new"></button>
     </header>
 
     <div class="ch-side-search">
-      <label class="search"><span class="sr-only">Search chats and people</span>
-        <input id="side-search" type="search" placeholder="Search chats and people…"
-               autocomplete="off" spellcheck="false"></label>
+      <label class="search"><span class="sr-only" data-i18n="chat.search.label"></span>
+        <input id="side-search" type="search" autocomplete="off" spellcheck="false"
+               data-i18n-attr="placeholder:chat.search.placeholder"></label>
       <div id="side-results" class="ch-drop" hidden></div>
     </div>
 
-    <div id="chat-list" class="ch-list" role="list"></div>
+    <div class="ch-tabs segmented" role="tablist">
+      <button id="tab-chats" role="tab" aria-selected="true" data-i18n="chat.tab.chats"></button>
+      <button id="tab-people" role="tab" aria-selected="false" data-i18n="chat.tab.people"></button>
+    </div>
 
-    <div class="ch-side-foot"><a class="btn ghost wide" href="/">Back to console</a></div>
+    <div id="perm-card" class="ch-perm" hidden>
+      <div class="ch-perm-t" data-i18n="chat.perm.title"></div>
+      <div class="muted small" data-i18n="chat.perm.body"></div>
+      <div class="ch-perm-b">
+        <button id="perm-allow" class="primary" data-i18n="chat.perm.allow"></button>
+        <button id="perm-read" data-i18n="chat.perm.read"></button>
+        <button id="perm-no" class="ghost" data-i18n="chat.perm.no"></button>
+      </div>
+    </div>
+
+    <div id="chat-list" class="ch-list" role="list"></div>
+    <div id="people-list" class="ch-list" role="list" hidden></div>
+
+    <div class="ch-side-foot">
+      <a class="btn ghost wide" href="/contacts" data-i18n="chat.contacts.manage"></a>
+      <a class="btn ghost wide" href="/" data-i18n="common.back_to_console"></a>
+    </div>
   </aside>
 
-  <!-- ── the thread ─────────────────────────────────────────────────────── -->
+  <!-- the thread -->
   <main id="main" class="ch-main">
     <div id="empty" class="ch-blank">
       <div class="mark" aria-hidden="true">NM</div>
-      <div class="t">No conversation open</div>
-      <div class="h">Pick someone on the left, or start a new chat. Everything you send is
-        end-to-end encrypted between the two nodes.</div>
-      <button id="empty-new" class="primary">Start a chat</button>
+      <div class="t" data-i18n="chat.blank.title"></div>
+      <div class="h" data-i18n="chat.blank.hint"></div>
+      <button id="empty-new" class="primary" data-i18n="chat.blank.start"></button>
     </div>
 
     <section id="conv" class="ch-conv" hidden>
       <header class="ch-head">
-        <button id="back-btn" class="icon ch-back" title="Back to the list" aria-label="Back to the list"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18 9 12l6-6"/></svg></button>
+        <button id="back-btn" class="icon ch-back" data-i18n-attr="title:chat.back;aria-label:chat.back"></button>
         <button id="info-btn" class="ch-peer">
           <span id="conv-av-slot" class="ch-av-slot"></span>
           <span class="ch-peer-txt">
@@ -99,13 +121,15 @@ CHAT_HTML = """<!doctype html>
             <span id="conv-sub" class="tiny muted truncate"></span>
           </span>
         </button>
-        <button id="del-conv" class="icon ch-head-act" title="Delete conversation"
-                aria-label="Delete conversation"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M18.5 6l-1 14h-11l-1-14M10 10.5v6M14 10.5v6"/></svg></button>
+        <button id="save-contact" class="icon ch-head-act" hidden
+                data-i18n-attr="title:chat.contacts.add;aria-label:chat.contacts.add"></button>
+        <button id="del-conv" class="icon ch-head-act"
+                data-i18n-attr="title:chat.delete_conv;aria-label:chat.delete_conv"></button>
       </header>
 
       <div class="ch-logwrap">
-        <div id="log" class="ch-log" tabindex="0" role="log" aria-label="Messages"></div>
-        <button id="jump" class="ch-jump" hidden>New messages ↓</button>
+        <div id="log" class="ch-log" tabindex="0" role="log" data-i18n-attr="aria-label:chat.messages"></div>
+        <button id="jump" class="ch-jump" hidden data-i18n="chat.jump"></button>
       </div>
 
       <div id="reply-bar" class="ch-reply" hidden>
@@ -114,30 +138,43 @@ CHAT_HTML = """<!doctype html>
           <span id="reply-who" class="ch-reply-who"></span>
           <span id="reply-text" class="muted small truncate"></span>
         </span>
-        <button id="reply-cancel" class="icon sm" aria-label="Cancel reply"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+        <button id="reply-cancel" class="icon sm" data-i18n-attr="aria-label:chat.reply_cancel"></button>
       </div>
 
       <form id="send-form" class="ch-composer">
-        <button type="button" id="attach-btn" class="icon" title="Attach a file"
-                aria-label="Attach a file"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.6 12.4 20a5.5 5.5 0 1 1-7.8-7.8l8.6-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.5a1.8 1.8 0 1 1-2.6-2.6l7.9-7.8"/></svg></button>
+        <button type="button" id="attach-btn" class="icon"
+                data-i18n-attr="title:chat.attach;aria-label:chat.attach"></button>
         <input id="file-input" type="file" hidden>
         <div class="ch-input">
-          <textarea id="msg" rows="1" placeholder="Message" autocomplete="off"
-                    aria-label="Message"></textarea>
+          <textarea id="msg" rows="1" autocomplete="off"
+                    data-i18n-attr="placeholder:chat.message;aria-label:chat.message"></textarea>
         </div>
-        <button type="button" id="emoji-btn" class="icon" title="Emoji" aria-label="Emoji"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9 10h.01M15 10h.01M8.5 14.5a4.5 4.5 0 0 0 7 0"/></svg></button>
-        <button type="submit" id="send-btn" class="ch-send" title="Send" aria-label="Send"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4Z"/></svg></button>
+        <button type="button" id="emoji-btn" class="icon"
+                data-i18n-attr="title:chat.emoji;aria-label:chat.emoji"></button>
+        <button type="submit" id="send-btn" class="ch-send" hidden
+                data-i18n-attr="title:common.send;aria-label:common.send"></button>
+        <button type="button" id="mic-btn" class="ch-send"
+                data-i18n-attr="title:chat.voice.record;aria-label:chat.voice.record"></button>
+        <div class="ch-rec" aria-live="polite">
+          <span class="ch-rec-dot" aria-hidden="true"></span>
+          <span id="rec-time" class="mono">0:00</span>
+          <span class="grow muted small" data-i18n="chat.voice.recording"></span>
+          <button type="button" id="rec-cancel" class="icon"
+                  data-i18n-attr="title:chat.voice.cancel;aria-label:chat.voice.cancel"></button>
+          <button type="button" id="rec-send" class="ch-send"
+                  data-i18n-attr="title:common.send;aria-label:common.send"></button>
+        </div>
       </form>
     </section>
   </main>
 
   <!-- Who you are talking to, as the console describes them: the same view the
        node page serves, mounted here rather than framed. -->
-  <aside id="peer-panel" class="ch-aside" hidden aria-label="Node details">
+  <aside id="peer-panel" class="ch-aside" hidden data-i18n-attr="aria-label:chat.node">
     <header class="ch-aside-head">
-      <button id="peer-back" class="icon ch-back" title="Back" aria-label="Back"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18 9 12l6-6"/></svg></button>
-      <h2>Node</h2><span class="grow"></span>
-      <button id="peer-panel-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      <button id="peer-back" class="icon ch-back" data-i18n-attr="title:chat.back;aria-label:chat.back"></button>
+      <h2 data-i18n="chat.node"></h2><span class="grow"></span>
+      <button id="peer-panel-close" class="icon" data-i18n-attr="aria-label:common.close"></button>
     </header>
     <div id="peer-view" class="ch-aside-body"></div>
   </aside>
@@ -149,63 +186,60 @@ CHAT_HTML = """<!doctype html>
 
 <dialog id="settings" aria-labelledby="settings-title">
   <div class="sheet">
-    <header class="sheet-head"><h2 id="settings-title">Your profile</h2>
-      <button class="icon" data-close="settings" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
+    <header class="sheet-head"><h2 id="settings-title" data-i18n="chat.profile"></h2>
+      <button class="icon" data-close="settings" data-i18n-attr="aria-label:common.close"></button></header>
     <div class="sheet-body">
       <div class="ch-prof">
         <span id="set-av" class="ch-av big"></span>
         <div class="btn-row">
-          <label class="btn">Change photo<input id="av-input" type="file" accept="image/*" hidden></label>
-          <button id="av-clear" class="danger">Remove</button>
+          <label class="btn"><span data-i18n="chat.profile.photo"></span><input id="av-input" type="file" accept="image/*" hidden></label>
+          <button id="av-clear" class="danger" data-i18n="common.remove"></button>
         </div>
       </div>
-      <label class="field"><span>Display name</span>
-        <input id="set-name" maxlength="50" placeholder="Your name">
-        <small class="hint">This is your node's name, shown everywhere it appears —
-          not just in chat.</small></label>
-      <label class="field"><span>Bio</span>
-        <textarea id="set-bio" maxlength="1024" rows="3" placeholder="A few words about you"></textarea></label>
-      <div class="field"><span>Your node id</span>
+      <label class="field"><span data-i18n="chat.profile.name"></span>
+        <input id="set-name" maxlength="50" data-i18n-attr="placeholder:chat.profile.name_ph">
+        <small class="hint" data-i18n="chat.profile.name_hint"></small></label>
+      <label class="field"><span data-i18n="chat.profile.bio"></span>
+        <textarea id="set-bio" maxlength="1024" rows="3" data-i18n-attr="placeholder:chat.profile.bio_ph"></textarea></label>
+      <div class="field"><span data-i18n="chat.profile.id"></span>
         <div class="copyable"><code id="set-id" class="mono"></code></div>
-        <span class="hint">This is what someone else needs to start a chat with you.</span></div>
+        <span class="hint" data-i18n="chat.profile.id_hint"></span></div>
       <hr>
-      <h3>Preferences</h3>
-      <label class="field" for="set-details"><span>Opening someone&rsquo;s node details</span>
+      <h3 data-i18n="chat.prefs"></h3>
+      <label class="field" for="set-details"><span data-i18n="chat.prefs.details"></span>
         <select id="set-details">
-          <option value="panel">Beside the conversation</option>
-          <option value="window">In a separate window</option>
-          <option value="tab">In a new tab</option>
+          <option value="panel" data-i18n="chat.prefs.panel"></option>
+          <option value="window" data-i18n="chat.prefs.window"></option>
+          <option value="tab" data-i18n="chat.prefs.tab"></option>
         </select>
-        <span class="hint">Tapping the name at the top of a conversation shows what
-          this node knows about that identity — the link, its addresses, and what
-          each of you may do to the other.</span></label>
+        <span class="hint" data-i18n="chat.prefs.details_hint"></span></label>
     </div>
-    <footer class="sheet-foot"><button id="save-prof" class="primary">Save profile</button></footer>
+    <footer class="sheet-foot"><button id="save-prof" class="primary" data-i18n="chat.profile.save"></button></footer>
   </div>
 </dialog>
 
 <dialog id="newchat" aria-labelledby="nc-title">
   <div class="sheet">
-    <header class="sheet-head"><h2 id="nc-title">New chat</h2>
-      <button class="icon" data-close="newchat" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
+    <header class="sheet-head"><h2 id="nc-title" data-i18n="chat.new"></h2>
+      <button class="icon" data-close="newchat" data-i18n-attr="aria-label:common.close"></button></header>
     <div class="sheet-body">
       <div class="segmented" role="tablist">
-        <button id="nc-tab-dm" role="tab" aria-selected="true">Find people</button>
-        <button id="nc-tab-grp" role="tab" aria-selected="false">New group</button>
+        <button id="nc-tab-dm" role="tab" aria-selected="true" data-i18n="chat.nc.people"></button>
+        <button id="nc-tab-grp" role="tab" aria-selected="false" data-i18n="chat.nc.group"></button>
       </div>
       <div id="nc-dm" class="stack">
-        <label class="search"><span class="sr-only">Search by name</span>
-          <input id="nc-search" type="search" placeholder="Search by name…" spellcheck="false"></label>
+        <label class="search"><span class="sr-only" data-i18n="chat.nc.by_name"></span>
+          <input id="nc-search" type="search" spellcheck="false" data-i18n-attr="placeholder:chat.nc.by_name"></label>
         <div id="nc-results" class="ch-results"></div>
-        <div class="field"><span>Or paste a node id</span>
-          <div class="toolbar"><input id="nc-id" class="mono grow" placeholder="40-hex node id" spellcheck="false">
-            <button id="nc-add" class="primary">Start</button></div></div>
+        <div class="field"><span data-i18n="chat.nc.paste"></span>
+          <div class="toolbar"><input id="nc-id" class="mono grow" spellcheck="false" maxlength="40">
+            <button id="nc-add" class="primary" data-i18n="chat.nc.start"></button></div></div>
       </div>
       <div id="nc-grp" class="stack" hidden>
-        <label class="field"><span>Group name</span>
-          <input id="grp-name" maxlength="64" placeholder="Group name"></label>
-        <div class="field"><span>Members</span><div id="grp-members" class="ch-results"></div></div>
-        <button id="grp-create" class="primary">Create group</button>
+        <label class="field"><span data-i18n="chat.nc.group_name"></span>
+          <input id="grp-name" maxlength="64"></label>
+        <div class="field"><span data-i18n="chat.nc.members"></span><div id="grp-members" class="ch-results"></div></div>
+        <button id="grp-create" class="primary" data-i18n="chat.nc.create"></button>
       </div>
     </div>
   </div>
@@ -216,16 +250,16 @@ CHAT_HTML = """<!doctype html>
     <header class="sheet-head"><h2 id="confirm-title"></h2></header>
     <div class="sheet-body"><div id="confirm-body"></div></div>
     <footer class="sheet-foot">
-      <button id="confirm-cancel">Cancel</button>
-      <button id="confirm-ok" class="primary">Confirm</button>
+      <button id="confirm-cancel" data-i18n="common.cancel"></button>
+      <button id="confirm-ok" class="primary" data-i18n="common.confirm"></button>
     </footer>
   </div>
 </dialog>
 
-<dialog id="palette" class="palette" aria-label="Command palette">
+<dialog id="palette" class="palette" data-i18n-attr="aria-label:chat.palette">
   <div class="sheet">
-    <input id="palette-input" type="text" placeholder="Run an action…"
-           autocomplete="off" spellcheck="false" aria-controls="palette-list">
+    <input id="palette-input" type="text" autocomplete="off" spellcheck="false"
+           aria-controls="palette-list" data-i18n-attr="placeholder:chat.palette_ph">
     <div id="palette-list" class="list" role="listbox"></div>
   </div>
 </dialog>
@@ -535,6 +569,39 @@ CHAT_PAGE_CSS = """
 @media (max-width:1024px) and (min-width:861px){
   :root{--page-side-w:270px}
 }
+
+/* ── the side's two lists, the permission card ─────────────────────────── */
+.ch-tabs{margin:0 var(--s-3) var(--s-2)}
+.ch-perm{margin:0 var(--s-3) var(--s-2);padding:var(--s-3);border:1px solid var(--accent-line);
+  border-radius:var(--r-md);background:var(--accent-soft);display:flex;flex-direction:column;gap:var(--s-2)}
+.ch-perm[hidden]{display:none}
+.ch-perm-t{font-weight:650}
+.ch-perm-b{display:flex;flex-wrap:wrap;gap:var(--s-2)}
+.ch-list[hidden]{display:none}
+.ch-side-foot{display:flex;flex-direction:column;gap:var(--s-2)}
+
+/* ── voice ──────────────────────────────────────────────────────────────── */
+.ch-voice{display:flex;align-items:center;gap:var(--s-2);min-width:min(220px,60vw)}
+.ch-vplay{flex:none}
+.ch-vbar{flex:1 1 auto;min-width:0;accent-color:var(--accent)}
+.ch-vtime{flex:none;font-size:var(--fs-xs);color:var(--text-muted)}
+/* While recording the composer shows the recorder and nothing else, so a tap
+   cannot send half a sentence typed beside it. */
+.ch-rec{display:none;flex:1 1 auto;align-items:center;gap:var(--s-2);min-width:0}
+.ch-composer.recording>:not(.ch-rec){display:none}
+.ch-composer.recording>.ch-rec{display:flex}
+.ch-rec-dot{width:10px;height:10px;border-radius:50%;background:var(--danger,#cf222e);flex:none}
+@media (prefers-reduced-motion:no-preference){
+  .ch-rec-dot{animation:ch-pulse 1.2s ease-in-out infinite}
+}
+@keyframes ch-pulse{50%{opacity:.25}}
+
+/* A touch screen gets bigger targets and no hover-only affordance; the
+   decision is the pointer's, not a user-agent string's. */
+@media (pointer:coarse){
+  .ch-row{padding:var(--s-3) var(--s-2)}
+  .ch-head-act,.ch-composer .icon{min-width:44px;min-height:44px}
+}
 """
 
 CHAT_PAGE_JS = r"""
@@ -545,7 +612,10 @@ CHAT_PAGE_JS = r"""
 // keyed — a row is created once, updated in place, and removed when it goes.
 
 let VER = 0, sel = null, timer = null;
-let ST = {me:null, pseudo:"", bio:"", has_avatar:false, contacts:[], known:[], groups:[]};
+let ST = {me:null, pseudo:"", bio:"", has_avatar:false, contacts:[], known:[], groups:[],
+          contacts_access:"unavailable"};
+let PANE = "chats";            // which list the side shows: conversations or contacts
+const OPENED = new Set();      // chats started this session that have no message yet
 let UNREAD = {}, TYPING = {}, replyTo = null, ncSel = {};
 const MSGS = {};                 // conv -> {id -> record}
 const REACTS = ["👍","❤️","😂","😮","😢","🔥","🎉","👏"];
@@ -575,13 +645,13 @@ function findPerson(id){
   return ST.contacts.find((c) => c.id === id) || ST.known.find((c) => c.id === id) || null;
 }
 function personName(id){
-  if(id === ST.me) return ST.pseudo || "You";
-  const r = findPerson(id); return (r && r.pseudo) || shortId(id);
+  if(id === ST.me) return ST.pseudo || t("chat.you");
+  const r = findPerson(id); return (r && (r.label || r.pseudo)) || shortId(id);
 }
 function convIsGroup(conv){ return !!conv && conv.startsWith("g:"); }
 function convName(conv){
   if(convIsGroup(conv)){
-    const g = ST.groups.find((x) => "g:" + x.id === conv); return g ? g.name : "Group";
+    const g = ST.groups.find((x) => "g:" + x.id === conv); return g ? g.name : t("chat.group");
   }
   return personName(conv);
 }
@@ -607,6 +677,7 @@ async function poll(){
   if(!j) return;                 // keep what is on screen: it was true a moment ago
   ST.me = j.me; ST.pseudo = j.pseudo || ""; ST.bio = j.bio || ""; ST.has_avatar = !!j.has_avatar;
   ST.contacts = j.contacts || []; ST.known = j.known || []; ST.groups = j.groups || [];
+  ST.contacts_access = j.contacts_access || "unavailable";
   UNREAD = j.unread || {}; TYPING = j.typing || {};
   let touched = false;
   for(const m of (j.messages || [])){
@@ -614,7 +685,7 @@ async function poll(){
     if(m.conv === sel) touched = true;
   }
   if(typeof j.version === "number") VER = j.version;
-  renderMe(); renderList();
+  renderMe(); renderPane(); renderPermCard();
   if(sel){ renderHead(); if(touched) renderLog(); }
 }
 
@@ -626,9 +697,10 @@ function lastMsg(conv){
 }
 function preview(m){
   if(!m) return "";
-  if(m.deleted) return "deleted message";
-  if(m.kind === "image") return "Photo";
-  if(m.kind === "file") return m.name || "File";
+  if(m.deleted) return t("chat.deleted");
+  if(m.kind === "image") return t("chat.photo");
+  if(m.kind === "voice") return t("chat.voice.message");
+  if(m.kind === "file") return m.name || t("chat.file");
   return m.text || "";
 }
 function clock(t){
@@ -640,11 +712,12 @@ function convList(){
   for(const conv in MSGS){ const m = lastMsg(conv); if(m) out.push({conv, m, t:m.t || 0}); seen.add(conv); }
   for(const g of ST.groups){ const c = "g:" + g.id; if(!seen.has(c)){ out.push({conv:c, m:null, t:0}); seen.add(c); } }
   for(const c of ST.contacts){ if(!seen.has(c.id)){ out.push({conv:c.id, m:null, t:0}); seen.add(c.id); } }
+  for(const c of OPENED){ if(!seen.has(c)){ out.push({conv:c, m:null, t:0}); seen.add(c); } }
   out.sort((a, b) => b.t - a.t);
   return out;
 }
 function renderMe(){
-  $("me-name").textContent = ST.pseudo || "Set your name";
+  $("me-name").textContent = ST.pseudo || t("chat.set_name");
   $("me-sub").textContent = ST.me ? shortId(ST.me) : "";
   setHTML("me-av-slot", avatarHTML(ST.me, ST.pseudo));
 }
@@ -657,7 +730,7 @@ function rowHTML(it){
       '<span class="ch-row-top"><span class="ch-row-name truncate">' + esc(name) + "</span>" +
       '<span class="ch-row-time">' + (it.m ? esc(clock(it.m.t)) : "") + "</span></span>" +
       '<span class="ch-row-top"><span class="ch-row-prev truncate">' +
-        (typing ? "<i>typing…</i>" : esc(preview(it.m))) + "</span>" +
+        (typing ? "<i>" + esc(t("chat.typing")) + "</i>" : esc(preview(it.m))) + "</span>" +
       (un ? '<span class="badge accent">' + esc(un) + "</span>" : "") +
     "</span></span>";
 }
@@ -667,9 +740,8 @@ function renderList(){
   const host = $("chat-list");
   if(!items.length){
     setHTML(host, q
-      ? emptyHTML("Nothing matches that", "Try a shorter name, or paste a node id.")
-      : emptyHTML("No conversation yet",
-                  "Start one with the pencil above, or by pasting someone's node id."));
+      ? emptyHTML(t("chat.nomatch.title"), t("chat.nomatch.hint"))
+      : emptyHTML(t("chat.empty.title"), t("chat.empty.hint")));
     return;
   }
   if(host.firstElementChild && !host.firstElementChild.classList.contains("ch-row"))
@@ -706,12 +778,12 @@ function openConv(conv){
   renderHead();
   if(changed) $("log").replaceChildren();     // a different conversation, not a redraw
   renderLog(true);
-  markRead(); renderList();
+  markRead(); renderPane();
 }
 function closeConv(){
   sel = null;
   $("conv").hidden = true; $("empty").hidden = false;
-  view("list"); renderList();
+  view("list"); renderPane();
 }
 function markRead(){
   if(!sel) return;
@@ -723,15 +795,17 @@ function renderHead(){
   setHTML("conv-av-slot", avatarHTML(convAvatarId(sel), name));
   $("conv-title").textContent = name;
   let sub = "";
-  if(TYPING[sel]) sub = "typing…";
+  if(TYPING[sel]) sub = t("chat.typing");
   else if(convIsGroup(sel)){
     const g = ST.groups.find((x) => "g:" + x.id === sel);
-    sub = g ? plural(g.members.length, "member") : "";
+    sub = g ? t("chat.members", {count: g.members.length}) : "";
   }else{
     const r = findPerson(sel); sub = (r && r.bio) ? r.bio : shortId(sel);
   }
   $("conv-sub").textContent = sub;
   $("info-btn").disabled = convIsGroup(sel);
+  const stranger = !convIsGroup(sel) && !ST.contacts.some((c) => c.id === sel);
+  $("save-contact").hidden = !stranger || ST.contacts_access === "unavailable";
 }
 
 // ---- the log ---------------------------------------------------------------
@@ -813,15 +887,17 @@ function paintMsg(el, m, prev){
     let quoted = null; for(const k in store) if(store[k].mid === m.reply) quoted = store[k];
     if(quoted)
       html += '<div class="ch-quote" data-goto="' + esc(quoted.id) + '">' +
-        '<span class="qn">' + esc(quoted.src === "me" ? "You" : personName(quoted.src)) + "</span>" +
+        '<span class="qn">' + esc(quoted.src === "me" ? t("chat.you") : personName(quoted.src)) + "</span>" +
         '<span class="qt">' + esc(preview(quoted)) + "</span></div>";
   }
   if(m.deleted){
-    html += '<div class="ch-txt">deleted message</div>';
+    html += '<div class="ch-txt">' + esc(t("chat.deleted")) + "</div>";
   }else if(m.kind === "image"){
     html += '<img class="ch-media" alt="' + esc(m.name || "") + '" ' +
             MEDIA.attr("/api/chat/file?mid=" + encodeURIComponent(m.mid)) + ">";
     if(m.text) html += '<div class="ch-txt">' + linkify(m.text) + "</div>";
+  }else if(m.kind === "voice"){
+    html += voiceHTML(m);
   }else if(m.kind === "file"){
     html += '<a class="ch-file" ' +
       MEDIA.attr("/api/chat/file?mid=" + encodeURIComponent(m.mid), "href") +
@@ -832,10 +908,11 @@ function paintMsg(el, m, prev){
     html += '<div class="ch-txt">' + linkify(m.text) + "</div>";
   }
   html += '<div class="ch-meta">' +
-    (m.edited && !m.deleted ? '<span class="edited">edited</span>' : "") +
+    (m.edited && !m.deleted ? '<span class="edited">' + esc(t("chat.edited")) + "</span>" : "") +
     esc(clock(m.t)) + (mine && !m.deleted ? tickHTML(m.status) : "") + "</div>";
   html += reactsHTML(m) + "</div>";
   setHTML(el, html);
+  syncVoice();
 }
 function reactsHTML(m){
   const r = m.reactions || {}, keys = Object.keys(r);
@@ -879,7 +956,7 @@ async function sendText(){
   if(!sent){
     if(!box.value.trim()){ box.value = text; autoGrow(); }
     replyTo = reply; setReplyBar();
-    toast("That message was not sent — it is back in the box", "danger");
+    toast(t("chat.err.not_sent"), "danger");
     return;
   }
   toBottom($("log")); poll();
@@ -889,14 +966,14 @@ async function sendFile(file){
   const conv = sel, reply = replyTo;
   let b64;
   try{ b64 = await toB64(file); }
-  catch(_){ toast("That file could not be read", "danger"); return; }
+  catch(_){ toast(t("chat.err.unreadable"), "danger"); return; }
   let sent = false;
   try{
     const response = await api("/api/chat/file", "POST",
                                {conv, name:file.name, data:b64, reply});
     sent = response.ok;
   }catch(_){}
-  if(!sent){ toast(file.name + " was not sent", "danger"); return; }
+  if(!sent){ toast(t("chat.err.file_not_sent", {name: file.name}), "danger"); return; }
   replyTo = null; setReplyBar(); toBottom($("log")); poll();
 }
 function toB64(file){
@@ -927,7 +1004,10 @@ function autoGrow(){
   box.style.height = "auto";
   const max = parseFloat(getComputedStyle(box).maxHeight) || 160;
   box.style.height = Math.min(box.scrollHeight, max) + "px";
-  $("send-btn").disabled = !box.value.trim();
+  const has = !!box.value.trim();
+  $("send-btn").hidden = !has && VOICE_OK;
+  $("send-btn").disabled = !has;
+  $("mic-btn").hidden = has || !VOICE_OK;
 }
 
 // ---- reply, context menu, reactions ---------------------------------------
@@ -940,7 +1020,7 @@ function setReplyBar(){
   const bar = $("reply-bar");
   const rec = replyTo ? recordFor(replyTo) : null;
   if(!rec){ replyTo = null; bar.hidden = true; return; }
-  $("reply-who").textContent = rec.src === "me" ? "You" : personName(rec.src);
+  $("reply-who").textContent = rec.src === "me" ? t("chat.you") : personName(rec.src);
   $("reply-text").textContent = preview(rec);
   bar.hidden = false; $("msg").focus();
 }
@@ -949,10 +1029,11 @@ function openCtx(x, y, mid){
   if(!rec || rec.deleted) return;
   const mine = rec.src === "me", ctx = $("ctx");
   setHTML(ctx,
-    '<button data-a="reply">Reply</button><button data-a="react">React</button>' +
-    (rec.kind === "text" ? '<button data-a="copy">Copy</button>' : "") +
-    (mine && rec.kind === "text" ? '<button data-a="edit">Edit</button>' : "") +
-    (mine ? '<button data-a="delete" class="danger">Delete</button>' : ""));
+    '<button data-a="reply">' + esc(t("chat.reply")) + '</button><button data-a="react">' +
+    esc(t("chat.react")) + "</button>" +
+    (rec.kind === "text" ? '<button data-a="copy">' + esc(t("common.copy")) + "</button>" : "") +
+    (mine && rec.kind === "text" ? '<button data-a="edit">' + esc(t("common.edit")) + "</button>" : "") +
+    (mine ? '<button data-a="delete" class="danger">' + esc(t("common.delete")) + "</button>" : ""));
   ctx.dataset.mid = mid; ctx.hidden = false;
   const w = ctx.offsetWidth || 180, h = ctx.offsetHeight || 160;
   ctx.style.left = Math.max(8, Math.min(x, innerWidth - w - 8)) + "px";
@@ -966,9 +1047,9 @@ function ctxAction(action){
   if(action === "reply"){ replyTo = mid; setReplyBar(); }
   else if(action === "copy"){ copyText(rec.text || ""); }
   else if(action === "edit"){ editMessage(mid, rec); }else if(action === "delete"){
-    confirmAction({title:"Delete this message for everyone?",
-      body:'<p class="muted small">It is replaced by a tombstone on every node that has it.</p>',
-      confirmLabel:"Delete", danger:true}).then((yes) => {
+    confirmAction({title:t("chat.delete.title"),
+      body:'<p class="muted small">' + esc(t("chat.delete.body")) + "</p>",
+      confirmLabel:t("common.delete"), danger:true}).then((yes) => {
         if(yes) api("/api/chat/delete", "POST", {conv:sel, mid}).then(poll);
       });
   }else if(action === "react"){ openEmoji(mid); }
@@ -979,16 +1060,16 @@ function ctxAction(action){
 function editMessage(mid, rec){
   const conv = sel;
   confirmAction({
-    title:"Edit this message",
-    confirmLabel:"Save",
-    body:'<label class="field"><span class="sr-only">Message</span>' +
+    title:t("chat.edit.title"),
+    confirmLabel:t("common.save"),
+    body:'<label class="field"><span class="sr-only">' + esc(t("chat.message")) + "</span>" +
       '<textarea id="edit-text" rows="3" class="mono"></textarea></label>',
   }).then((agreed) => {
     const box = $("edit-text");
     const text = box ? box.value.trim() : "";
     if(!agreed || !text || text === (rec.text || "")) return;
     api("/api/chat/edit", "POST", {conv, mid, text}).then(poll).catch(() => {
-      toast("That edit was not saved", "danger");
+      toast(t("chat.err.edit"), "danger");
     });
   });
   const box = $("edit-text");
@@ -1053,14 +1134,14 @@ async function saveProfile(){
     const {ok, error} = await CHANNEL.ask("pseudo.save", {pseudo:name},
                                           {local:true});
     if(!ok){
-      toast(error || "That name cannot be used.", "danger");
+      toast(error || t("chat.err.name"), "danger");
       return;
     }
   }
   const body = {bio:$("set-bio").value};
   if(pendingAvatar !== undefined) body.avatar = pendingAvatar;
   await api("/api/chat/profile", "POST", body).catch(() => {});
-  $("settings").close(); toast("Profile saved"); poll();
+  $("settings").close(); toast(t("chat.profile.saved")); poll();
 }
 
 // ---- new chat, search, groups ---------------------------------------------
@@ -1093,25 +1174,26 @@ function noneRow(text){
 async function doSearch(query){
   const host = $("nc-results");
   if(!query || !query.trim()){ host.replaceChildren(); return; }
-  host.replaceChildren(noneRow("Searching…"));
+  host.replaceChildren(noneRow(t("chat.searching")));
   let hits = [];
   try{ hits = (await (await api("/api/chat/search", "POST", {pseudo:query.trim()})).json()).results || []; }
   catch(_){}
   host.replaceChildren();
   for(const r of hits)
     host.appendChild(resRow(r.id, r.pseudo || shortId(r.id), shortId(r.id), () => startChat(r.id)));
-  if(!hits.length) host.appendChild(noneRow("No one found."));
+  if(!hits.length) host.appendChild(noneRow(t("chat.search.none")));
 }
 async function startChat(id){
-  await api("/api/chat/contact", "POST", {op:"add", id}).catch(() => {});
-  $("newchat").close(); await poll(); openConv(id);
+  OPENED.add(id);
+  if($("newchat").open) $("newchat").close();
+  await poll(); openConv(id);
 }
 // The list search filters the conversations *and* offers people who are not in
 // them yet — pseudos are not unique, so the id under each hit is what picks the
 // right node.
 let sideTimer = null;
 function sideSearch(){
-  renderList();
+  renderPane();
   const query = ($("side-search").value || "").trim();
   const drop = $("side-results");
   if(!query){ drop.hidden = true; drop.replaceChildren(); return; }
@@ -1120,17 +1202,17 @@ function sideSearch(){
   drop.replaceChildren();
   if(chats.length){
     const head = document.createElement("div");
-    head.className = "ch-res head eyebrow"; head.textContent = "Chats";
+    head.className = "ch-res head eyebrow"; head.textContent = t("chat.tab.chats");
     drop.appendChild(head);
     for(const it of chats.slice(0, 8))
       drop.appendChild(resRow(convAvatarId(it.conv), convName(it.conv),
-        convIsGroup(it.conv) ? "group" : shortId(it.conv),
+        convIsGroup(it.conv) ? t("chat.group") : shortId(it.conv),
         () => { closeSide(); openConv(it.conv); }));
   }
   const head = document.createElement("div");
-  head.className = "ch-res head eyebrow"; head.textContent = "People";
+  head.className = "ch-res head eyebrow"; head.textContent = t("chat.search.people");
   drop.appendChild(head);
-  const waiting = noneRow("Searching…");
+  const waiting = noneRow(t("chat.searching"));
   drop.appendChild(waiting);
   drop.hidden = false;
   clearTimeout(sideTimer);
@@ -1146,12 +1228,12 @@ function sideSearch(){
         drop.appendChild(resRow(r.id, r.pseudo || shortId(r.id), shortId(r.id),
           () => { closeSide(); startChat(r.id); }));
     }else{
-      drop.appendChild(noneRow("No people found."));
+      drop.appendChild(noneRow(t("chat.search.nopeople")));
     }
   }, 320);
 }
 function closeSide(){
-  $("side-results").hidden = true; $("side-search").value = ""; renderList();
+  $("side-results").hidden = true; $("side-search").value = ""; renderPane();
 }
 function renderGroupPicker(){
   const host = $("grp-members");
@@ -1168,12 +1250,12 @@ function renderGroupPicker(){
     row.addEventListener("click", () => { ncSel[p.id] = !ncSel[p.id]; pick.checked = !!ncSel[p.id]; });
     host.appendChild(row);
   }
-  if(!shown) host.appendChild(noneRow("Add contacts first."));
+  if(!shown) host.appendChild(noneRow(t("chat.group.nobody")));
 }
 async function createGroup(){
   const name = $("grp-name").value.trim();
   const members = Object.keys(ncSel).filter((k) => ncSel[k]);
-  if(!name || !members.length){ toast("A group needs a name and a member", "warn"); return; }
+  if(!name || !members.length){ toast(t("chat.err.group"), "warn"); return; }
   const j = await (await api("/api/chat/group", "POST",
                              {op:"create", name, members})).json().catch(() => ({}));
   $("newchat").close(); await poll();
@@ -1216,8 +1298,214 @@ async function showPeer(id){
   });
 }
 
+
+// ---- the side: conversations, or the people chat may know -------------------
+function setPane(next){
+  PANE = next === "people" ? "people" : "chats";
+  $("tab-chats").setAttribute("aria-selected", String(PANE === "chats"));
+  $("tab-people").setAttribute("aria-selected", String(PANE === "people"));
+  $("chat-list").hidden = PANE !== "chats";
+  $("people-list").hidden = PANE !== "people";
+  renderPane();
+}
+function renderPane(){
+  if(PANE === "people") renderPeople(); else renderList();
+}
+function renderPeople(){
+  const q = ($("side-search").value || "").trim().toLowerCase();
+  const host = $("people-list");
+  if(ST.contacts_access === "denied"){
+    setHTML(host, emptyHTML(t("chat.people.locked.title"), t("chat.people.locked.hint")));
+    return;
+  }
+  const rows = ST.contacts.slice().sort((a, b) =>
+    personName(a.id).localeCompare(personName(b.id), LANG))
+    .filter((c) => !q || (personName(c.id) + " " + c.id).toLowerCase().includes(q));
+  if(!rows.length){
+    setHTML(host, q ? emptyHTML(t("chat.nomatch.title"), t("chat.nomatch.hint"))
+                    : emptyHTML(t("chat.people.empty.title"), t("chat.people.empty.hint")));
+    return;
+  }
+  setHTML(host, rows.map((c) =>
+    '<button type="button" class="ch-row" role="listitem" data-person="' + esc(c.id) + '">' +
+    avatarHTML(c.id, personName(c.id)) +
+    '<span class="ch-row-body"><span class="ch-row-top"><span class="ch-row-name truncate">' +
+    esc(personName(c.id)) + '</span></span><span class="ch-row-top"><span class="ch-row-prev truncate">' +
+    esc(c.bio || shortId(c.id)) + "</span></span></span></button>").join(""));
+}
+
+// ---- the contacts permission, asked like a phone asks ----------------------
+// Chat holds no address book of its own. Until a person says it may use theirs,
+// the contacts chat already had stay as they were and nothing is hidden.
+function permDismissed(){
+  try{ return localStorage.getItem("nmesh_chat_contacts_no") === "1"; }catch(_){ return false; }
+}
+function renderPermCard(){
+  $("perm-card").hidden = !(ST.contacts_access === "denied" && !permDismissed());
+}
+async function grantContacts(level){
+  const wanted = level === "write" ? ["contacts.read", "contacts.write"] : ["contacts.read"];
+  for(const permission of wanted){
+    const {ok, error} = await CHANNEL.ask("apps.permit",
+      {app:"chat", permission, granted:true}, {local:true});
+    if(!ok){ toast(error || t("chat.contacts.refused"), "danger"); return false; }
+  }
+  try{ localStorage.removeItem("nmesh_chat_contacts_no"); }catch(_){}
+  await poll();
+  return true;
+}
+async function askWrite(){
+  const agreed = await confirmAction({title: t("chat.contacts.ask.title"),
+    body: '<p class="muted small">' + esc(t("chat.contacts.ask.body")) + "</p>",
+    confirmLabel: t("chat.contacts.allow")});
+  return agreed ? grantContacts("write") : false;
+}
+async function saveContact(id){
+  if(ST.contacts_access === "unavailable"){ toast(t("chat.contacts.unavailable"), "warn"); return; }
+  if(ST.contacts_access !== "write" && !(await askWrite())) return;
+  let response;
+  try{ response = await api("/api/chat/contact", "POST", {op:"add", id}); }
+  catch(_){ toast(t("common.failed"), "danger"); return; }
+  const body = await response.json().catch(() => ({}));
+  if(response.status === 403){ if(await askWrite()) saveContact(id); return; }
+  if(!response.ok || body.ok === false){ toast(t("common.failed"), "danger"); return; }
+  toast(t("chat.contacts.saved", {name: personName(id)}));
+  await poll();
+}
+
+// ---- voice messages ---------------------------------------------------------
+// Opus, in a WebM or Ogg container, because that is what a browser's recorder
+// can write without a codec of ours in the page. The length travels in the file
+// name (`voice-<ms>.webm`), which the receiving node checks and bounds before
+// it calls the file a voice message at all.
+const VOICE_TYPES = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus"];
+const VOICE_MAX_MS = 5 * 60 * 1000;
+const VOICE_MIN_MS = 500;
+const voiceType = () => (window.MediaRecorder && navigator.mediaDevices
+  && VOICE_TYPES.find((x) => MediaRecorder.isTypeSupported(x))) || "";
+const VOICE_OK = !!voiceType();
+let REC = null;
+const VOICE = {audio: null, mid: "", urls: new Map(), loading: false};
+const mmss = (ms) => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+};
+async function startVoice(){
+  if(!sel || REC || !VOICE_OK) return;
+  const type = voiceType();
+  let stream;
+  try{ stream = await navigator.mediaDevices.getUserMedia({audio:true}); }
+  catch(_){ toast(t("chat.voice.denied"), "warn"); return; }
+  const recorder = new MediaRecorder(stream, {mimeType:type, audioBitsPerSecond:32000});
+  REC = {recorder, stream, chunks:[], type, started:Date.now(), conv:sel, drop:false, timer:null};
+  recorder.ondataavailable = (e) => { if(e.data && e.data.size) REC.chunks.push(e.data); };
+  recorder.onstop = finishVoice;
+  recorder.start(250);
+  REC.timer = setInterval(tickVoice, 200);
+  $("send-form").classList.add("recording");
+  tickVoice();
+}
+function tickVoice(){
+  if(!REC) return;
+  const ms = Date.now() - REC.started;
+  $("rec-time").textContent = mmss(ms);
+  if(ms >= VOICE_MAX_MS) stopVoice(false);
+}
+function stopVoice(drop){
+  if(!REC) return;
+  REC.drop = !!drop;
+  if(REC.recorder.state !== "inactive") REC.recorder.stop(); else finishVoice();
+}
+async function finishVoice(){
+  const rec = REC;
+  if(!rec) return;
+  REC = null;
+  clearInterval(rec.timer);
+  for(const track of rec.stream.getTracks()) track.stop();
+  $("send-form").classList.remove("recording");
+  const ms = Date.now() - rec.started;
+  if(rec.drop || ms < VOICE_MIN_MS || !rec.chunks.length || rec.conv !== sel) return;
+  const blob = new Blob(rec.chunks, {type:rec.type});
+  const ext = rec.type.startsWith("audio/ogg") ? "ogg" : "webm";
+  await sendFile(new File([blob], "voice-" + Math.min(ms, VOICE_MAX_MS) + "." + ext, {type:rec.type}));
+}
+function voiceHTML(m){
+  return '<div class="ch-voice" data-voice="' + esc(m.mid) + '" data-ms="' + esc(m.duration_ms || 0) + '">' +
+    '<button type="button" class="icon ch-vplay" data-vplay="' + esc(m.mid) + '" aria-label="' +
+    esc(t("chat.voice.play")) + '">' + icon("play") + "</button>" +
+    '<input type="range" class="ch-vbar" min="0" max="1000" value="0" aria-label="' +
+    esc(t("chat.voice.seek")) + '">' +
+    '<span class="ch-vtime mono">' + esc(mmss(m.duration_ms || 0)) + "</span></div>";
+}
+async function voiceSource(mid, name){
+  if(VOICE.urls.has(mid)) return VOICE.urls.get(mid);
+  const response = await api("/api/chat/file?mid=" + encodeURIComponent(mid));
+  if(!response.ok) throw new Error("gone");
+  const type = /\.ogg$/.test(name || "") ? "audio/ogg" : "audio/webm";
+  const url = URL.createObjectURL(new Blob([await response.arrayBuffer()], {type}));
+  VOICE.urls.set(mid, url);
+  while(VOICE.urls.size > 24){
+    const oldest = VOICE.urls.keys().next().value;
+    if(oldest === VOICE.mid) break;
+    URL.revokeObjectURL(VOICE.urls.get(oldest)); VOICE.urls.delete(oldest);
+  }
+  return url;
+}
+function voiceRecord(mid){
+  for(const conv in MSGS) for(const k in MSGS[conv]) if(MSGS[conv][k].mid === mid) return MSGS[conv][k];
+  return null;
+}
+async function toggleVoice(mid){
+  const rec = voiceRecord(mid);
+  if(!rec || VOICE.loading) return;
+  if(VOICE.audio && VOICE.mid === mid){
+    if(VOICE.audio.paused) VOICE.audio.play().catch(() => {}); else VOICE.audio.pause();
+    syncVoice(); return;
+  }
+  if(VOICE.audio){ VOICE.audio.pause(); }
+  VOICE.loading = true;
+  try{
+    const url = await voiceSource(mid, rec.name);
+    const audio = new Audio(url);
+    audio.addEventListener("timeupdate", syncVoice);
+    audio.addEventListener("ended", () => { syncVoice(); });
+    audio.addEventListener("pause", syncVoice);
+    audio.addEventListener("play", syncVoice);
+    VOICE.audio = audio; VOICE.mid = mid;
+    await audio.play();
+  }catch(_){ toast(t("chat.voice.failed"), "danger"); }
+  finally{ VOICE.loading = false; syncVoice(); }
+}
+function syncVoice(){
+  for(const el of $$(".ch-voice")){
+    const mine = el.dataset.voice === VOICE.mid && VOICE.audio;
+    const total = Number(el.dataset.ms) || 0;
+    const button = el.querySelector(".ch-vplay"), bar = el.querySelector(".ch-vbar");
+    const playing = !!mine && !VOICE.audio.paused && !VOICE.audio.ended;
+    const wantIcon = icon(playing ? "pause" : "play");
+    if(button.innerHTML !== wantIcon) button.innerHTML = wantIcon;
+    const seconds = mine ? VOICE.audio.currentTime : 0;
+    if(document.activeElement !== bar) bar.value = total ? Math.min(1000, Math.round(seconds * 1000000 / total)) : 0;
+    el.querySelector(".ch-vtime").textContent = mmss(mine && playing ? seconds * 1000 : total);
+  }
+}
+
 // ---- events ----------------------------------------------------------------
 function bind(){
+  $("mic-btn").innerHTML = icon("mic");
+  $("rec-cancel").innerHTML = icon("trash");
+  $("rec-send").innerHTML = icon("send");
+  $("save-contact").innerHTML = icon("userAdd");
+  $("new-btn").innerHTML = icon("compose");
+  $("back-btn").innerHTML = icon("back");
+  $("peer-back").innerHTML = icon("back");
+  $("del-conv").innerHTML = icon("trash");
+  $("attach-btn").innerHTML = icon("attach");
+  $("emoji-btn").innerHTML = icon("emoji");
+  $("send-btn").innerHTML = icon("send");
+  $("reply-cancel").innerHTML = icon("close");
+  $("peer-panel-close").innerHTML = icon("close");
+  $$("[data-close]").forEach((b) => { b.innerHTML = icon("close"); });
   $("side-search").addEventListener("input", sideSearch);
   $("side-search").addEventListener("focus", sideSearch);
   document.addEventListener("click", (e) => {
@@ -1232,17 +1520,17 @@ function bind(){
     if(!sel) return;
     const group = convIsGroup(sel);
     const agreed = await confirmAction({
-      title:group ? "Leave and delete this group?" : "Remove this contact?",
-      body:'<p class="muted small">The conversation disappears from this node. ' +
-        (group ? "The other members keep theirs." : "They can still write to you again.") + "</p>",
-      confirmLabel:group ? "Leave group" : "Remove", danger:true});
+      title:t(group ? "chat.leave.title" : "chat.drop.title"),
+      body:'<p class="muted small">' + esc(t("chat.drop.body")) + " " +
+        esc(t(group ? "chat.leave.body" : "chat.drop.rewrite")) + "</p>",
+      confirmLabel:t(group ? "chat.leave.confirm" : "common.remove"), danger:true});
     if(!agreed) return;
     const gone = sel;
     await api(group ? "/api/chat/group" : "/api/chat/contact", "POST",
       group ? {op:"remove", id:gone.slice(2)} : {op:"remove", id:gone}).catch(() => {});
     delete MSGS[gone];
     closeConv();
-    toast(group ? "Group left" : "Contact removed");
+    toast(t(group ? "chat.group.left" : "chat.drop.done"));
     poll();
   });
   $("info-btn").addEventListener("click", () => { if(sel && !convIsGroup(sel)) showPeer(sel); });
@@ -1266,12 +1554,36 @@ function bind(){
   });
   $("reply-cancel").addEventListener("click", () => { replyTo = null; setReplyBar(); });
   $("jump").addEventListener("click", () => toBottom($("log"), true));
+  $("log").addEventListener("input", (e) => {
+    const bar = e.target.closest(".ch-vbar"); if(!bar) return;
+    const box = bar.closest(".ch-voice");
+    if(VOICE.audio && VOICE.mid === box.dataset.voice)
+      VOICE.audio.currentTime = (Number(bar.value) / 1000) * (Number(box.dataset.ms) / 1000);
+  });
+  $("mic-btn").addEventListener("click", startVoice);
+  $("rec-cancel").addEventListener("click", () => stopVoice(true));
+  $("rec-send").addEventListener("click", () => stopVoice(false));
+  $("save-contact").addEventListener("click", () => { if(sel) saveContact(sel); });
+  $("tab-chats").addEventListener("click", () => setPane("chats"));
+  $("tab-people").addEventListener("click", () => setPane("people"));
+  $("people-list").addEventListener("click", (e) => {
+    const row = e.target.closest("[data-person]"); if(row) startChat(row.dataset.person);
+  });
+  $("perm-allow").addEventListener("click", () => grantContacts("write"));
+  $("perm-read").addEventListener("click", () => grantContacts("read"));
+  $("perm-no").addEventListener("click", () => {
+    try{ localStorage.setItem("nmesh_chat_contacts_no", "1"); }catch(_){}
+    renderPermCard();
+  });
+  window.addEventListener("hashchange", openFromHash);
   $("log").addEventListener("scroll", () => { if(atBottom($("log"))) $("jump").hidden = true; });
   $("log").addEventListener("click", (e) => {
     const img = e.target.closest("img.ch-media");
     if(img){ $("viewer-img").src = img.src; $("viewer").hidden = false; return; }
     const quote = e.target.closest(".ch-quote");
     if(quote){ flash(quote.dataset.goto); return; }
+    const play = e.target.closest("[data-vplay]");
+    if(play){ toggleVoice(play.dataset.vplay); return; }
     const chip = e.target.closest(".ch-react");
     if(chip){ react(chip.dataset.mid, chip.dataset.react); return; }
   });
@@ -1331,13 +1643,21 @@ function bind(){
   $("nc-add").addEventListener("click", () => {
     const id = $("nc-id").value.trim();
     if(/^[0-9a-fA-F]{40}$/.test(id)) startChat(id.toLowerCase());
-    else toast("A node id is 40 hexadecimal characters", "warn");
+    else toast(t("chat.err.node_id"), "warn");
   });
   $("grp-create").addEventListener("click", createGroup);
-  PALETTE.add("New chat", "Action", openNew);
-  PALETTE.add("Your profile", "Action", openSettings);
-  PALETTE.add("Switch theme", "Action", () => THEME.toggle());
-  PALETTE.add("Back to the console", "Go to", () => { window.location = "/"; });
+  PALETTE.add(t("chat.new"), t("palette.action"), openNew);
+  PALETTE.add(t("chat.profile"), t("palette.action"), openSettings);
+  PALETTE.add(t("common.theme"), t("palette.action"), () => THEME.toggle());
+  PALETTE.add(t("common.back_to_console"), t("palette.goto"), () => { window.location = "/"; });
+  PALETTE.add(t("chat.contacts.manage"), t("palette.goto"), () => { window.location = "/contacts"; });
+}
+
+// ---- deep link: /chat#c/<node id> ------------------------------------------
+// Other apps (contacts, the node card) send people here by this address.
+function openFromHash(){
+  const found = /^#c\/([0-9a-f]{40})$/.exec(location.hash);
+  if(found) startChat(found[1]);
 }
 
 // ---- auth and boot ---------------------------------------------------------
@@ -1359,6 +1679,7 @@ async function enter(token){
   REFRESH.mount();
   autoGrow();
   await poll();
+  openFromHash();
   if(timer) clearInterval(timer);
   timer = setInterval(poll, 1200);
   return true;
@@ -1372,11 +1693,11 @@ $("login-form").addEventListener("submit", async (e) => {
         body:JSON.stringify({password:$("password").value})});
       if(!res.ok){
         const body = await res.json().catch(() => ({}));
-        setMessage("err", body.error || "Login failed", true); return;
+        setMessage("err", body.error || t("login.failed"), true); return;
       }
       $("password").value = "";
       await enter((await res.json()).token);
-    }catch(_){ setMessage("err", "Console is not reachable", true); }
+    }catch(_){ setMessage("err", t("login.unreachable"), true); }
   });
 });
 bind();

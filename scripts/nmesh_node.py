@@ -70,12 +70,17 @@ from src.webconsole import WebConsole
 from src.data_connector import DataConnector, ConnectorClient
 from src.process_launcher import ProcessLauncher
 from src.app_channel import CHAT_APP_ID
-from src.app_registry import (BUILTIN_APPS, FLEET_APP_ID, MCP_APP_ID, AppHost,
+from src.app_registry import (BUILTIN_APPS, CONTACTS_APP_ID, FLEET_APP_ID,
+                              MCP_APP_ID, AppHost,
                               AppRegistry)
 from src.apps import fleet_console
 from src.apps.chat import ChatApp
 from src.apps.chat_state import ChatState, DrawerStore
 from src.apps.chat_web import ChatBridge
+from src.apps.contacts import ContactsApp
+from src.apps.contacts_link import ContactsLink
+from src.apps.contacts_state import ContactsState
+from src.apps.contacts_web import ContactsBridge
 from src.apps.fleet import FleetApp
 from src.apps.fleet_state import FleetState
 from src.apps.fleet_web import FleetBridge
@@ -84,7 +89,7 @@ from src.apps import fleet_provision
 from src import config
 
 
-def _chat_factory(node, connector):
+def _chat_factory(node, connector, host=None, perms=None):
     """Build the chat app on demand (the app host calls this when enabling it).
 
     State and message history live in the node's encrypted per-app drawer
@@ -103,7 +108,26 @@ def _chat_factory(node, connector):
         store = DrawerStore(node.app_storage, CHAT_APP_ID)
         state = ChatState(store=store)
         app = ChatApp(client, node_id=node.id, state=state)
-        return app, ChatBridge(app, store=store)
+        # The address books are the contacts app's. Chat reaches them through
+        # the operations that app declares, as far as it was given the
+        # `contacts` permission — not by being the same program.
+        link = ContactsLink(host, perms, CHAT_APP_ID.hex())
+        return app, ChatBridge(app, store=store, contacts=link)
+    return build
+
+
+def _contacts_factory(node, connector):
+    """Build the contacts app on demand: books in its own encrypted drawer,
+    synced with the nodes they are shared with."""
+    async def build():
+        client = ConnectorClient(connector.host, connector.port,
+                                 connector.token_for(CONTACTS_APP_ID),
+                                 CONTACTS_APP_ID, attended=False)   # see `_chat_factory`
+        await client.connect()
+        store = DrawerStore(node.app_storage, CONTACTS_APP_ID)
+        state = ContactsState(store=store, me=node.id.raw.hex())
+        app = ContactsApp(client, node_id=node.id, state=state)
+        return app, ContactsBridge(app)
     return build
 
 
@@ -595,7 +619,9 @@ async def main() -> None:
     if connector is not None:
         host = AppHost(registry, app_storage=node.app_storage,
                        language=lambda: config.language(config_path))
-        host.register("chat", _chat_factory(node, connector))
+        host.register("contacts", _contacts_factory(node, connector))
+        host.register("chat", _chat_factory(node, connector, host=host,
+                                            perms=registry.perms))
         host.register("fleet", _fleet_factory(node, connector, args.data,
                                               local_console))
         host.register("mcp", _mcp_factory(node, connector))

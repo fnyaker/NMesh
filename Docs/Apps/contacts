@@ -1,0 +1,174 @@
+# The contacts application
+
+`src/apps/contacts.py`, `contacts_state.py`, `contacts_web.py`,
+`contacts_link.py` · page `src/webassets/contacts.py` (console `/contacts`)
+
+The address books of a node. A **contact** is a name a person chose and the
+nodes it answers to; a **book** is a named list of contacts. A node keeps as
+many books as it likes (family, work, the ones other people shared), and **every
+other app asks for them** — chat keeps no list of its own beyond a copy it draws
+the screen from.
+
+It is a built-in app like chat: it runs on the data connector under its own app
+id, keeps its books in its own encrypted drawer (never in the clear on disk), and
+is on by default. Turn it off from *Apps* and `/contacts` and `/api/contacts/*`
+stop existing.
+
+## Names are somebody's own word
+
+What a node is called by *itself* is a signed claim the node holds
+([`../Pseudos/guide`](../Pseudos/guide)). What a **contact** is called is what the
+person who owns the book wrote. The two are kept apart: the page shows the node's
+own name beside the one the person chose, never in place of it, and a nickname
+cannot make a stranger look like somebody else (a name always travels with the
+node id).
+
+## The permission
+
+Android's model: a person decides, per app, whether it may touch the contacts.
+
+| Permission | Level | Allows |
+|---|---|---|
+| `contacts` | sensitive | everything below |
+| `contacts.read` | sensitive | list the books and their contacts, search by name or node id, ask who a node is |
+| `contacts.write` | sensitive | add a node as a contact, take one out |
+
+Nothing is granted by asking. An app that asks for them says why on the
+permissions page (chat: "it shows the people you know by the names you gave
+them" / "it adds a person to your address book when you press *Add to
+contacts*"). Reading does not let an app write, taking back `contacts` takes
+back its children, and a client holding only the connector's shared token never
+gets either (`Docs/AppPermissions/guide`).
+
+The operations are declared with the permission they need
+(`app_api.operation(..., permission="contacts.read")`), and the control plane
+answers an **app** caller from that — so the check is made where the call is
+made, not left to the app being asked:
+
+| Operation | Needs | Changes | Answers |
+|---|---|---|---|
+| `books` | `contacts.read` | no | id, name, colour, count, default/writable/shared flags |
+| `list` | `contacts.read` | no | the contacts of one book (or all), without their notes |
+| `names` | `contacts.read` | no | every node in the books and the name its owner gave it |
+| `search` | `contacts.read` | no | contacts matching a name, a label, or the start of a node id |
+| `find` | `contacts.read` | no | the contacts that answer to a node |
+| `add` | `contacts.write` | yes | save a node (named from the directory when no name is given) |
+| `remove` | `contacts.write` | yes | take a node out of one book or all of them |
+
+None of them is `remote`: a console managing this node reaches the books only
+with its `apps` grant, and `/api/contacts/` is on the same list as
+`/api/chat/` (`_NEEDS_APPS`). The note a person wrote beside a contact never
+leaves through the API.
+
+### How an app uses it
+
+`src/apps/contacts_link.py`:
+
+```python
+link = ContactsLink(host, perms, my_app_id_hex)
+link.access()                  # "write" | "read" | "denied" | "unavailable"
+link.call("find", node=hex)    # Unavailable | Denied(permission) | AppAPIError
+```
+
+The host and the permission book are looked up on every call, so a contacts app
+stopped a second ago is not reachable through a reference the link kept. A refused
+app gets a **refusal** (`Denied` naming the permission), never a thinner answer —
+so it can ask the person instead of showing an empty list that looks true.
+
+## Finding somebody on a network of thousands
+
+Search is two questions asked in order: the books first (instant, nothing leaves
+the node), then the directory (`wide`), which is the node's own ranked name
+search and asks the network for an exact name. Saved contacts come first in
+chat's search (`match = -1`), found by the name their owner gave them as well as
+the one the node signs. Ranking is `pseudo.fold` + `rank_folded` — the same
+rules as the directory, so a name found here and one found there sort alike.
+
+## The data
+
+`ContactsState` is the data and its rules, no sockets. Every collection is hard
+bounded:
+
+| Limit | Value |
+|---|---|
+| books | 32 |
+| contacts per book (tombstones included) | 1000 |
+| nodes per contact | 8 |
+| name / label / note | 64 / 32 / 512 characters |
+| members of a shared book | 32 |
+| invitations waiting for a human | 16 in all, 2 per sender, 14 days |
+
+A book is one value of the node's drawer (256 KiB at most); a book that no
+longer fits is refused with `full` rather than truncated. Deleted contacts leave
+a tombstone for 90 days so the deletion reaches nodes that were offline; they
+are the first thing to go when room is needed.
+
+## Sharing a book with another node
+
+A book is shared by **invitation**, and an invitation is not trusted: a node that
+offers a book costs the other a line in a queue until a human accepts. A contact
+called "Bank" planted in somebody's address book is a social-engineering attack,
+so the only way into a book is a person saying yes. Roles are `read` and `write`.
+
+**The owner numbers.** The node that made the book gives changes a sequence
+number; a member that may write sends its edits to the owner, which orders them
+and passes them on. Each entry carries a version `[counter, writer]`, ordered by
+counter and then by writer id (last write wins), so every replica settles on the
+same entry without a clock anyone has to believe. If the owner is gone for good
+the copies stay readable and, where writable, editable — they stop following each
+other, nothing more. The owner can also let a member go (`revoke` detaches its
+copy, which becomes the member's own book).
+
+Wire format inside each E2E `DATA` payload: one type byte, then a JSON object.
+
+| Type | Sent | Meaning |
+|---|---|---|
+| `OFFER` (1) | owner → node | "here is a book, if you want it" |
+| `ACCEPT` / `DECLINE` (2, 3) | node → owner | the human's answer |
+| `LEAVE` (4) | member → owner | "I no longer follow this book" |
+| `PULL` (5) | member → owner | "what changed since this sequence?" |
+| `PUSH` (6) | either way | contacts, newest wins (20 per page) |
+| `ACK` (7) | owner → member | "I have these of yours" |
+| `REVOKE` (8) | owner → member | "this book is no longer shared with you" |
+
+Everything is validated before it is looked at: a message over 40 000 bytes, one
+that is not what its type says, a push to a book that was not accepted, an edit
+from a reader, an entry whose version jumps past the bound — all dropped, with
+the sender reported (`AppGuard`: invitations 4/60 s, answers 20/10 s, pulls and
+pushes 30 and 60/10 s). A pull for a book this node does not own is answered
+with nothing (not even "no such book"), and `REVOKE` is only ever sent to a node
+that really is not a member. A round runs every 300 s (pulls, the pushes that
+failed, invitations not yet answered, at most 12 times).
+
+## The page (`/contacts`)
+
+Three panes on one grid — the **books**, the **contacts** of the open book, one
+**contact** — and a single attribute, `data-view="books|list|detail"`, says which
+is on screen. Wide enough (over 1000 px) shows all three; narrower shows one at a
+time with a back button. The page never asks which device it is on.
+
+- books: colour, "private / shared by you / shared with you", pending
+  **invitations** with Accept / Decline;
+- contacts: search within the book, favourites first, add by **name from the
+  network** or by pasting a node id;
+- editor: name, up to eight nodes (each with a label), note, favourite, move to
+  another book, **Message** (opens `/chat#c/<node id>`);
+- share dialog: invite by name or id, role, who follows, take back;
+- import / export as **vCard** (`X-NMESH-NODE` carries the node ids; any other
+  address book reads the rest). An import is capped at 600 000 characters of text and 1000 entries (the request carrying it at 2 MiB).
+
+Every sentence is read from the catalogue (`t()`), and a refusal from the node
+travels as a stable code (`why`: `no_book`, `read_only`, `no_contact`, `empty`,
+`full`, `bad_node`, `not_owner`, `self`, `gone`) that the page turns into its own
+words.
+
+## Console routes
+
+| Method | Path | |
+|---|---|---|
+| GET | `/api/contacts/state` | `?book=…` → books, invitations, the book's contacts, names (sectioned like chat's feed) |
+| GET | `/api/contacts/people` | `?q=…&wide=0|1` → saved contacts first, then the directory |
+| GET | `/api/contacts/export` | `?book=…` → a `.vcf` download |
+| POST | `/api/contacts/<op>` | `save` `delete` `move` `book` `share` `unshare` `answer` `people` `import` |
+
+All behind the console session; the page and its assets are public, like chat's.

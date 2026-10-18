@@ -536,6 +536,42 @@ tests/
 │     test_console_fleet.py, chat's social half in test_chat_web.py — sections
 │     named, one that moved coming back, one that did not staying away, and the
 │     messages travelling beside them whatever the claim says
+├── test_contacts_state.py                             — the address books' data
+│     and rules: every collection bounded (books, contacts, nodes, names,
+│     notes, members, invitations), an entry with nothing in it refused, the
+│     newest version winning by [counter, writer] whatever order they arrive,
+│     tombstones kept for a deletion to travel and dropped first when room is
+│     needed, a book that no longer fits refused rather than truncated, search
+│     by name / label / note / the start of an id, vCard in and out with hostile
+│     cards, and a state file that lies cut down to what it can prove
+├── test_contacts_sync.py                              — two and three nodes keeping
+│     one book in step over a wire that hands each message straight to the other
+│     node's handler: nothing enters a book that was not accepted, a reader
+│     cannot write, a message that is not what it says is dropped and its sender
+│     reported, an unknown book is answered with silence, revoke detaches the
+│     copy, and a dozen shapes of garbage never raise
+├── test_contacts_integration.py                       — chat over the books: the
+│     permission tree (sensitive, a read half and a write half, a parent covering
+│     its children, a shared-token client never getting it), the link's four
+│     states and its refusal naming the permission, the old contacts moving only
+│     when chat may write, the books' name winning on screen, a saved name found
+│     first, and an operation that names a permission nobody has being no way
+│     to need nothing
+├── test_console_contacts.py                           — the console's side: the
+│     page served only while the app runs and its API never without a session,
+│     a refusal arriving as a stable code, export / import round trip with the
+│     import body capped, nonsense bodies never a 5xx, and chat's missing
+│     permission arriving as a 403 naming it
+├── test_i18n.py                                       — one catalogue per language: the
+│     same keys and parameters everywhere, the plural forms each language needs,
+│     the browser's plural rule and parameter filling held to the Python ones by
+│     running both, and every key the chat and contacts pages ask for — in their
+│     markup, their script, and the refusal codes the node can send — defined in
+│     all seven
+├── test_chat_web.py (voice messages)                  — a voice message is a file
+│     whose name says so, and the name is the sender's: the exact pattern, the
+│     length and size bounds, a size that is not a plain integer (a boolean is
+│     one in Python), a borrowed name on a huge file or a picture staying what it is
 ├── test_console_auth.py                               — console credential:
 │     the password never stored, a salt per credential, a corrupt file or an
 │     unknown algorithm refused, an outsized input rejected before hashing,

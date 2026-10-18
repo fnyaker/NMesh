@@ -88,7 +88,8 @@ def param(name: str, kind: str, *, required: bool = True, default=None,
 
 
 def operation(name: str, summary: str, params=(), *, changes: bool = False,
-              remote: bool = False, operator: bool = False) -> dict:
+              remote: bool = False, operator: bool = False,
+              permission: str = "") -> dict:
     """Declare one operation.
 
     ``changes`` marks an operation that alters state. It is not a permission —
@@ -107,7 +108,14 @@ def operation(name: str, summary: str, params=(), *, changes: bool = False,
     ``operator`` says only a *person* may call it — never another app, whatever
     that app was granted. For an answer that is a credential: the MCP app's
     bearer token is readable by whoever runs the node, and an app that could
-    read it would hold every permission the MCP app holds."""
+    read it would hold every permission the MCP app holds.
+
+    ``permission`` names the permission another *app* must hold to call it
+    (``contacts.read``), where "may drive the apps" is too wide an answer: an
+    app that may read the address book should not need to be allowed to
+    restart the node. It is a name on the tree in :mod:`src.app_perms`, and
+    only a built-in app can set it — an attached app's declaration goes through
+    :func:`declare_all`, which does not carry it."""
     if not _NAME_RE.match(name):
         raise AppAPIError(f"bad operation name {name!r}")
     fields = list(params)
@@ -115,7 +123,7 @@ def operation(name: str, summary: str, params=(), *, changes: bool = False,
         raise AppAPIError("too many parameters")
     return {"name": name, "summary": summary, "params": fields,
             "changes": bool(changes), "remote": bool(remote),
-            "operator": bool(operator)}
+            "operator": bool(operator), "permission": str(permission or "")}
 
 
 def coerce(field: dict, raw):
