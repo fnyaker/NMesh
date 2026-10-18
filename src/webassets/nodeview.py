@@ -467,7 +467,7 @@ const NODEVIEW = {
       '<div class="nv-sub">' + badges.join(" ") + "</div></div>" +
       this.menuHTML(view, extras) + "</header>" +
       '<div class="copyable nv-id"><code class="mono" data-nv-id>' + esc(view.id) +
-      '</code><button class="sm" data-nv-act="copy">Copy</button></div>';
+      '</code><button class="sm" data-nv-act="copy" data-i18n="common.copy">Copy</button></div>';
   },
 
   // What we are to each other, in sentences. The two fleet directions are
@@ -550,7 +550,7 @@ const NODEVIEW = {
   // go to be never found.
   actionsHTML(view, extras, options){
     if(view.self)
-      return '<div class="btn-row"><button data-nv-act="refresh">Refresh</button></div>';
+      return '<div class="btn-row"><button data-nv-act="refresh" data-i18n="common.refresh">Refresh</button></div>';
     const hide = options.hide || [];
     const chat = extras.chat, fleet = extras.fleet;
     const buttons = [];
@@ -558,10 +558,10 @@ const NODEVIEW = {
       buttons.push('<button class="primary" data-nv-act="message">Message' +
         (chat.unread ? " " + badge(chat.unread, "danger") : "") + "</button>");
     if(fleet && hide.indexOf("fleet") < 0){
-      if(fleet.managed) buttons.push('<button data-nv-act="fleet">Open in Fleet</button>');
+      if(fleet.managed) buttons.push('<button data-nv-act="fleet" data-i18n="node.open_in_fleet">Open in Fleet</button>');
       else if(fleet.waiting_on_them)
-        buttons.push('<button disabled>Access requested</button>');
-      else buttons.push('<button data-nv-act="enrol">Request access</button>');
+        buttons.push('<button disabled data-i18n="node.access_requested">Access requested</button>');
+      else buttons.push('<button data-nv-act="enrol" data-i18n="node.request_access">Request access</button>');
     }
     buttons.push('<button data-nv-act="ping">' + icon("pulse") + "Ping</button>");
     // Only where there is a link to load. A speed test with no direct link is
@@ -600,7 +600,7 @@ const NODEVIEW = {
     return '<div class="menu-wrap"><button class="icon" data-menu="nv-menu" ' +
       'aria-haspopup="true" aria-expanded="false" aria-label="More about this node">' +
       icon("dots") + "</button>" +
-      '<div id="nv-menu" class="menu" role="region" hidden aria-label="Node actions">' +
+      '<div id="nv-menu" class="menu" role="region" hidden aria-label="Node actions" data-i18n-attr="aria-label:node.node_actions">' +
       items.join("") + "</div></div>";
   },
 
@@ -773,7 +773,7 @@ const NODEVIEW = {
     const offered = !view.self && (this.here || CHANNEL.has("node.retry"));
     const action = offered ? '<th class="tight"></th>' : "";
     return '<div class="table-wrap"><table><thead><tr>' +
-      '<th>Address</th><th>State</th><th class="num">Tried</th>' + action +
+      '<th data-i18n="fleet.address">Address</th><th data-i18n="node.state">State</th><th class="num" data-i18n="node.tried">Tried</th>' + action +
       "</tr></thead><tbody>" +
       rows.map((row) => '<tr><td class="mono">' + esc(row.uri) + "</td><td>" +
         '<span class="badge" data-base="badge" data-v="' +
@@ -1058,13 +1058,13 @@ const NODEVIEW = {
     const bar = element.querySelector("[data-nv-speed-bar]");
     if(bar) bar.value = seconds;
     const clock = element.querySelector("[data-nv-speed-clock]");
-    if(clock) clock.textContent = Math.floor(seconds) + " s of at most " + this.SPEED_SECONDS;
+    if(clock) clock.textContent = t("node.s_of_at_most", {seconds: Math.floor(seconds), speed_seconds: this.SPEED_SECONDS});
   },
 
   speedHTML(id){
     const run = this.speed[id];
     if(!run) return "";
-    const head = (tail) => '<div class="nv-speed-head"><b>Speed test</b>' +
+    const head = (tail) => '<div class="nv-speed-head"><b data-i18n="node.speed_test">Speed test</b>' +
       '<span class="grow"></span>' + tail + "</div>";
     if(run.running)
       return '<div class="nv-speed" role="status">' +
@@ -1137,7 +1137,7 @@ const NODEVIEW = {
     await withBusy(button, async () => {
       try{
         await this.call("chat", "contact", {node:id});
-        toast("Added to contacts", "ok");
+        toast(t("node.added_to_contacts"), "ok");
         await this.mount(element, id, options);
       }catch(error){ this.say(element, String(error.message || error), true); }
     });
@@ -1153,10 +1153,10 @@ const NODEVIEW = {
       body:'<p class="muted small">That node makes it, not this one: whoever uses ' +
         "it joins through that machine and has their certificate signed by it. " +
         "Single use, and it stops working when the window closes.</p>" +
-        '<label class="field"><span>Stays live for</span><select id="nv-ttl">' +
-        '<option value="300">5 minutes</option>' +
-        '<option value="3600">1 hour</option>' +
-        '<option value="21600">6 hours</option></select></label>' +
+        '<label class="field"><span data-i18n="fleet.stays_live_for">Stays live for</span><select id="nv-ttl">' +
+        '<option value="300" data-i18n="node.5_minutes">5 minutes</option>' +
+        '<option value="3600" data-i18n="node.1_hour">1 hour</option>' +
+        '<option value="21600" data-i18n="node.6_hours">6 hours</option></select></label>' +
         '<label class="check"><input id="nv-ticket" type="checkbox" checked>' +
         "<span>Also make it scannable, if that node has a public address</span></label>",
     });
@@ -1210,7 +1210,7 @@ const NODEVIEW = {
       try{
         const result = await this.call("fleet", "enrol", {node:id, caps:wanted});
         if(!result.sent){ this.say(element, "Fleet refused that request", true); return; }
-        toast("Request sent — someone there has to accept it", "ok");
+        toast(t("node.request_sent_someone_there_has_to"), "ok");
         await this.mount(element, id, options);
       }catch(error){ this.say(element, String(error.message || error), true); }
     });
@@ -1228,7 +1228,7 @@ const NODEVIEW = {
     if(!agreed) return;
     try{
       await this.op("node.forget", {node:id});
-      toast("Node forgotten");
+      toast(t("node.node_forgotten"));
       this.current = null;
       if(options.onGone) options.onGone();
     }catch(error){
@@ -1272,7 +1272,7 @@ PAGE_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f6f8fa" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0a0e13" media="(prefers-color-scheme: dark)">
-<title>NMesh node</title>
+<title data-i18n="node.nmesh_node">NMesh node</title>
 <script src="/theme.js"></script>
 <script src="/i18n.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -1282,23 +1282,23 @@ PAGE_HTML = """<!doctype html>
 
 <div id="login" class="gate hidden">
   <form id="login-form">
-    <div class="mark" aria-hidden="true">NM</div>
-    <div><p class="eyebrow">Node</p><h1>Sign in</h1></div>
-    <p class="muted small">This page reads the console of this node, so it needs
+    <div class="mark" aria-hidden="true" data-i18n="console.nm">NM</div>
+    <div><p class="eyebrow" data-i18n="node.node">Node</p><h1 data-i18n="fleet.sign_in">Sign in</h1></div>
+    <p class="muted small" data-i18n="node.this_page_reads_the_console_of_this">This page reads the console of this node, so it needs
       the console password.</p>
-    <label class="field"><span>Console password</span>
+    <label class="field"><span data-i18n="console.console_password">Console password</span>
       <input id="password" type="password" autocomplete="current-password" autofocus></label>
-    <button type="submit" class="primary wide">Enter</button>
+    <button type="submit" class="primary wide" data-i18n="fleet.enter">Enter</button>
     <p id="login-error" class="msg error" role="alert"></p>
   </form>
 </div>
 
 <main id="main" class="node-page hidden">"""  + ui.ctx_bar(leave=False) + """
   <header class="node-page-head">
-    <a class="brand" href="/"><span class="mark" aria-hidden="true">NM</span>
-      <span><b>NMesh</b><span>Node</span></span></a>
+    <a class="brand" href="/"><span class="mark" aria-hidden="true" data-i18n="console.nm">NM</span>
+      <span><b>NMesh</b><span data-i18n="node.node">Node</span></span></a>
     <span class="grow"></span>
-    <button id="theme-toggle" class="icon" aria-label="Switch theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
+    <button id="theme-toggle" class="icon" aria-label="Switch theme" data-i18n-attr="aria-label:console.switch_theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
   </header>
   <div id="view"></div>
 </main>
@@ -1308,8 +1308,8 @@ PAGE_HTML = """<!doctype html>
     <header class="sheet-head"><h2 id="confirm-title"></h2></header>
     <div class="sheet-body"><div id="confirm-body"></div></div>
     <footer class="sheet-foot">
-      <button id="confirm-cancel">Cancel</button>
-      <button id="confirm-ok" class="primary">Confirm</button>
+      <button id="confirm-cancel" data-i18n="common.cancel">Cancel</button>
+      <button id="confirm-ok" class="primary" data-i18n="console.confirm">Confirm</button>
     </footer>
   </div>
 </dialog>
@@ -1419,7 +1419,7 @@ async function boot(){
       }
       SESSION.set(data.token);
       enter();
-    }catch(_){ setMessage("login-error", "Console is not reachable", true); }
+    }catch(_){ setMessage("login-error", t("console.console_is_not_reachable"), true); }
   });
 
   // Ask before drawing. A stored token can be stale, and a console reached

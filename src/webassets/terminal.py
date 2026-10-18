@@ -1029,7 +1029,7 @@ function TermScreen(host){
   this.back = document.createElement("button");
   this.back.className = "t-back";
   this.back.type = "button";
-  this.back.textContent = "back to the bottom";
+  this.back.textContent = t("term.back_to_the_bottom");
   this.back.hidden = true;
   host.appendChild(this.back);
   this.back.addEventListener("click", () => { this.toBottom(); this.draw(true); });
@@ -1906,7 +1906,7 @@ PAGE_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0a0f16">
-<title>NMesh Terminal</title>
+<title data-i18n="term.nmesh_terminal">NMesh Terminal</title>
 <script src="/theme.js"></script>
 <script src="/i18n.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -1916,52 +1916,52 @@ PAGE_HTML = """<!doctype html>
 
 <div id="login" class="gate hidden">
   <form id="login-form">
-    <div class="mark" aria-hidden="true">NM</div>
-    <div><p class="eyebrow">Terminal</p><h1>Sign in</h1></div>
-    <p class="muted small">The terminal uses the console password of this node.</p>
-    <label class="field"><span>Console password</span>
+    <div class="mark" aria-hidden="true" data-i18n="console.nm">NM</div>
+    <div><p class="eyebrow" data-i18n="term.terminal">Terminal</p><h1 data-i18n="fleet.sign_in">Sign in</h1></div>
+    <p class="muted small" data-i18n="term.the_terminal_uses_the_console">The terminal uses the console password of this node.</p>
+    <label class="field"><span data-i18n="console.console_password">Console password</span>
       <input id="password" type="password" autocomplete="current-password" autofocus></label>
-    <button type="submit" class="primary wide">Enter</button>
+    <button type="submit" class="primary wide" data-i18n="fleet.enter">Enter</button>
     <p id="err" class="msg error" role="alert"></p>
   </form>
 </div>
 
 <div id="page" class="page hidden">
   <header class="tbar">
-    <a class="btn ghost sm" href="/fleet" title="Back to the fleet">Fleet</a>
-    <label class="sr-only" for="node">Node</label>
+    <a class="btn ghost sm" href="/fleet" title="Back to the fleet" data-i18n="fleet.fleet" data-i18n-attr="title:term.back_to_the_fleet">Fleet</a>
+    <label class="sr-only" for="node" data-i18n="node.node">Node</label>
     <select id="node" class="sm"></select>
-    <span id="state" class="badge">idle</span>
+    <span id="state" class="badge" data-i18n="term.idle">idle</span>
     <span class="grow"></span>
-    <button id="open" class="primary sm">Open</button>
-    <button id="files-open" class="ghost sm">Files</button>
-    <button id="copy" class="ghost sm">Copy</button>
-    <button id="paste" class="ghost sm">Paste</button>
-    <button id="kbd" class="ghost sm" aria-pressed="false">Keyboard</button>
-    <button id="stop" class="danger sm">Close</button>
+    <button id="open" class="primary sm" data-i18n="term.open">Open</button>
+    <button id="files-open" class="ghost sm" data-i18n="term.files">Files</button>
+    <button id="copy" class="ghost sm" data-i18n="common.copy">Copy</button>
+    <button id="paste" class="ghost sm" data-i18n="term.paste">Paste</button>
+    <button id="kbd" class="ghost sm" aria-pressed="false" data-i18n="term.keyboard">Keyboard</button>
+    <button id="stop" class="danger sm" data-i18n="common.close">Close</button>
   </header>
 
   <div id="term" class="term full" tabindex="0" role="application"
-       aria-label="Remote shell"></div>
+       aria-label="Remote shell" data-i18n-attr="aria-label:term.remote_shell"></div>
 
-  <div id="keys" class="keys" role="toolbar" aria-label="Terminal keys"></div>
+  <div id="keys" class="keys" role="toolbar" aria-label="Terminal keys" data-i18n-attr="aria-label:term.terminal_keys"></div>
 </div>
 
 <dialog id="files-dialog">
   <div class="sheet">
     <div class="sheet-head">
-      <h2>Files</h2>
-      <button id="files-up" class="ghost sm">Up</button>
-      <button id="files-new" class="ghost sm">New folder</button>
-      <button id="files-send" class="ghost sm">Upload</button>
-      <button id="files-close" class="icon sm" aria-label="Close">&times;</button>
+      <h2 data-i18n="term.files">Files</h2>
+      <button id="files-up" class="ghost sm" data-i18n="term.up">Up</button>
+      <button id="files-new" class="ghost sm" data-i18n="term.new_folder">New folder</button>
+      <button id="files-send" class="ghost sm" data-i18n="term.upload">Upload</button>
+      <button id="files-close" class="icon sm" aria-label="Close" data-i18n="term.text" data-i18n-attr="aria-label:common.close">&times;</button>
     </div>
     <div class="sheet-body">
       <p id="files-path" class="mono tiny muted"></p>
       <form id="mkdir-form" class="toolbar" hidden>
-        <label class="field grow"><span class="sr-only">Folder name</span>
-          <input id="mkdir-name" placeholder="folder name" autocomplete="off"></label>
-        <button type="submit" class="primary sm">Create</button>
+        <label class="field grow"><span class="sr-only" data-i18n="term.folder_name">Folder name</span>
+          <input id="mkdir-name" placeholder="folder name" autocomplete="off" data-i18n-attr="placeholder:term.folder_name_2"></label>
+        <button type="submit" class="primary sm" data-i18n="fleet.create">Create</button>
       </form>
       <input id="files-file" type="file" multiple class="hidden">
       <div id="files-list" class="files"></div>
@@ -1972,13 +1972,13 @@ PAGE_HTML = """<!doctype html>
 
 <dialog id="paste-dialog">
   <form id="paste-form" method="dialog">
-    <h2>Paste into the terminal</h2>
-    <p class="muted small">This browser did not hand over the clipboard, so paste
+    <h2 data-i18n="term.paste_into_the_terminal">Paste into the terminal</h2>
+    <p class="muted small" data-i18n="term.this_browser_did_not_hand_over_the">This browser did not hand over the clipboard, so paste
       here and send it. Nothing is stored.</p>
-    <label class="field"><span class="sr-only">Text to send</span>
+    <label class="field"><span class="sr-only" data-i18n="term.text_to_send">Text to send</span>
       <textarea id="paste-text" rows="4" class="mono" autocomplete="off"></textarea></label>
-    <div class="btn-row"><button id="paste-send" class="primary">Send</button>
-      <button value="cancel">Cancel</button></div>
+    <div class="btn-row"><button id="paste-send" class="primary" data-i18n="common.send">Send</button>
+      <button value="cancel" data-i18n="common.cancel">Cancel</button></div>
   </form>
 </dialog>
 
@@ -2066,7 +2066,7 @@ async function loadNodes(){
     '<option value="' + esc(entry.id) + '">' +
     esc(entry.label || entry.pseudo || shortId(entry.id)) + "</option>").join("");
   if(!NODES.length){
-    select.innerHTML = '<option value="">No node has granted a shell</option>';
+    select.innerHTML = '<option value="" data-i18n="term.no_node_has_granted_a_shell">No node has granted a shell</option>';
     setState("nothing to open");
     return;
   }
@@ -2136,7 +2136,7 @@ $("kbd").addEventListener("click", () => {
 
 $("copy").addEventListener("click", async () => {
   const text = TERM_SESSION ? TERM_SESSION.copyText() : "";
-  if(!text.trim()){ toast("Nothing to copy", "warn"); return; }
+  if(!text.trim()){ toast(t("term.nothing_to_copy"), "warn"); return; }
   await copyText(text);
 });
 
@@ -2219,20 +2219,20 @@ function fileRow(entry){
     esc(entry.name) + '" data-kind="' + kind + '">' +
     icon(kind === "dir" ? "folder" : "file") +
     '<span class="n">' + esc(entry.name) + "</span>" +
-    (entry.link ? '<span class="s">link</span>' : "") +
+    (entry.link ? '<span class="s" data-i18n="term.link">link</span>' : "") +
     '<span class="s">' + (kind === "dir" ? "" : fmtBytes(entry.size)) + "</span></button>";
 }
 
 async function loadFiles(path){
   const node = FILES.node || currentNode();
-  if(!node){ setMessage("files-msg", "Pick a node first.", true); return; }
+  if(!node){ setMessage("files-msg", t("term.pick_a_node_first"), true); return; }
   FILES.node = node;
-  setMessage("files-msg", "Reading…");
+  setMessage("files-msg", t("term.reading"));
   let answer;
   try{
     answer = await apiJson("/api/fleet/files?node=" + encodeURIComponent(node) +
                            "&path=" + encodeURIComponent(path || ""));
-  }catch(_){ setMessage("files-msg", "That node could not be reached.", true); return; }
+  }catch(_){ setMessage("files-msg", t("term.that_node_could_not_be_reached"), true); return; }
   if(!answer.ok){
     setMessage("files-msg", answer.data.error || "That directory could not be read.", true);
     return;
@@ -2266,7 +2266,7 @@ $("files-list").addEventListener("click", async (event) => {
 
 async function download(path, name){
   FILES.busy = true;
-  setMessage("files-msg", "Fetching " + name + "…");
+  setMessage("files-msg", t("term.fetching", {name}));
   try{
     const response = await api("/api/fleet/file?node=" + encodeURIComponent(FILES.node) +
                                "&path=" + encodeURIComponent(path));
@@ -2285,9 +2285,9 @@ async function download(path, name){
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
-    setMessage("files-msg", "Saved " + name + " (" + fmtBytes(blob.size) + ").");
+    setMessage("files-msg", t("term.saved", {name, size: fmtBytes(blob.size)}));
   }catch(_){
-    setMessage("files-msg", "That file could not be fetched.", true);
+    setMessage("files-msg", t("term.that_file_could_not_be_fetched"), true);
   }finally{ FILES.busy = false; }
 }
 
@@ -2316,14 +2316,14 @@ $("files-file").addEventListener("change", async (event) => {
   const files = Array.from(event.target.files || []);
   event.target.value = "";
   for(const file of files){
-    setMessage("files-msg", "Sending " + file.name + "…");
+    setMessage("files-msg", t("term.sending", {name: file.name}));
     let answer;
     try{
       answer = await apiJson("/api/fleet/upload", "POST", {
         node:FILES.node, path:FILES.path, name:file.name,
         data:await base64Of(file)});
     }catch(_){
-      setMessage("files-msg", "That upload could not be sent.", true);
+      setMessage("files-msg", t("term.that_upload_could_not_be_sent"), true);
       return;
     }
     if(!answer.ok){
@@ -2418,7 +2418,7 @@ $("login-form").addEventListener("submit", async (event) => {
       }
       $("password").value = "";
       await enter((await response.json()).token);
-    }catch(_){ setMessage("err", "Console is not reachable", true); }
+    }catch(_){ setMessage("err", t("console.console_is_not_reachable"), true); }
   });
 });
 

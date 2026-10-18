@@ -11,6 +11,7 @@ import random
 import re
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -318,10 +319,14 @@ class TestThePageScript:
         script = (
             "const NMESH_LANG = %s; const NMESH_I18N = %s;"
             "const document = {documentElement: {}, querySelectorAll: () => []};"
+            "class MutationObserver { observe() {} }"
             "%s\n%s" % (json.dumps(lang), json.dumps(strings),
                         ui.JS[start:end], body))
-        result = subprocess.run([NODE, "-e", script], capture_output=True,
-                                text=True, timeout=60)
+        with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8") as handle:
+            handle.write(script)
+            handle.flush()
+            result = subprocess.run([NODE, handle.name], capture_output=True,
+                                    text=True, timeout=60)
         assert result.returncode == 0, result.stderr
         return result.stdout.strip()
 
@@ -391,3 +396,97 @@ class TestTheConsoleSpeaks:
     async def test_with_neither_it_is_english(self, tmp_path):
         _, _, text = await self._script(tmp_path, "", "ja")
         assert 'NMESH_LANG="en"' in text
+
+
+# -- the pages ask the catalogue, and what they show before it answers is the
+# English it holds ---------------------------------------------------------
+
+import html as _html
+
+_PAGES = ("console", "fleet", "nodeview", "packages", "terminal", "ui")
+_SOURCES = {name: open(os.path.join(os.path.dirname(ui.__file__), name + ".py"),
+                       encoding="utf-8").read() for name in _PAGES}
+_LEAF = re.compile(
+    r"<([a-zA-Z][a-zA-Z0-9]*)(\s[^<>]*?data-i18n=\"([a-z0-9_.]+)\"[^<>]*?)?>([^<>]+)</\1>")
+_ATTRS = re.compile(r'data-i18n-attr="([^"]+)"')
+_CALLS = re.compile(r'\bt\("([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"')
+_CONTEXTS = [
+    re.compile(r'toast\(\s*"[^"\\\n]*[A-Za-z]{2}'),
+    re.compile(r'setMessage\(\s*[^,()]+,\s*"[^"\\\n]*[A-Za-z]{2}'),
+    re.compile(r'\.textContent\s*=\s*"[^"\\\n]*[A-Za-z]{2}[^"\\\n]*"\s*;'),
+]
+
+
+def _norm(text):
+    return re.sub(r"\s+", " ", _html.unescape(text)).strip()
+
+
+_QUOTED = re.compile(
+    r'"((?:console|fleet|node|pkg|term|ui|common|state|count|language|config)\.[a-z0-9_]+)"')
+_PLURALS = re.compile(r'plural\([^"]*"([a-z ]+)"')
+
+
+def _asked_keys():
+    """Keys a page names outright: in markup, or as the first argument of t()."""
+    keys = set()
+    for text in _SOURCES.values():
+        keys.update(re.findall(r'data-i18n="([a-z0-9_.]+)"', text))
+        for pairs in _ATTRS.findall(text):
+            keys.update(pair.split(":", 1)[1] for pair in pairs.split(";"))
+        keys.update(_CALLS.findall(text))
+    keys.discard("key")
+    return keys
+
+
+def _used_keys():
+    """Those, plus every quoted string that is a key (a ternary picks between
+    two), plus the nouns plural() looks up."""
+    keys = _asked_keys()
+    english = _raw("en")
+    for text in _SOURCES.values():
+        keys.update(key for key in _QUOTED.findall(text) if key in english)
+        keys.update("count." + word.replace(" ", "_") for word in _PLURALS.findall(text))
+    return keys
+
+
+class TestThePagesUseTheCatalogue:
+    def test_every_key_a_page_asks_for_is_in_english(self):
+        english = _raw("en")
+        missing = sorted(key for key in _asked_keys() if key not in english)
+        assert not missing, missing[:10]
+
+    def test_the_english_a_page_carries_is_the_english_the_catalogue_holds(self):
+        english = _raw("en")
+        wrong = []
+        for name, text in _SOURCES.items():
+            for match in _LEAF.finditer(text):
+                key = match.group(3)
+                if key and key in english and _norm(match.group(4)) != _norm(english[key]):
+                    wrong.append((name, key))
+        assert not wrong, wrong[:10]
+
+    def test_an_attribute_carries_the_english_the_catalogue_holds(self):
+        english = _raw("en")
+        wrong = []
+        tag = re.compile(r'<[a-zA-Z][^<>]*?data-i18n-attr="([^"]+)"[^<>]*>')
+        for name, text in _SOURCES.items():
+            for match in tag.finditer(text):
+                for pair in match.group(1).split(";"):
+                    attribute, key = pair.split(":", 1)
+                    found = re.search(r'\s%s="([^"]*)"' % re.escape(attribute),
+                                      match.group(0))
+                    if found and _norm(found.group(1)) != _norm(english[key]):
+                        wrong.append((name, key))
+        assert not wrong, wrong[:10]
+
+    def test_no_key_is_left_unused(self):
+        used = _used_keys()
+        shared = ("common.", "state.", "count.", "language.", "config.")
+        orphans = sorted(key for key in _raw("en")
+                         if key not in used and not key.startswith(shared))
+        assert not orphans, orphans[:10]
+
+    @pytest.mark.parametrize("name", _PAGES)
+    def test_a_message_a_person_reads_is_never_written_into_the_call(self, name):
+        for pattern in _CONTEXTS:
+            assert not pattern.search(_SOURCES[name]), (name, pattern.pattern)
