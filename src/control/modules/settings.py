@@ -54,7 +54,7 @@ _UPDATES = {"update_check_minutes": "check_minutes",
             "recommend_version": "recommend"}
 # Read from the file each time it is needed (`updater.update_branch`), so
 # writing the file is the whole of applying it.
-_FROM_FILE = ("update_branch",)
+_FROM_FILE = ("update_branch", "language")
 LIVE_GROUPS = (_KEEPALIVE, _MLO, tuple(_UPDATES), _FROM_FILE,
                ("punch_keepalive",), ("lan_discovery",),
                ("transport_balance",), ("dynamic_address",),
@@ -243,6 +243,16 @@ class ConfigModule:
         answer["profile"] = power.match(merged)
         return answer
 
+    def _tell_apps(self, code: str) -> None:
+        """Hand the apps the language just chosen; they hear it as the file now
+        says it. An app that cannot take it must not fail the save."""
+        host = self._context.host()
+        if host is not None:
+            try:
+                host.set_language(code)
+            except Exception:
+                pass
+
     def _apply(self, merged: dict, changed):
         return self._context.ask(
             apply_live(self._context.node, merged, changed), _LIVE)
@@ -258,6 +268,8 @@ class ConfigModule:
         if live:
             adjusted, problems = self._apply(merged, live)
             merged.update(adjusted)
+            if "language" in live:
+                self._tell_apps(merged.get("language", ""))
         try:
             node_config.save(path, merged)
         except OSError as exc:

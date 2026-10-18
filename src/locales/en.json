@@ -1,0 +1,47 @@
+{
+  "common.add": "Add",
+  "common.back": "Back",
+  "common.cancel": "Cancel",
+  "common.close": "Close",
+  "common.copy": "Copy",
+  "common.delete": "Delete",
+  "common.edit": "Edit",
+  "common.failed": "Something went wrong",
+  "common.loading": "Loading…",
+  "common.none": "None",
+  "common.refresh": "Refresh",
+  "common.remove": "Remove",
+  "common.retry": "Retry",
+  "common.save": "Save",
+  "common.saved": "Saved",
+  "common.search": "Search",
+  "common.send": "Send",
+  "common.unknown": "Unknown",
+  "config.saved": "Configuration saved",
+  "count.link": {
+    "one": "{count} link",
+    "other": "{count} links"
+  },
+  "count.message": {
+    "one": "{count} message",
+    "other": "{count} messages"
+  },
+  "count.node": {
+    "one": "{count} node",
+    "other": "{count} nodes"
+  },
+  "language.auto": "Automatic (follow the browser)",
+  "language.help": "Language of the console and of the apps. Automatic follows the browser.",
+  "language.label": "Language",
+  "language.name.de": "Deutsch",
+  "language.name.en": "English",
+  "language.name.fr": "Français",
+  "language.name.pl": "Polski",
+  "language.name.ru": "Русский",
+  "language.name.sk": "Slovenčina",
+  "language.name.zh": "中文",
+  "state.connected": "Connected",
+  "state.disconnected": "Disconnected",
+  "state.offline": "Offline",
+  "state.online": "Online"
+}

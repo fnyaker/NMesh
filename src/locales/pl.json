@@ -1,0 +1,53 @@
+{
+  "common.add": "Dodaj",
+  "common.back": "Wstecz",
+  "common.cancel": "Anuluj",
+  "common.close": "Zamknij",
+  "common.copy": "Kopiuj",
+  "common.delete": "Usuń",
+  "common.edit": "Edytuj",
+  "common.failed": "Coś poszło nie tak",
+  "common.loading": "Wczytywanie…",
+  "common.none": "Brak",
+  "common.refresh": "Odśwież",
+  "common.remove": "Usuń",
+  "common.retry": "Spróbuj ponownie",
+  "common.save": "Zapisz",
+  "common.saved": "Zapisano",
+  "common.search": "Szukaj",
+  "common.send": "Wyślij",
+  "common.unknown": "Nieznane",
+  "config.saved": "Konfiguracja zapisana",
+  "count.link": {
+    "one": "{count} łącze",
+    "few": "{count} łącza",
+    "many": "{count} łączy",
+    "other": "{count} łącza"
+  },
+  "count.message": {
+    "one": "{count} wiadomość",
+    "few": "{count} wiadomości",
+    "many": "{count} wiadomości",
+    "other": "{count} wiadomości"
+  },
+  "count.node": {
+    "one": "{count} węzeł",
+    "few": "{count} węzły",
+    "many": "{count} węzłów",
+    "other": "{count} węzła"
+  },
+  "language.auto": "Automatycznie (jak przeglądarka)",
+  "language.help": "Język konsoli i aplikacji. Automatycznie podąża za przeglądarką.",
+  "language.label": "Język",
+  "language.name.de": "Deutsch",
+  "language.name.en": "English",
+  "language.name.fr": "Français",
+  "language.name.pl": "Polski",
+  "language.name.ru": "Русский",
+  "language.name.sk": "Slovenčina",
+  "language.name.zh": "中文",
+  "state.connected": "Połączono",
+  "state.disconnected": "Rozłączono",
+  "state.offline": "Offline",
+  "state.online": "Online"
+}

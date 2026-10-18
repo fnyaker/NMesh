@@ -1,0 +1,53 @@
+{
+  "common.add": "Добавить",
+  "common.back": "Назад",
+  "common.cancel": "Отмена",
+  "common.close": "Закрыть",
+  "common.copy": "Копировать",
+  "common.delete": "Удалить",
+  "common.edit": "Изменить",
+  "common.failed": "Что-то пошло не так",
+  "common.loading": "Загрузка…",
+  "common.none": "Нет",
+  "common.refresh": "Обновить",
+  "common.remove": "Убрать",
+  "common.retry": "Повторить",
+  "common.save": "Сохранить",
+  "common.saved": "Сохранено",
+  "common.search": "Поиск",
+  "common.send": "Отправить",
+  "common.unknown": "Неизвестно",
+  "config.saved": "Конфигурация сохранена",
+  "count.link": {
+    "one": "{count} соединение",
+    "few": "{count} соединения",
+    "many": "{count} соединений",
+    "other": "{count} соединения"
+  },
+  "count.message": {
+    "one": "{count} сообщение",
+    "few": "{count} сообщения",
+    "many": "{count} сообщений",
+    "other": "{count} сообщения"
+  },
+  "count.node": {
+    "one": "{count} узел",
+    "few": "{count} узла",
+    "many": "{count} узлов",
+    "other": "{count} узла"
+  },
+  "language.auto": "Автоматически (как в браузере)",
+  "language.help": "Язык консоли и приложений. Автоматический режим следует языку браузера.",
+  "language.label": "Язык",
+  "language.name.de": "Deutsch",
+  "language.name.en": "English",
+  "language.name.fr": "Français",
+  "language.name.pl": "Polski",
+  "language.name.ru": "Русский",
+  "language.name.sk": "Slovenčina",
+  "language.name.zh": "中文",
+  "state.connected": "Подключено",
+  "state.disconnected": "Отключено",
+  "state.offline": "Не в сети",
+  "state.online": "В сети"
+}

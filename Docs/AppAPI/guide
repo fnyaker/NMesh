@@ -171,6 +171,13 @@ the operator chooses a window or a tab (Settings → This browser), and chat has
 its own choice for where node details appear. Both live in `localStorage`, like
 the theme: they are preferences about one screen, not properties of the node.
 
+## The language an app speaks
+
+The operator's language is handed to the apps, not guessed by them:
+`AppHost.language` answers it (`""` = follow the browser), and an app or bridge
+defining `set_language(code)` is told at start and whenever it changes. Pages
+get the strings from `/i18n.js`. See [`../I18n/guide`](../I18n/guide).
+
 ## Apps outside the node declare operations too
 
 An app attached to the data connector declares its operations in its manifest's

@@ -1,0 +1,86 @@
+# Languages — how a sentence reaches a person
+
+`src/i18n.py`, `src/locales/*.json`
+
+NMesh speaks **French, English, German, Russian, Chinese, Polish and Slovak**.
+No interface string is written in a page or an app: it is a key in a catalogue,
+and the catalogue is the only place a sentence lives. English is the reference —
+the language a key is written in first, and the one a gap falls back to.
+
+## Which language
+
+1. The operator's `language` setting (`nmesh.conf`, or Settings in the console).
+   One of `en fr de ru zh pl sk`; **empty means follow the browser**. It applies
+   **live**: the next page load speaks it, and every running app is told.
+2. Otherwise the browser's `Accept-Language`, among the languages we ship.
+3. Otherwise English.
+
+Nothing a peer sends can change it, and a header is read to a bound (512
+characters, 32 entries) because a stranger's browser writes it.
+
+## The catalogues
+
+One JSON file per language, a flat map of dotted keys:
+
+```json
+{
+  "common.save": "Enregistrer",
+  "count.node": { "one": "{count} nœud", "other": "{count} nœuds" }
+}
+```
+
+* A key is `area.name` — lower case, digits and `_`, at least one dot.
+* A value is a string, or a map of **plural forms** (`zero one two few many other`)
+  that always has `other`. A plural is chosen by the `count` parameter, by the
+  language's CLDR rule: Russian and Polish have `one few many`, Slovak
+  `one few other`, French `one other` (0 and 1 are `one`), Chinese only `other`.
+* `{name}` is a parameter. It is filled from a regular expression, never
+  `str.format`: a catalogue is data, and `{a.b}` in data must not read an
+  attribute of what the caller passed.
+* A catalogue that is not exactly this shape is refused whole (`i18n.load`
+  answers `{}`): that language falls back to English, the node does not stop.
+
+`tests/test_i18n.py` holds every translation to English's keys and parameters,
+and every plural entry to the forms its language uses. **Adding a key means
+adding it in all seven files**, or the suite is red.
+
+## In a page
+
+`/i18n.js` is loaded by every page right after `/theme.js`. It defines
+`NMESH_LANG` and `NMESH_I18N` (the language laid over English, so a missing
+translation is still a sentence). `ui.JS` gives pages:
+
+```js
+t("common.save")                       // a sentence
+t("count.node", {count: 3})            // a plural, chosen by Intl.PluralRules
+```
+
+and markup that carries its words as data, translated in one pass at load:
+
+```html
+<button data-i18n="common.save"></button>
+<input data-i18n-attr="placeholder:common.search;title:common.search">
+```
+
+A key nobody defined shows as itself — ugly on purpose. `applyI18n(root)`
+translates markup a page built later.
+
+## In an app
+
+* **Python**: `from src import i18n` then `i18n.t("common.saved", "de")`.
+* **The language the operator chose**: `AppHost.language` (`""` when the
+  browser decides). An app or its bridge that defines `set_language(code)` is
+  told at start and on every change; an app that raises costs only itself.
+* **An app's own page** is served by the same console and loads the same
+  `/i18n.js`, so `t()` and `data-i18n` work there as they do in the console.
+* An app ships its own sentences in its own catalogues under the same rule;
+  the shared ones (`common.*`, `state.*`, `count.*`, `language.*`) are for
+  everybody.
+
+## Adding a language
+
+Add the code to `NAMES` in `src/i18n.py` **and** `LANGUAGES` in `src/config.py`
+(it imports nothing of its own, so the list is spelled twice and a test holds
+them together), the plural rule to `plural_form` and `REQUIRED_FORMS` in the
+test, then `src/locales/<code>.json` with every key, including
+`language.name.<code>` in every file.

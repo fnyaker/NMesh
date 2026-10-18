@@ -648,6 +648,13 @@ Empty by default: the published GitHub releases. Set to a branch name, the check
 reads `src/version.py` at that branch instead and *Install* takes its tree. See
 [Following a branch instead of the releases](#following-a-branch-instead-of-the-releases).
 
+### `language` — what the console and the apps speak
+
+Empty by default: the browser decides (`Accept-Language`, among `en fr de ru zh
+pl sk`, else English). Set to one of those codes it wins over the browser, for
+every page and every app. It applies **live** and is read from the file on every
+page load. See [`../I18n/guide`](../I18n/guide).
+
 ### `update_check_minutes` / `update_when_active` — when the node goes looking
 
 `update_check_minutes` (5) is how often the node sweeps for an installable

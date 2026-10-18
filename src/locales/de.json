@@ -1,0 +1,47 @@
+{
+  "common.add": "Hinzufügen",
+  "common.back": "Zurück",
+  "common.cancel": "Abbrechen",
+  "common.close": "Schließen",
+  "common.copy": "Kopieren",
+  "common.delete": "Löschen",
+  "common.edit": "Bearbeiten",
+  "common.failed": "Etwas ist schiefgelaufen",
+  "common.loading": "Wird geladen…",
+  "common.none": "Keine",
+  "common.refresh": "Aktualisieren",
+  "common.remove": "Entfernen",
+  "common.retry": "Erneut versuchen",
+  "common.save": "Speichern",
+  "common.saved": "Gespeichert",
+  "common.search": "Suchen",
+  "common.send": "Senden",
+  "common.unknown": "Unbekannt",
+  "config.saved": "Konfiguration gespeichert",
+  "count.link": {
+    "one": "{count} Verbindung",
+    "other": "{count} Verbindungen"
+  },
+  "count.message": {
+    "one": "{count} Nachricht",
+    "other": "{count} Nachrichten"
+  },
+  "count.node": {
+    "one": "{count} Knoten",
+    "other": "{count} Knoten"
+  },
+  "language.auto": "Automatisch (Browser folgen)",
+  "language.help": "Sprache der Konsole und der Apps. Automatisch folgt dem Browser.",
+  "language.label": "Sprache",
+  "language.name.de": "Deutsch",
+  "language.name.en": "English",
+  "language.name.fr": "Français",
+  "language.name.pl": "Polski",
+  "language.name.ru": "Русский",
+  "language.name.sk": "Slovenčina",
+  "language.name.zh": "中文",
+  "state.connected": "Verbunden",
+  "state.disconnected": "Getrennt",
+  "state.offline": "Offline",
+  "state.online": "Online"
+}

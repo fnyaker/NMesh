@@ -1,0 +1,47 @@
+{
+  "common.add": "Ajouter",
+  "common.back": "Retour",
+  "common.cancel": "Annuler",
+  "common.close": "Fermer",
+  "common.copy": "Copier",
+  "common.delete": "Supprimer",
+  "common.edit": "Modifier",
+  "common.failed": "Une erreur est survenue",
+  "common.loading": "Chargement…",
+  "common.none": "Aucun",
+  "common.refresh": "Actualiser",
+  "common.remove": "Retirer",
+  "common.retry": "Réessayer",
+  "common.save": "Enregistrer",
+  "common.saved": "Enregistré",
+  "common.search": "Rechercher",
+  "common.send": "Envoyer",
+  "common.unknown": "Inconnu",
+  "config.saved": "Configuration enregistrée",
+  "count.link": {
+    "one": "{count} lien",
+    "other": "{count} liens"
+  },
+  "count.message": {
+    "one": "{count} message",
+    "other": "{count} messages"
+  },
+  "count.node": {
+    "one": "{count} nœud",
+    "other": "{count} nœuds"
+  },
+  "language.auto": "Automatique (suivre le navigateur)",
+  "language.help": "Langue de la console et des apps. Automatique suit le navigateur.",
+  "language.label": "Langue",
+  "language.name.de": "Deutsch",
+  "language.name.en": "English",
+  "language.name.fr": "Français",
+  "language.name.pl": "Polski",
+  "language.name.ru": "Русский",
+  "language.name.sk": "Slovenčina",
+  "language.name.zh": "中文",
+  "state.connected": "Connecté",
+  "state.disconnected": "Déconnecté",
+  "state.offline": "Hors ligne",
+  "state.online": "En ligne"
+}

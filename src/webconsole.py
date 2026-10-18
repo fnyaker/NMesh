@@ -40,6 +40,8 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs
 
 from . import app_api
+from . import config as node_config
+from . import i18n
 from . import app_web
 from . import control
 from .control import listing
@@ -681,6 +683,19 @@ class WebConsole:
         wherever the default would be: a node started with ``--config``
         elsewhere must not be told what some other file says."""
         return updater.update_branch(self._config_path)
+
+    def _i18n_script(self, accept_language: str | None) -> str:
+        """The strings a page speaks with, as the one script every page loads.
+
+        The language is the operator's saved choice, else the browser's, else
+        English — read from the file on every request, so a change is in force
+        on the next page load. Strings are laid over English so a gap in a
+        translation shows a sentence rather than a key."""
+        language = i18n.effective(node_config.language(self._config_path),
+                                  accept_language)
+        return ("window.NMESH_LANG=%s;window.NMESH_I18N=%s;" % (
+            json.dumps(language), json.dumps(i18n.bundle(language),
+                                             ensure_ascii=False)))
 
     @property
     def _api(self) -> "app_api.AppAPI":
@@ -1333,6 +1348,12 @@ def _make_handler(console: WebConsole):
                 return
             if path == "/api/events":
                 self._stream_changes()
+                return
+            if path == "/i18n.js":
+                self._send(200, "application/javascript; charset=utf-8",
+                           console._i18n_script(
+                               self.headers.get("Accept-Language")).encode("utf-8"),
+                           [("Cache-Control", "no-store")])
                 return
             if path in _STATIC:
                 ctype, text = _STATIC[path]

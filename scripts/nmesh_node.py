@@ -593,7 +593,8 @@ async def main() -> None:
     local_console = fleet_console.LocalConsole()
 
     if connector is not None:
-        host = AppHost(registry, app_storage=node.app_storage)
+        host = AppHost(registry, app_storage=node.app_storage,
+                       language=lambda: config.language(config_path))
         host.register("chat", _chat_factory(node, connector))
         host.register("fleet", _fleet_factory(node, connector, args.data,
                                               local_console))

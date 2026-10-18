@@ -1908,6 +1908,7 @@ PAGE_HTML = """<!doctype html>
 <meta name="theme-color" content="#0a0f16">
 <title>NMesh Terminal</title>
 <script src="/theme.js"></script>
+<script src="/i18n.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/term.css">
 </head>

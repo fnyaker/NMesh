@@ -235,6 +235,14 @@ whole pass that grouped those very links by node.
 - Change the *cause*, not the symptom: a wrong number on a page is fixed in the
   thing that computes it, once, not corrected at each place it is displayed.
 
+### Every interface string goes through the catalogue
+
+Seven languages — French, English, German, Russian, Chinese, Polish, Slovak — and
+the language the operator chose is handed to the apps. A sentence a person reads
+is a key in `src/locales/*.json`, asked for with `t()` (`Docs/I18n/guide`); it is
+never written into a page, an app or a message. A new key is added to **all
+seven** files in the same commit, plural forms included.
+
 ### No emoji in an interface
 
 Emoji make a product look cheap, render differently on every platform, and carry
