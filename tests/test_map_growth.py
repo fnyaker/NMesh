@@ -365,7 +365,7 @@ class TestThePageDrawsAClaimAsAClaim:
 
     def test_every_reported_edge_says_who_said_it(self):
         block = JS.split("grown.edges.forEach")[1].split("const dot =")[0]
-        assert '"said by " + shortId(edge.from)' in block
+        assert 't("console.said_by", {from: shortId(edge.from)})' in block
         assert "rtt" not in block
 
     def test_our_own_link_is_never_drawn_twice(self):

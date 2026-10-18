@@ -19,7 +19,7 @@ FLEET_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f6f8fa" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0a0e13" media="(prefers-color-scheme: dark)">
-<title>NMesh Fleet</title>
+<title data-i18n="fleet.nmesh_fleet">NMesh Fleet</title>
 <script src="/theme.js"></script>
 <script src="/i18n.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -31,80 +31,80 @@ FLEET_HTML = """<!doctype html>
 
 <div id="login" class="gate hidden">
   <form id="login-form">
-    <div class="mark" aria-hidden="true">NM</div>
-    <div><p class="eyebrow">Fleet</p><h1>Sign in</h1></div>
-    <p class="muted small">Fleet uses the console password of this node.</p>
-    <label class="field"><span>Console password</span>
+    <div class="mark" aria-hidden="true" data-i18n="console.nm">NM</div>
+    <div><p class="eyebrow" data-i18n="fleet.fleet">Fleet</p><h1 data-i18n="fleet.sign_in">Sign in</h1></div>
+    <p class="muted small" data-i18n="fleet.fleet_uses_the_console_password_of">Fleet uses the console password of this node.</p>
+    <label class="field"><span data-i18n="console.console_password">Console password</span>
       <input id="password" type="password" autocomplete="current-password" autofocus></label>
-    <button type="submit" class="primary wide">Enter</button>
+    <button type="submit" class="primary wide" data-i18n="fleet.enter">Enter</button>
     <p id="err" class="msg error" role="alert"></p>
   </form>
 </div>
 
-<a class="skip" href="#main">Skip to content</a>
+<a class="skip" href="#main" data-i18n="console.skip_to_content">Skip to content</a>
 <div id="shell" class="shell hidden">
   <aside class="rail">
-    <a class="brand" href="/fleet"><span class="mark" aria-hidden="true">NM</span>
-      <span><b>NMesh</b><span>Fleet</span></span></a>
-    <nav id="nav" class="nav" role="tablist" aria-label="Fleet sections">
-      <button role="tab" data-tab="nodes" data-label="Nodes" aria-selected="true"><span class="lbl">Nodes</span><span id="nav-managed" class="tail"></span></button>
-      <button role="tab" data-tab="access" data-label="Access" aria-selected="false"><span class="lbl">Who controls this node</span><span id="nav-pending" class="tail"></span></button>
-      <button role="tab" data-tab="docker" data-label="Docker" aria-selected="false"><span class="lbl">Docker</span><span id="nav-docker" class="tail"></span></button>
-      <button role="tab" data-tab="deploy" data-label="Deploy" aria-selected="false"><span class="lbl">Discover &amp; deploy</span></button>
-      <button role="tab" data-tab="shell" data-label="Shell" aria-selected="false"><span class="lbl">Shell</span></button>
-      <button role="tab" data-tab="logs" data-label="Logs" aria-selected="false"><span class="lbl">Logs</span><span id="nav-logs" class="tail"></span></button>
-      <button role="tab" data-tab="activity" data-label="Activity" aria-selected="false"><span class="lbl">Activity</span></button>
+    <a class="brand" href="/fleet"><span class="mark" aria-hidden="true" data-i18n="console.nm">NM</span>
+      <span><b>NMesh</b><span data-i18n="fleet.fleet">Fleet</span></span></a>
+    <nav id="nav" class="nav" role="tablist" aria-label="Fleet sections" data-i18n-attr="aria-label:fleet.fleet_sections">
+      <button role="tab" data-tab="nodes" data-label="Nodes" aria-selected="true" data-i18n-attr="data-label:fleet.nodes"><span class="lbl" data-i18n="fleet.nodes">Nodes</span><span id="nav-managed" class="tail"></span></button>
+      <button role="tab" data-tab="access" data-label="Access" aria-selected="false" data-i18n-attr="data-label:fleet.access"><span class="lbl" data-i18n="fleet.who_controls_this_node">Who controls this node</span><span id="nav-pending" class="tail"></span></button>
+      <button role="tab" data-tab="docker" data-label="Docker" aria-selected="false" data-i18n-attr="data-label:fleet.docker"><span class="lbl" data-i18n="fleet.docker">Docker</span><span id="nav-docker" class="tail"></span></button>
+      <button role="tab" data-tab="deploy" data-label="Deploy" aria-selected="false" data-i18n-attr="data-label:fleet.deploy"><span class="lbl" data-i18n="fleet.discover_deploy">Discover &amp; deploy</span></button>
+      <button role="tab" data-tab="shell" data-label="Shell" aria-selected="false" data-i18n-attr="data-label:fleet.shell"><span class="lbl" data-i18n="fleet.shell">Shell</span></button>
+      <button role="tab" data-tab="logs" data-label="Logs" aria-selected="false" data-i18n-attr="data-label:fleet.logs"><span class="lbl" data-i18n="fleet.logs">Logs</span><span id="nav-logs" class="tail"></span></button>
+      <button role="tab" data-tab="activity" data-label="Activity" aria-selected="false" data-i18n-attr="data-label:fleet.activity"><span class="lbl" data-i18n="fleet.activity">Activity</span></button>
     </nav>
     <div class="rail-foot">
-      <div class="rail-state"><span id="rail-dot" class="dot ok"></span><span id="rail-text">Fleet</span></div>
-      <a class="btn ghost wide" href="/">Back to console</a>
+      <div class="rail-state"><span id="rail-dot" class="dot ok"></span><span id="rail-text" data-i18n="fleet.fleet">Fleet</span></div>
+      <a class="btn ghost wide" href="/" data-i18n="fleet.back_to_console">Back to console</a>
     </div>
   </aside>
 
   <main id="main">
     <header class="topbar">
-      <div class="who"><span class="badge">This node</span>
-        <button id="me" class="ghost sm mono" title="This node's id"></button></div>
+      <div class="who"><span class="badge" data-i18n="console.this_node">This node</span>
+        <button id="me" class="ghost sm mono" title="This node's id" data-i18n-attr="title:fleet.this_node_s_id"></button></div>
       <span class="grow"></span>
       <div class="menu-wrap">
         <button id="notif-open" class="icon" data-menu="notif" aria-haspopup="true"
-                aria-expanded="false" aria-label="Notifications">
+                aria-expanded="false" aria-label="Notifications" data-i18n-attr="aria-label:fleet.notifications">
           <svg class="ic" width="17" height="17" viewBox="0 0 20 20" fill="none"
                stroke="currentColor" stroke-width="1.6" aria-hidden="true">
             <path d="M5 8a5 5 0 0 1 10 0c0 4 1.4 5.2 1.4 5.2H3.6S5 12 5 8Z"
                   stroke-linejoin="round"/><path d="M8.2 16a2 2 0 0 0 3.6 0"/></svg>
           <span id="notif-count" class="count" hidden></span></button>
-        <div id="notif" class="menu" role="region" hidden aria-label="Notifications">
-          <div class="menu-head"><span class="grow">Notifications</span>
-            <button id="notif-clear" class="ghost sm" data-menu-close>Mark all read</button></div>
+        <div id="notif" class="menu" role="region" hidden aria-label="Notifications" data-i18n-attr="aria-label:fleet.notifications">
+          <div class="menu-head"><span class="grow" data-i18n="fleet.notifications">Notifications</span>
+            <button id="notif-clear" class="ghost sm" data-menu-close data-i18n="fleet.mark_all_read">Mark all read</button></div>
           <div id="notif-list"></div>
         </div>
       </div>
       <div id="refresh" class="refresh">
-        <label class="sr-only" for="refresh-secs">Auto-refresh, in seconds (0 turns it off)</label>
+        <label class="sr-only" for="refresh-secs" data-i18n="fleet.auto_refresh_in_seconds_0_turns_it">Auto-refresh, in seconds (0 turns it off)</label>
         <input id="refresh-secs" type="number" min="0" max="30" step="1" inputmode="numeric">
         <span class="unit" aria-hidden="true">s</span>
-        <label class="sr-only" for="refresh-pick">Auto-refresh</label>
+        <label class="sr-only" for="refresh-pick" data-i18n="console.auto_refresh">Auto-refresh</label>
         <select id="refresh-pick">
-          <option value="0">Off</option>
+          <option value="0" data-i18n="console.off">Off</option>
           <option value="1">1s</option>
           <option value="2">2s</option>
           <option value="5">5s</option>
           <option value="10">10s</option>
           <option value="30">30s</option>
         </select>
-        <button id="refresh-now" class="icon sm" aria-label="Refresh now" title="Refresh now">⟳</button>
+        <button id="refresh-now" class="icon sm" aria-label="Refresh now" title="Refresh now" data-i18n-attr="aria-label:console.refresh_now;title:console.refresh_now">⟳</button>
       </div>
       <button id="palette-open" class="ghost sm">Search <span class="kbd">⌘K</span></button>
-      <button id="theme-toggle" class="icon" aria-label="Switch theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
+      <button id="theme-toggle" class="icon" aria-label="Switch theme" data-i18n-attr="aria-label:console.switch_theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
       <div class="menu-wrap more-wrap">
         <button class="icon" data-menu="more" aria-haspopup="true" aria-expanded="false"
-                aria-label="More">⋯</button>
-        <div id="more" class="menu" role="region" hidden aria-label="More">
-          <div class="menu-head"><span class="grow">Fleet</span></div>
-          <button class="item" id="more-search" data-menu-close>Search &amp; commands</button>
+                aria-label="More" data-i18n-attr="aria-label:console.more">⋯</button>
+        <div id="more" class="menu" role="region" hidden aria-label="More" data-i18n-attr="aria-label:console.more">
+          <div class="menu-head"><span class="grow" data-i18n="fleet.fleet">Fleet</span></div>
+          <button class="item" id="more-search" data-menu-close data-i18n="console.search_commands">Search &amp; commands</button>
           <div class="sep"></div>
-          <a href="/">Back to console</a>
+          <a href="/" data-i18n="fleet.back_to_console">Back to console</a>
         </div>
       </div>
     </header>
@@ -112,11 +112,11 @@ FLEET_HTML = """<!doctype html>
     <!-- ── Nodes we manage ──────────────────────────────────────────────── -->
     <section id="panel-nodes" class="content panel" role="tabpanel" data-panel="nodes">
       <div class="page-head">
-        <div class="grow"><p class="eyebrow">Managed</p><h1>Nodes you control</h1>
-          <p class="lede">Each of these accepted a request from this node, and granted exactly the
+        <div class="grow"><p class="eyebrow" data-i18n="fleet.managed">Managed</p><h1 data-i18n="fleet.nodes_you_control">Nodes you control</h1>
+          <p class="lede" data-i18n="fleet.each_of_these_accepted_a_request">Each of these accepted a request from this node, and granted exactly the
             capabilities shown. Nothing here was taken; all of it was given.</p></div>
-        <div class="actions"><button id="group-new" class="ghost">New group</button>
-          <button id="add-open" class="primary">Request access to a node</button></div>
+        <div class="actions"><button id="group-new" class="ghost" data-i18n="fleet.new_group">New group</button>
+          <button id="add-open" class="primary" data-i18n="fleet.request_access_to_a_node">Request access to a node</button></div>
       </div>
       <!-- Groups: this console's own names for sets of machines. They say
            nothing to any node in them — they are a way of pointing at several
@@ -129,8 +129,8 @@ FLEET_HTML = """<!doctype html>
     <!-- ── Who controls this node ───────────────────────────────────────── -->
     <section id="panel-access" class="content panel" role="tabpanel" data-panel="access" hidden>
       <div class="page-head">
-        <div class="grow"><p class="eyebrow">Inbound</p><h1>Who controls this node</h1>
-          <p class="lede">Every node listed here can act on this machine. A right is only ever added
+        <div class="grow"><p class="eyebrow" data-i18n="fleet.inbound">Inbound</p><h1 data-i18n="fleet.who_controls_this_node">Who controls this node</h1>
+          <p class="lede" data-i18n="fleet.every_node_listed_here_can_act_on">Every node listed here can act on this machine. A right is only ever added
             from here — a node can ask, but someone standing on this machine has to agree.</p></div>
       </div>
       <div id="inbox" class="stack"></div>
@@ -140,65 +140,65 @@ FLEET_HTML = """<!doctype html>
     <!-- ── Docker ───────────────────────────────────────────────────────── -->
     <section id="panel-docker" class="content panel" role="tabpanel" data-panel="docker" hidden>
       <div class="page-head">
-        <div class="grow"><p class="eyebrow">Containers</p><h1>Docker</h1>
-          <p class="lede">The stacks and containers of one machine, found from what it runs —
+        <div class="grow"><p class="eyebrow" data-i18n="fleet.containers">Containers</p><h1 data-i18n="fleet.docker">Docker</h1>
+          <p class="lede" data-i18n="fleet.the_stacks_and_containers_of_one">The stacks and containers of one machine, found from what it runs —
             whether compose or Portainer deployed them — and brought up to date the way
             their owner would.</p></div>
         <div class="actions">
-          <label class="field"><span class="sr-only">Machine</span><select id="dk-node"></select></label>
-          <button id="dk-refresh" class="ghost">Refresh</button>
+          <label class="field"><span class="sr-only" data-i18n="fleet.machine">Machine</span><select id="dk-node"></select></label>
+          <button id="dk-refresh" class="ghost" data-i18n="common.refresh">Refresh</button>
         </div>
       </div>
       <div id="dk-summary"></div>
 
-      <nav id="dk-tabs" class="subnav" role="tablist" aria-label="Docker views">
+      <nav id="dk-tabs" class="subnav" role="tablist" aria-label="Docker views" data-i18n-attr="aria-label:fleet.docker_views">
         <button role="tab" data-subtab="stacks" aria-selected="true">Stacks <span id="dk-n-stacks" class="tail"></span></button>
         <button role="tab" data-subtab="containers" aria-selected="false">Containers <span id="dk-n-containers" class="tail"></span></button>
-        <button role="tab" data-subtab="images" aria-selected="false">Images</button>
-        <button role="tab" data-subtab="storage" aria-selected="false">Volumes &amp; networks</button>
+        <button role="tab" data-subtab="images" aria-selected="false" data-i18n="fleet.images">Images</button>
+        <button role="tab" data-subtab="storage" aria-selected="false" data-i18n="fleet.volumes_networks">Volumes &amp; networks</button>
         <button role="tab" data-subtab="portainer" aria-selected="false">Portainer <span id="dk-n-portainer" class="tail"></span></button>
       </nav>
 
       <div data-sub="stacks" class="stack">
         <div class="toolbar">
-          <label class="search"><span class="sr-only">Filter stacks</span>
-            <input id="dk-stack-filter" type="search" placeholder="Filter stacks" autocomplete="off"></label>
+          <label class="search"><span class="sr-only" data-i18n="fleet.filter_stacks">Filter stacks</span>
+            <input id="dk-stack-filter" type="search" placeholder="Filter stacks" autocomplete="off" data-i18n-attr="placeholder:fleet.filter_stacks"></label>
           <span id="dk-checked" class="muted small grow"></span>
-          <button id="dk-check" class="ghost">Check for updates</button>
-          <button id="dk-update-all" class="primary" hidden>Update all</button>
-          <button id="dk-stack-new" class="ghost">Deploy a stack</button>
+          <button id="dk-check" class="ghost" data-i18n="console.check_for_updates">Check for updates</button>
+          <button id="dk-update-all" class="primary" hidden data-i18n="fleet.update_all">Update all</button>
+          <button id="dk-stack-new" class="ghost" data-i18n="fleet.deploy_a_stack">Deploy a stack</button>
         </div>
         <div id="dk-stacks" class="stack"></div>
       </div>
 
       <div data-sub="containers" class="stack" hidden>
         <div class="toolbar">
-          <label class="search"><span class="sr-only">Filter containers</span>
-            <input id="dk-ct-filter" type="search" placeholder="Filter containers" autocomplete="off"></label>
-          <div class="segmented" role="group" aria-label="Which containers">
-            <button data-dk-scope="all" aria-selected="true">All</button>
-            <button data-dk-scope="loose" aria-selected="false">Outside a stack</button>
+          <label class="search"><span class="sr-only" data-i18n="fleet.filter_containers">Filter containers</span>
+            <input id="dk-ct-filter" type="search" placeholder="Filter containers" autocomplete="off" data-i18n-attr="placeholder:fleet.filter_containers"></label>
+          <div class="segmented" role="group" aria-label="Which containers" data-i18n-attr="aria-label:fleet.which_containers">
+            <button data-dk-scope="all" aria-selected="true" data-i18n="console.all">All</button>
+            <button data-dk-scope="loose" aria-selected="false" data-i18n="fleet.outside_a_stack">Outside a stack</button>
           </div>
           <span class="grow"></span>
-          <button id="dk-container-new" class="ghost">Run a container</button>
+          <button id="dk-container-new" class="ghost" data-i18n="fleet.run_a_container">Run a container</button>
         </div>
         <article class="card"><div class="card-body tight"><div id="dk-containers"></div></div></article>
       </div>
 
       <div data-sub="images" class="stack" hidden>
         <form id="dk-pull-form" class="toolbar">
-          <label class="field grow"><span class="sr-only">Image</span>
+          <label class="field grow"><span class="sr-only" data-i18n="fleet.image">Image</span>
             <input id="dk-pull" class="mono" placeholder="ghcr.io/owner/image:tag"
-                   autocomplete="off" spellcheck="false"></label>
-          <button type="submit" class="primary">Pull</button>
+                   autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:fleet.ghcr_io_owner_image_tag"></label>
+          <button type="submit" class="primary" data-i18n="fleet.pull">Pull</button>
         </form>
         <article class="card"><div class="card-body tight"><div id="dk-images"></div></div></article>
       </div>
 
       <div data-sub="storage" class="stack" hidden>
-        <article class="card"><div class="card-head"><div class="grow"><h2>Volumes</h2></div></div>
+        <article class="card"><div class="card-head"><div class="grow"><h2 data-i18n="fleet.volumes">Volumes</h2></div></div>
           <div class="card-body tight"><div id="dk-volumes"></div></div></article>
-        <article class="card"><div class="card-head"><div class="grow"><h2>Networks</h2></div></div>
+        <article class="card"><div class="card-head"><div class="grow"><h2 data-i18n="fleet.networks">Networks</h2></div></div>
           <div class="card-body tight"><div id="dk-networks"></div></div></article>
       </div>
 
@@ -210,21 +210,21 @@ FLEET_HTML = """<!doctype html>
     <!-- ── Discover & deploy ────────────────────────────────────────────── -->
     <section id="panel-deploy" class="content panel" role="tabpanel" data-panel="deploy" hidden>
       <div class="page-head">
-        <div class="grow"><p class="eyebrow">Expand</p><h1>Discover &amp; deploy</h1>
+        <div class="grow"><p class="eyebrow" data-i18n="console.expand">Expand</p><h1 data-i18n="fleet.discover_deploy">Discover &amp; deploy</h1>
           <p class="lede">Sweep a network for SSH hosts, then install NMesh on the ones you pick —
             with the same <code class="inline">install.sh</code> a local install runs.</p></div>
       </div>
 
       <article class="card">
-        <div class="card-head"><div class="grow"><h2>1 · Scan</h2>
+        <div class="card-head"><div class="grow"><h2 data-i18n="fleet.1_scan">1 · Scan</h2>
           <div class="sub">From this node, or from any node that granted you <code class="inline">scan</code></div></div></div>
         <div class="card-body">
           <div class="toolbar">
-            <label class="field"><span>Scan from</span><select id="scan-from"></select></label>
-            <label class="field grow"><span>Targets</span>
-              <input id="scan-nets" class="mono" placeholder="auto — or 192.168.1.0/24, 10.0.0.5, nas.lan:2222" spellcheck="false">
-              <span class="hint">A subnet, a machine, or nothing to sweep every attached network.</span></label>
-            <button id="scan-btn" class="primary">Scan</button>
+            <label class="field"><span data-i18n="fleet.scan_from">Scan from</span><select id="scan-from"></select></label>
+            <label class="field grow"><span data-i18n="fleet.targets">Targets</span>
+              <input id="scan-nets" class="mono" placeholder="auto — or 192.168.1.0/24, 10.0.0.5, nas.lan:2222" spellcheck="false" data-i18n-attr="placeholder:fleet.auto_or_192_168_1_0_24_10_0_0_5_nas">
+              <span class="hint" data-i18n="fleet.a_subnet_a_machine_or_nothing_to">A subnet, a machine, or nothing to sweep every attached network.</span></label>
+            <button id="scan-btn" class="primary" data-i18n="fleet.scan">Scan</button>
           </div>
           <div id="scan-nets-found" class="chips"></div>
           <p id="scan-note" class="msg"></p>
@@ -233,72 +233,72 @@ FLEET_HTML = """<!doctype html>
       </article>
 
       <article id="deploy" class="card hidden">
-        <div class="card-head"><div class="grow"><h2>2 · Install</h2>
-          <div class="sub">Credentials are held in memory for the run only</div></div>
+        <div class="card-head"><div class="grow"><h2 data-i18n="fleet.2_install">2 · Install</h2>
+          <div class="sub" data-i18n="fleet.credentials_are_held_in_memory_for">Credentials are held in memory for the run only</div></div>
           <span class="badge accent"><span id="deploy-count">0</span> selected</span></div>
         <div class="card-body">
           <div class="notice"><span>Secrets never touch the target's disk and are never passed on a
-            command line. An uploaded key lives in this node's <b>encrypted</b> store and is written
+            command line. An uploaded key lives in this node's <b data-i18n="fleet.encrypted">encrypted</b> store and is written
             to a private temporary file only while a command runs.</span></div>
 
           <div class="toolbar">
-            <label class="field grow"><span>SSH key</span><select id="ssh-key"></select></label>
+            <label class="field grow"><span data-i18n="fleet.ssh_key">SSH key</span><select id="ssh-key"></select></label>
             <input id="key-file" type="file" hidden>
-            <button type="button" id="key-add">Upload a key…</button>
-            <button type="button" id="key-del" class="danger">Remove</button>
+            <button type="button" id="key-add" data-i18n="fleet.upload_a_key">Upload a key…</button>
+            <button type="button" id="key-del" class="danger" data-i18n="common.remove">Remove</button>
           </div>
           <p id="key-note" class="msg"></p>
 
           <div class="form-grid">
-            <label class="field"><span>SSH user</span>
-              <input id="ssh-user" autocomplete="off" placeholder="root" spellcheck="false"></label>
-            <label class="field"><span>Password</span>
-              <input id="ssh-pass" type="password" autocomplete="new-password" placeholder="optional"></label>
-            <label class="field"><span>Key passphrase</span>
-              <input id="ssh-kpass" type="password" autocomplete="new-password" placeholder="optional"></label>
+            <label class="field"><span data-i18n="fleet.ssh_user">SSH user</span>
+              <input id="ssh-user" autocomplete="off" placeholder="root" spellcheck="false" data-i18n-attr="placeholder:fleet.root"></label>
+            <label class="field"><span data-i18n="fleet.password">Password</span>
+              <input id="ssh-pass" type="password" autocomplete="new-password" placeholder="optional" data-i18n-attr="placeholder:fleet.optional"></label>
+            <label class="field"><span data-i18n="fleet.key_passphrase">Key passphrase</span>
+              <input id="ssh-kpass" type="password" autocomplete="new-password" placeholder="optional" data-i18n-attr="placeholder:fleet.optional"></label>
           </div>
-          <p class="muted small">Give a password, a key, or both — both are tried.</p>
+          <p class="muted small" data-i18n="fleet.give_a_password_a_key_or_both_both">Give a password, a key, or both — both are tried.</p>
 
           <label class="check"><input id="ssh-sudo" type="checkbox" checked>
             <span>This user can run <code class="inline">sudo</code></span></label>
           <div class="form-grid">
-            <label class="field"><span>Otherwise, an account that can</span>
-              <input id="sudo-user" autocomplete="off" placeholder="sudo account" spellcheck="false" disabled></label>
-            <label class="field"><span>Its password</span>
-              <input id="sudo-pass" type="password" autocomplete="new-password" placeholder="optional" disabled></label>
+            <label class="field"><span data-i18n="fleet.otherwise_an_account_that_can">Otherwise, an account that can</span>
+              <input id="sudo-user" autocomplete="off" placeholder="sudo account" spellcheck="false" disabled data-i18n-attr="placeholder:fleet.sudo_account"></label>
+            <label class="field"><span data-i18n="fleet.its_password">Its password</span>
+              <input id="sudo-pass" type="password" autocomplete="new-password" placeholder="optional" disabled data-i18n-attr="placeholder:fleet.optional"></label>
           </div>
 
           <fieldset class="field bare">
-            <legend class="field"><span>Where NMesh goes on each machine</span></legend>
+            <legend class="field"><span data-i18n="fleet.where_nmesh_goes_on_each_machine">Where NMesh goes on each machine</span></legend>
             <div class="form-grid">
               <label class="check card-like"><input type="radio" name="dep-mode" value="system" checked>
-                <span><b>System</b> — <code class="inline">/opt/nmesh</code>, its own service account.
+                <span><b data-i18n="fleet.system">System</b> — <code class="inline">/opt/nmesh</code>, its own service account.
                   A boot service, install and state owned by that account in mode 700. Needs root on
-                  the target. <b>Recommended.</b></span></label>
+                  the target. <b data-i18n="fleet.recommended">Recommended.</b></span></label>
               <label class="check card-like"><input type="radio" name="dep-mode" value="user">
-                <span><b>User</b> — the login account's home, no root needed. Everything that account
+                <span><b data-i18n="fleet.user">User</b> — the login account's home, no root needed. Everything that account
                   runs can read the node's identity key.</span></label>
             </div>
           </fieldset>
 
-          <div class="field"><span>Capabilities the new machines grant you</span>
+          <div class="field"><span data-i18n="fleet.capabilities_the_new_machines_grant">Capabilities the new machines grant you</span>
             <div id="deploy-caps" class="chips"></div></div>
 
           <label class="check"><input id="deploy-auto" type="checkbox" checked>
-            <span>Keep them updated from the publishers this node accepts</span></label>
-          <p class="muted small">The new machines pin the same release publishers as this node
+            <span data-i18n="fleet.keep_them_updated_from_the">Keep them updated from the publishers this node accepts</span></label>
+          <p class="muted small" data-i18n="fleet.the_new_machines_pin_the_same">The new machines pin the same release publishers as this node
             (and this node itself), and install their signed releases on their own. It is set
             here or nowhere: a headless box has nobody to paste a publisher key into a console,
             and would accept nothing from the mesh for ever.</p>
 
-          <details class="card"><summary>Install options</summary>
+          <details class="card"><summary data-i18n="fleet.install_options">Install options</summary>
             <div class="card-body stack">
               <p class="muted small">Every one of these is a switch
                 <code class="inline">install.sh</code> already has. Chosen here because a machine
                 installed from this page is a machine nobody is going to log into afterwards to
                 change its mind.</p>
               <label class="check"><input id="dep-docker" type="checkbox" checked>
-                <span>Let the node manage that machine's <b>docker</b> — its account joins the
+                <span>Let the node manage that machine's <b data-i18n="fleet.docker_2">docker</b> — its account joins the
                   <code class="inline">docker</code> group</span></label>
               <p class="muted small">On by default for a system install of a machine that has
                 docker, like <code class="inline">install.sh</code> run with sudo. It is not a small
@@ -306,19 +306,19 @@ FLEET_HTML = """<!doctype html>
                 bind-mounting <code class="inline">/</code> — that is root on that machine. Untick it
                 and the machine is told no, and remembers it across upgrades.</p>
               <label class="check"><input id="dep-update" type="checkbox" checked>
-                <span>Let it run its own system updates (one fixed root command)</span></label>
+                <span data-i18n="fleet.let_it_run_its_own_system_updates">Let it run its own system updates (one fixed root command)</span></label>
               <label class="check"><input id="dep-fleet" type="checkbox" checked>
-                <span>Start the fleet app on it, so it can be managed and can deploy further</span></label>
+                <span data-i18n="fleet.start_the_fleet_app_on_it_so_it_can">Start the fleet app on it, so it can be managed and can deploy further</span></label>
               <div class="split">
-                <label class="field"><span>Install directory</span>
+                <label class="field"><span data-i18n="fleet.install_directory">Install directory</span>
                   <input id="dep-prefix" class="mono" placeholder="/opt/nmesh"
-                         autocomplete="off" spellcheck="false"></label>
-                <label class="field"><span>State directory</span>
+                         autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:fleet.opt_nmesh"></label>
+                <label class="field"><span data-i18n="fleet.state_directory">State directory</span>
                   <input id="dep-data" class="mono" placeholder="/var/lib/nmesh"
-                         autocomplete="off" spellcheck="false"></label>
-                <label class="field"><span>Service name</span>
+                         autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:fleet.var_lib_nmesh"></label>
+                <label class="field"><span data-i18n="fleet.service_name">Service name</span>
                   <input id="dep-service" class="mono" placeholder="nmesh"
-                         autocomplete="off" spellcheck="false"></label>
+                         autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:console.nmesh"></label>
               </div>
             </div>
           </details>
@@ -334,26 +334,26 @@ FLEET_HTML = """<!doctype html>
     <!-- ── Shell ────────────────────────────────────────────────────────── -->
     <section id="panel-shell" class="content panel" role="tabpanel" data-panel="shell" hidden>
       <div class="page-head">
-        <div class="grow"><p class="eyebrow">Live</p><h1>Shell</h1>
+        <div class="grow"><p class="eyebrow" data-i18n="console.live">Live</p><h1 data-i18n="fleet.shell">Shell</h1>
           <p class="lede">A real terminal on a node that granted <code class="inline">shell</code>.
             Keystrokes go straight to the remote pty — Ctrl-C, Tab, arrows, and password prompts
             that stay invisible because the pty turns echo off.</p></div>
       </div>
       <article class="card">
         <div class="card-head">
-          <label class="field grow"><span class="sr-only">Node</span><select id="shell-node"></select></label>
-          <button id="shell-open" class="primary">Open shell</button>
-          <button id="shell-full" class="ghost">Full screen</button>
-          <button id="shell-kill" class="danger">Close</button>
+          <label class="field grow"><span class="sr-only" data-i18n="node.node">Node</span><select id="shell-node"></select></label>
+          <button id="shell-open" class="primary" data-i18n="fleet.open_shell">Open shell</button>
+          <button id="shell-full" class="ghost" data-i18n="fleet.full_screen">Full screen</button>
+          <button id="shell-kill" class="danger" data-i18n="common.close">Close</button>
         </div>
         <div class="card-body tight">
           <div id="term" class="term" tabindex="0" role="application"
-               aria-label="Remote shell"></div>
+               aria-label="Remote shell" data-i18n-attr="aria-label:term.remote_shell"></div>
           <form id="term-form" class="toolbar padded">
-            <label class="field grow"><span class="sr-only">Send a whole line</span>
+            <label class="field grow"><span class="sr-only" data-i18n="fleet.send_a_whole_line">Send a whole line</span>
               <input id="term-in" class="mono" placeholder="…or type a whole line here and press Enter"
-                     autocomplete="off" spellcheck="false"></label>
-            <button type="submit" class="primary">Send</button>
+                     autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:fleet.or_type_a_whole_line_here_and_press"></label>
+            <button type="submit" class="primary" data-i18n="common.send">Send</button>
           </form>
         </div>
       </article>
@@ -362,27 +362,27 @@ FLEET_HTML = """<!doctype html>
     <!-- ── Logs ─────────────────────────────────────────────────────────── -->
     <section id="panel-logs" class="content panel" role="tabpanel" data-panel="logs" hidden>
       <div class="page-head">
-        <div class="grow"><p class="eyebrow">What the machines said</p><h1>Logs</h1>
-          <p class="lede">Lines collected from the machines this node manages —
+        <div class="grow"><p class="eyebrow" data-i18n="fleet.what_the_machines_said">What the machines said</p><h1 data-i18n="fleet.logs">Logs</h1>
+          <p class="lede" data-i18n="fleet.lines_collected_from_the_machines">Lines collected from the machines this node manages —
             what happened on them while nobody was looking. Kept here, in memory,
             one bounded ring per machine.</p></div>
       </div>
 
       <article class="card">
-        <div class="card-head"><div class="grow"><h2>Collection</h2>
-          <div class="sub">What is followed, and how much of it is kept.</div></div></div>
+        <div class="card-head"><div class="grow"><h2 data-i18n="fleet.collection">Collection</h2>
+          <div class="sub" data-i18n="fleet.what_is_followed_and_how_much_of_it">What is followed, and how much of it is kept.</div></div></div>
         <div class="card-body">
           <div class="row wrap gap-4">
-            <label class="field"><span>Default behaviour</span>
+            <label class="field"><span data-i18n="fleet.default_behaviour">Default behaviour</span>
               <select id="logs-default-policy">
-                <option value="always">Always follow</option>
-                <option value="active">Only while a page is open on it</option>
-                <option value="never">Never — ask when needed</option>
+                <option value="always" data-i18n="fleet.always_follow">Always follow</option>
+                <option value="active" data-i18n="fleet.only_while_a_page_is_open_on_it">Only while a page is open on it</option>
+                <option value="never" data-i18n="fleet.never_ask_when_needed">Never — ask when needed</option>
               </select></label>
-            <label class="field"><span>Megabytes kept per machine</span>
+            <label class="field"><span data-i18n="fleet.megabytes_kept_per_machine">Megabytes kept per machine</span>
               <input id="logs-default-size" type="number" min="0.1" step="0.5"></label>
             <span class="grow"></span>
-            <button id="logs-forget" class="danger">Forget everything collected</button>
+            <button id="logs-forget" class="danger" data-i18n="fleet.forget_everything_collected">Forget everything collected</button>
           </div>
           <div id="logs-collection" class="small muted"></div>
         </div>
@@ -390,34 +390,34 @@ FLEET_HTML = """<!doctype html>
 
       <article class="card">
         <div class="card-head"><div class="grow"><h2>Lines <span id="logs-count" class="badge"></span></h2>
-          <div class="sub">Newest first, by the time this node received them.</div></div></div>
+          <div class="sub" data-i18n="fleet.newest_first_by_the_time_this_node">Newest first, by the time this node received them.</div></div></div>
         <div class="card-body">
           <div class="row wrap gap-4">
-            <label class="field"><span>Machine</span>
-              <select id="logs-node"><option value="">Every machine</option></select></label>
-            <label class="field"><span>Level</span>
+            <label class="field"><span data-i18n="fleet.machine">Machine</span>
+              <select id="logs-node"><option value="" data-i18n="fleet.every_machine">Every machine</option></select></label>
+            <label class="field"><span data-i18n="console.level">Level</span>
               <select id="logs-level">
-                <option value="">Everything</option>
-                <option value="debug">debug and above</option>
-                <option value="info">info and above</option>
-                <option value="warn">warnings and errors</option>
-                <option value="error">errors only</option>
+                <option value="" data-i18n="console.everything">Everything</option>
+                <option value="debug" data-i18n="fleet.debug_and_above">debug and above</option>
+                <option value="info" data-i18n="console.info_and_above">info and above</option>
+                <option value="warn" data-i18n="console.warnings_and_errors">warnings and errors</option>
+                <option value="error" data-i18n="console.errors_only">errors only</option>
               </select></label>
-            <label class="field"><span>Source</span>
-              <input id="logs-source" type="search" placeholder="node, peers, app:…"></label>
-            <label class="field"><span>Contains</span>
-              <input id="logs-contains" type="search" placeholder="text or a field value"></label>
-            <label class="field"><span>Since</span>
+            <label class="field"><span data-i18n="console.source">Source</span>
+              <input id="logs-source" type="search" placeholder="node, peers, app:…" data-i18n-attr="placeholder:console.node_peers_app"></label>
+            <label class="field"><span data-i18n="console.contains">Contains</span>
+              <input id="logs-contains" type="search" placeholder="text or a field value" data-i18n-attr="placeholder:console.text_or_a_field_value"></label>
+            <label class="field"><span data-i18n="fleet.since">Since</span>
               <input id="logs-since" type="datetime-local"></label>
-            <label class="field"><span>Until</span>
+            <label class="field"><span data-i18n="fleet.until">Until</span>
               <input id="logs-until" type="datetime-local"></label>
             <span class="grow"></span>
-            <button id="logs-fetch">Ask this machine now</button>
+            <button id="logs-fetch" data-i18n="fleet.ask_this_machine_now">Ask this machine now</button>
           </div>
           <div id="logs-policy" class="small muted"></div>
           <div class="table-wrap"><table>
-            <thead><tr><th>When</th><th>Machine</th><th>Level</th><th>Source</th>
-              <th>Line</th></tr></thead>
+            <thead><tr><th data-i18n="fleet.when">When</th><th data-i18n="fleet.machine">Machine</th><th data-i18n="console.level">Level</th><th data-i18n="console.source">Source</th>
+              <th data-i18n="fleet.line">Line</th></tr></thead>
             <tbody id="logs-rows"></tbody></table></div>
         </div>
       </article>
@@ -426,8 +426,8 @@ FLEET_HTML = """<!doctype html>
     <!-- ── Activity ─────────────────────────────────────────────────────── -->
     <section id="panel-activity" class="content panel" role="tabpanel" data-panel="activity" hidden>
       <div class="page-head">
-        <div class="grow"><p class="eyebrow">History</p><h1>Activity</h1>
-          <p class="lede">What this node asked, what it was asked, and how each ended.</p></div>
+        <div class="grow"><p class="eyebrow" data-i18n="fleet.history">History</p><h1 data-i18n="fleet.activity">Activity</h1>
+          <p class="lede" data-i18n="fleet.what_this_node_asked_what_it_was">What this node asked, what it was asked, and how each ended.</p></div>
       </div>
       <article class="card"><div class="card-body tight"><div id="log" class="log"></div></div></article>
     </section>
@@ -437,7 +437,7 @@ FLEET_HTML = """<!doctype html>
 <dialog id="modal" aria-labelledby="modal-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="modal-title"></h2>
-      <button id="modal-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
+      <button id="modal-close" class="icon" aria-label="Close" data-i18n-attr="aria-label:common.close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
     <div id="modal-body" class="sheet-body"></div>
   </div>
 </dialog>
@@ -447,16 +447,16 @@ FLEET_HTML = """<!doctype html>
     <header class="sheet-head"><h2 id="confirm-title"></h2></header>
     <div class="sheet-body"><div id="confirm-body"></div></div>
     <footer class="sheet-foot">
-      <button id="confirm-cancel">Cancel</button>
-      <button id="confirm-ok" class="primary">Confirm</button>
+      <button id="confirm-cancel" data-i18n="common.cancel">Cancel</button>
+      <button id="confirm-ok" class="primary" data-i18n="console.confirm">Confirm</button>
     </footer>
   </div>
 </dialog>
 
-<dialog id="palette" class="palette" aria-label="Command palette">
+<dialog id="palette" class="palette" aria-label="Command palette" data-i18n-attr="aria-label:console.command_palette">
   <div class="sheet">
     <input id="palette-input" type="text" placeholder="Jump to a section, or run an action…"
-           autocomplete="off" spellcheck="false" aria-controls="palette-list">
+           autocomplete="off" spellcheck="false" aria-controls="palette-list" data-i18n-attr="placeholder:console.jump_to_a_section_or_run_an_action">
     <div id="palette-list" class="list" role="listbox"></div>
   </div>
 </dialog>
@@ -637,7 +637,7 @@ async function passwordDialog(id){
     toast(data.error || "That password is no longer here.", "danger");
     return poll();
   }
-  $("modal-title").textContent = "Console of " + (data.label || data.host || shortId(id));
+  $("modal-title").textContent = t("fleet.console_of", {id: (data.label || data.host || shortId(id))});
   $("modal-body").innerHTML =
     '<div class="notice"><span>Shown once. Close this and it is gone from this console; ' +
     "change it from that machine's Settings if it was seen by anybody else.</span></div>" +
@@ -649,14 +649,14 @@ async function passwordDialog(id){
 function approveDialog(id){
   const request = (ST.pending_in || []).find((entry) => entry.id === id);
   if(!request) return;
-  $("modal-title").textContent = "Accept " + shortId(id) + "?";
+  $("modal-title").textContent = t("fleet.accept", {id: shortId(id)});
   $("modal-body").innerHTML =
     '<p class="muted small">Each capability you grant lets that node act on this one. You can ' +
     "narrow the list; you cannot grant more than was asked. What you leave ticked is exactly " +
     "what it holds afterwards" + ((request.have || []).length ? " — including what it has now." : ".") +
     '</p><div id="ap-caps" class="cap-pick"></div>' +
-    '<div class="btn-row"><button id="ap-ok" class="primary">Grant access</button>' +
-    '<button id="ap-no">Cancel</button></div>';
+    '<div class="btn-row"><button id="ap-ok" class="primary" data-i18n="fleet.grant_access">Grant access</button>' +
+    '<button id="ap-no" data-i18n="common.cancel">Cancel</button></div>';
   const box = $("ap-caps");
   box.innerHTML = (request.caps || []).map((cap) => {
     const known = (ST.capabilities || []).find((entry) => entry.name === cap);
@@ -666,7 +666,7 @@ function approveDialog(id){
   }).join("");
   $("ap-ok").addEventListener("click", async () => {
     await api("/api/fleet/approve", "POST", {node:id, caps:capsOf(box)});
-    $("modal").close(); toast("Access granted", "ok"); poll();
+    $("modal").close(); toast(t("fleet.access_granted"), "ok"); poll();
   });
   $("ap-no").addEventListener("click", () => $("modal").close());
   $("modal").showModal();
@@ -674,7 +674,7 @@ function approveDialog(id){
 
 // ---- nodes we manage -------------------------------------------------------
 function statusHTML(status){
-  if(!status) return '<p class="small muted">No status yet.</p>';
+  if(!status) return '<p class="small muted" data-i18n="fleet.no_status_yet">No status yet.</p>';
   const memory = status.memory || {}, disks = status.disks || [];
   const root = disks[0] || null, host = status.host || {};
   const load = (status.load && status.load.length) ? status.load[0].toFixed(2) : "—";
@@ -774,31 +774,31 @@ function paintNodes(){
     "Ask a node to let you manage it, or install one from Discover & deploy."));
 }
 function addDialog(){
-  $("modal-title").textContent = "Request access to a node";
+  $("modal-title").textContent = t("fleet.request_access_to_a_node");
   $("modal-body").innerHTML =
     '<p class="muted small">The target node raises a notification; someone there must accept ' +
     "before anything runs.</p>" +
-    '<label class="field"><span>Node id</span><input id="add-id" class="mono" ' +
+    '<label class="field"><span data-i18n="fleet.node_id">Node id</span><input id="add-id" class="mono" ' +
     'placeholder="40 hex characters" autocomplete="off" spellcheck="false"></label>' +
-    '<label class="field"><span>Label (optional)</span><input id="add-label" ' +
+    '<label class="field"><span data-i18n="fleet.label_optional">Label (optional)</span><input id="add-label" ' +
     'placeholder="What you will call it here"></label>' +
-    '<div class="field"><span>Capabilities to ask for</span>' +
+    '<div class="field"><span data-i18n="fleet.capabilities_to_ask_for">Capabilities to ask for</span>' +
     '<div id="add-caps" class="cap-pick"></div></div>' +
-    '<div class="btn-row"><button id="add-go" class="primary">Send request</button>' +
-    '<button id="add-no">Cancel</button></div>' +
+    '<div class="btn-row"><button id="add-go" class="primary" data-i18n="fleet.send_request">Send request</button>' +
+    '<button id="add-no" data-i18n="common.cancel">Cancel</button></div>' +
     '<p id="add-msg" class="msg"></p>';
   capBoxes($("add-caps"), ["status", "update"]);
   $("add-go").addEventListener("click", (event) => withBusy(event.target, async () => {
     const id = $("add-id").value.trim().toLowerCase();
     if(!/^[0-9a-f]{40}$/.test(id)){
-      setMessage("add-msg", "A node id is 40 hexadecimal characters.", true); return;
+      setMessage("add-msg", t("fleet.a_node_id_is_40_hexadecimal"), true); return;
     }
     const caps = capsOf($("add-caps"));
-    if(!caps.length){ setMessage("add-msg", "Ask for at least one capability.", true); return; }
+    if(!caps.length){ setMessage("add-msg", t("fleet.ask_for_at_least_one_capability"), true); return; }
     const {ok} = await apiJson("/api/fleet/enrol", "POST",
       {node:id, caps, label:$("add-label").value.trim()});
-    if(!ok){ setMessage("add-msg", "That request was refused.", true); return; }
-    $("modal").close(); toast("Request sent — it is theirs to accept"); poll();
+    if(!ok){ setMessage("add-msg", t("fleet.that_request_was_refused"), true); return; }
+    $("modal").close(); toast(t("fleet.request_sent_it_is_theirs_to_accept")); poll();
   }));
   $("add-no").addEventListener("click", () => $("modal").close());
   $("modal").showModal();
@@ -834,13 +834,13 @@ function rightsDialog(id){
   const node = (ST.managed || []).find((entry) => entry.id === id);
   if(!node) return;
   const held = node.caps || [];
-  $("modal-title").textContent = "Rights on " + shortId(id);
+  $("modal-title").textContent = t("fleet.rights_on", {id: shortId(id)});
   $("modal-body").innerHTML =
     '<p class="muted small">Untick a right and it is gone at once — giving one up needs ' +
     "nobody's permission. Tick one and that node raises a request; someone there has to accept " +
     "before it works.</p><div id=\"rt-caps\" class=\"cap-pick\"></div>" +
-    '<div class="btn-row"><button id="rt-ok" class="primary">Apply</button>' +
-    '<button id="rt-no">Cancel</button></div>';
+    '<div class="btn-row"><button id="rt-ok" class="primary" data-i18n="console.apply">Apply</button>' +
+    '<button id="rt-no" data-i18n="common.cancel">Cancel</button></div>';
   const box = $("rt-caps");
   box.innerHTML = (ST.capabilities || []).map((cap) =>
     '<label class="check card-like"><input type="checkbox" value="' + esc(cap.name) + '"' +
@@ -936,9 +936,9 @@ document.addEventListener("change", async (event) => {
   try{
     const {ok} = await apiJson("/api/fleet/logs-policy", "POST",
                                {node, policy: picker.value});
-    if(ok) toast("Log collection for " + shortId(node) + ": " + picker.value);
-    else toast("That could not be changed", "danger");
-  }catch(_){ toast("That could not be changed", "danger"); }
+    if(ok) toast(t("fleet.log_collection_for", {node: shortId(node), value: picker.value}));
+    else toast(t("fleet.that_could_not_be_changed"), "danger");
+  }catch(_){ toast(t("fleet.that_could_not_be_changed"), "danger"); }
   refreshLogs(true);
 });
 
@@ -1056,27 +1056,27 @@ $("logs-default-policy").addEventListener("change", async () => {
   try{
     const {ok} = await apiJson("/api/fleet/logs-policy", "POST",
                                {policy: $("logs-default-policy").value});
-    if(!ok) toast("The default could not be changed", "danger");
-  }catch(_){ toast("The default could not be changed", "danger"); }
+    if(!ok) toast(t("fleet.the_default_could_not_be_changed"), "danger");
+  }catch(_){ toast(t("fleet.the_default_could_not_be_changed"), "danger"); }
   refreshLogs();
 });
 $("logs-default-size").addEventListener("change", async () => {
   try{
     const {ok} = await apiJson("/api/fleet/logs-policy", "POST",
                                {megabytes: Number($("logs-default-size").value) || 0});
-    if(!ok) toast("The size could not be changed", "danger");
-  }catch(_){ toast("The size could not be changed", "danger"); }
+    if(!ok) toast(t("fleet.the_size_could_not_be_changed"), "danger");
+  }catch(_){ toast(t("fleet.the_size_could_not_be_changed"), "danger"); }
   refreshLogs();
 });
 $("logs-fetch").addEventListener("click", async (event) => {
   const node = $("logs-node").value;
-  if(!node){ toast("Choose a machine first", "warn"); return; }
+  if(!node){ toast(t("fleet.choose_a_machine_first"), "warn"); return; }
   await withBusy(event.target, async () => {
     try{
       const {ok} = await apiJson("/api/fleet/logs-fetch", "POST", {node});
-      if(ok) toast("Asked " + shortId(node) + " for its log");
-      else toast("That machine could not be asked", "danger");
-    }catch(_){ toast("That machine did not answer", "danger"); }
+      if(ok) toast(t("fleet.asked_for_its_log", {node: shortId(node)}));
+      else toast(t("fleet.that_machine_could_not_be_asked"), "danger");
+    }catch(_){ toast(t("fleet.that_machine_did_not_answer"), "danger"); }
   });
   setTimeout(refreshLogs, 1200);
 });
@@ -1089,7 +1089,7 @@ $("logs-forget").addEventListener("click", async (event) => {
   if(!agreed) return;
   await withBusy(event.target, async () => {
     await apiJson("/api/fleet/logs-forget", "POST", {});
-    toast("Collected logs dropped");
+    toast(t("fleet.collected_logs_dropped"));
   });
   refreshLogs();
 });
@@ -1152,7 +1152,7 @@ function paintNotifList(items){
     '<span class="tiny muted">' + esc(item.detail) + "</span></span>" +
     (item.at ? '<span class="tiny muted flex-none">' + esc(fmtTime(item.at)) + "</span>" : "") +
     "</button>").join("")
-    : '<div class="none">Nothing waiting. Jobs and access requests show up here.</div>');
+    : '<div class="none" data-i18n="fleet.nothing_waiting_jobs_and_access">Nothing waiting. Jobs and access requests show up here.</div>');
 }
 
 function markNotifRead(){
@@ -1178,16 +1178,16 @@ async function runScan(event){
   const from = $("scan-from").value;
   const targets = $("scan-nets").value.split(",").map((part) => part.trim()).filter(Boolean);
   await withBusy(event ? event.target : $("scan-btn"), async () => {
-    setMessage("scan-note", "Scanning… this takes a moment.");
+    setMessage("scan-note", t("fleet.scanning_this_takes_a_moment"));
     try{
       const {data} = await apiJson("/api/fleet/scan", "POST", {node:from, targets});
       if(data.hosts){ HOSTS = data.hosts; KEYS = data.keys || []; SCAN_AT = null; paintHosts(data); }
       else{
         // Remote: the answer comes back through the poll, so arm the watcher.
         SCAN_AT = scanStamp(); HOSTS = [];
-        setMessage("scan-note", "Scan running on the remote node…");
+        setMessage("scan-note", t("fleet.scan_running_on_the_remote_node"));
       }
-    }catch(_){ setMessage("scan-note", "Scan failed.", true); }
+    }catch(_){ setMessage("scan-note", t("fleet.scan_failed"), true); }
   });
 }
 function scanStamp(){
@@ -1264,10 +1264,10 @@ async function loadKeys(){
 }
 async function uploadKey(file){
   if(!file) return;
-  if(file.size > 128 * 1024){ setMessage("key-note", "That file is too large for a key.", true); return; }
+  if(file.size > 128 * 1024){ setMessage("key-note", t("fleet.that_file_is_too_large_for_a_key"), true); return; }
   const text = await file.text();
   if(!text.includes("PRIVATE KEY")){
-    setMessage("key-note", "That does not look like a private key.", true); return;
+    setMessage("key-note", t("fleet.that_does_not_look_like_a_private"), true); return;
   }
   const {ok, data} = await apiJson("/api/fleet/keys", "POST", {name:file.name, data:text});
   KEYS = data.keys || KEYS;
@@ -1288,7 +1288,7 @@ async function removeKey(){
   const {data} = await apiJson("/api/fleet/keys-remove", "POST", {id});
   KEYS = data.keys || KEYS;
   paintKeys();
-  toast("Key removed");
+  toast(t("fleet.key_removed"));
 }
 function syncSudoFields(){
   const own = $("ssh-sudo").checked;
@@ -1327,32 +1327,32 @@ async function deploy(event){
       node_flags:$("dep-fleet").checked ? ["--fleet"] : [],
     },
   };
-  if(!body.username){ setMessage("deploy-state", "An SSH user is required.", true); return; }
+  if(!body.username){ setMessage("deploy-state", t("fleet.an_ssh_user_is_required"), true); return; }
   if(!body.password && !body.key_id){
-    setMessage("deploy-state", "Give a password, a key, or both.", true); return;
+    setMessage("deploy-state", t("fleet.give_a_password_a_key_or_both"), true); return;
   }
   // Said here as well as on the node: a system install with no way to reach
   // root fails after the operator has already typed everything.
   if(body.mode === "system" && !body.can_sudo && !body.sudo_user){
     setMessage("deploy-state",
-      "A system install needs root: tick sudo, name a sudo account, or install under the user.",
+      t("fleet.a_system_install_needs_root_tick"),
       true);
     return;
   }
   await withBusy(event ? event.target : $("deploy-btn"), async () => {
-    setMessage("deploy-state", "Deploying… watch Activity.");
+    setMessage("deploy-state", t("fleet.deploying_watch_activity"));
     try{
       const {data} = await apiJson("/api/fleet/provision", "POST", body);
       if(data.results){
         const good = data.results.filter((result) => result.ok).length;
-        setMessage("deploy-state", "Done: " + good + "/" + data.results.length + " succeeded.",
+        setMessage("deploy-state", t("fleet.done_succeeded", {good, length: data.results.length}),
                    good !== data.results.length);
       }else{
         // Remote: the outcome arrives through the polled job list.
         DEPLOY_RID = data.rid || null;
-        setMessage("deploy-state", "Running on the remote node…");
+        setMessage("deploy-state", t("fleet.running_on_the_remote_node"));
       }
-    }catch(_){ setMessage("deploy-state", "Deployment failed to start.", true); }
+    }catch(_){ setMessage("deploy-state", t("fleet.deployment_failed_to_start"), true); }
     finally{
       // Drop the secrets from the DOM as soon as the run has been handed over.
       $("ssh-pass").value = ""; $("ssh-kpass").value = "";
@@ -1390,12 +1390,12 @@ function groupDialog(name){
   $("modal-body").innerHTML =
     '<p class="muted small">A group is local to this console. Nothing is sent to the nodes in ' +
     "it, and being in one grants nobody anything.</p>" +
-    '<label class="field"><span>Name</span><input id="gp-name" value="' +
+    '<label class="field"><span data-i18n="fleet.name">Name</span><input id="gp-name" value="' +
     esc(name || "") + '" placeholder="production, homelab, edge…"></label>' +
-    '<div class="field"><span>Nodes</span><div id="gp-nodes" class="cap-pick"></div></div>' +
-    '<div class="btn-row"><button id="gp-ok" class="primary">Save</button>' +
-    (existing ? '<button id="gp-del" class="danger">Delete group</button>' : "") +
-    '<button id="gp-no">Cancel</button></div><p id="gp-msg" class="msg"></p>';
+    '<div class="field"><span data-i18n="fleet.nodes">Nodes</span><div id="gp-nodes" class="cap-pick"></div></div>' +
+    '<div class="btn-row"><button id="gp-ok" class="primary" data-i18n="common.save">Save</button>' +
+    (existing ? '<button id="gp-del" class="danger" data-i18n="fleet.delete_group">Delete group</button>' : "") +
+    '<button id="gp-no" data-i18n="common.cancel">Cancel</button></div><p id="gp-msg" class="msg"></p>';
   $("gp-nodes").innerHTML = (ST.managed || []).map((node) =>
     '<label class="check card-like"><input type="checkbox" value="' + esc(node.id) + '"' +
     (members.has(node.id) ? " checked" : "") + "><span><b>" +
@@ -1404,7 +1404,7 @@ function groupDialog(name){
     || emptyHTML("No node yet", "Ask a node to let you manage it first.");
   $("gp-ok").addEventListener("click", (event) => withBusy(event.target, async () => {
     const wanted = $("gp-name").value.trim();
-    if(!wanted){ setMessage("gp-msg", "A group needs a name.", true); return; }
+    if(!wanted){ setMessage("gp-msg", t("fleet.a_group_needs_a_name"), true); return; }
     const nodes = $$("#gp-nodes input:checked").map((box) => box.value);
     // Renaming is a delete and a create: the name *is* the key, so there is no
     // second identity to keep in step with it.
@@ -1413,13 +1413,13 @@ function groupDialog(name){
     }
     const {ok} = await apiJson("/api/fleet/groups", "POST",
                                {op:"set", group:wanted, nodes});
-    if(!ok){ setMessage("gp-msg", "That group name was refused.", true); return; }
-    $("modal").close(); toast("Group saved", "ok"); poll();
+    if(!ok){ setMessage("gp-msg", t("fleet.that_group_name_was_refused"), true); return; }
+    $("modal").close(); toast(t("fleet.group_saved"), "ok"); poll();
   }));
   if(existing){
     $("gp-del").addEventListener("click", (event) => withBusy(event.target, async () => {
       await api("/api/fleet/groups", "POST", {op:"remove", group:name});
-      $("modal").close(); toast("Group deleted"); poll();
+      $("modal").close(); toast(t("fleet.group_deleted")); poll();
     }));
   }
   $("gp-no").addEventListener("click", () => $("modal").close());
@@ -1428,26 +1428,26 @@ function groupDialog(name){
 }
 function nodeGroupsDialog(id){
   const held = new Set(groupsOf(id));
-  $("modal-title").textContent = "Groups for " + shortId(id);
+  $("modal-title").textContent = t("fleet.groups_for", {id: shortId(id)});
   $("modal-body").innerHTML =
     '<p class="muted small">A node can be in several. Ticking one here is the same edit as ' +
     "adding it from the group's own row — there is one membership list, not two.</p>" +
     '<div id="ng-list" class="cap-pick"></div>' +
-    '<label class="field"><span>Or a new group</span><input id="ng-new" ' +
+    '<label class="field"><span data-i18n="fleet.or_a_new_group">Or a new group</span><input id="ng-new" ' +
     'placeholder="name it"></label>' +
-    '<div class="btn-row"><button id="ng-ok" class="primary">Apply</button>' +
-    '<button id="ng-no">Cancel</button></div>';
+    '<div class="btn-row"><button id="ng-ok" class="primary" data-i18n="console.apply">Apply</button>' +
+    '<button id="ng-no" data-i18n="common.cancel">Cancel</button></div>';
   $("ng-list").innerHTML = (ST.groups || []).map((group) =>
     '<label class="check card-like"><input type="checkbox" value="' + esc(group.name) + '"' +
     (held.has(group.name) ? " checked" : "") + "><span><b>" + esc(group.name) +
     "</b><br>" + plural((group.nodes || []).length, "node") + "</span></label>").join("")
-    || '<p class="muted small">No group yet — name one below.</p>';
+    || '<p class="muted small" data-i18n="fleet.no_group_yet_name_one_below">No group yet — name one below.</p>';
   $("ng-ok").addEventListener("click", (event) => withBusy(event.target, async () => {
     const groups = $$("#ng-list input:checked").map((box) => box.value);
     const fresh = $("ng-new").value.trim();
     if(fresh && !groups.includes(fresh)) groups.push(fresh);
     await api("/api/fleet/groups", "POST", {op:"node", node:id, groups});
-    $("modal").close(); toast("Groups updated", "ok"); poll();
+    $("modal").close(); toast(t("fleet.groups_updated"), "ok"); poll();
   }));
   $("ng-no").addEventListener("click", () => $("modal").close());
   $("modal").showModal();
@@ -1515,7 +1515,7 @@ async function dockerLoad(){
       DK.stacks = stacks.items || [];
       DK.containers = containers.items || [];
       if(stacks.info && stacks.info.portainer_problem)
-        toast("Portainer did not answer", "warn", stacks.info.portainer_problem);
+        toast(t("fleet.portainer_did_not_answer"), "warn", stacks.info.portainer_problem);
     }else{ DK.stacks = []; DK.containers = []; }
   }catch(error){
     DK.error = String(error.message || error);
@@ -1666,8 +1666,8 @@ function stackSource(stack){
 }
 function serviceRows(stack){
   if(!(stack.services || []).length)
-    return '<p class="muted small flush">Nothing of it runs on this machine.</p>';
-  return '<div class="table-wrap"><table><thead><tr><th>Service</th><th>Image</th>' +
+    return '<p class="muted small flush" data-i18n="fleet.nothing_of_it_runs_on_this_machine">Nothing of it runs on this machine.</p>';
+  return '<div class="table-wrap"><table><thead><tr><th data-i18n="fleet.service">Service</th><th data-i18n="fleet.image">Image</th>' +
     "<th>State</th><th>Use</th><th>Image status</th><th></th></tr></thead><tbody>" +
     stack.services.map((row) =>
       "<tr><td><b>" + esc(row.service || row.name) + "</b>" +
@@ -1702,7 +1702,7 @@ function stackCard(stack){
     '<button class="sm ghost" data-dk="file" data-stack="' + name + '">File</button>' +
     "</div></div>" +
     '<div class="card-body stack">' + serviceRows(stack) +
-    '<p class="muted small flush"><b>Update</b> ' + esc(stack.why || "") + ".</p>" +
+    '<p class="muted small flush"><b data-i18n="fleet.update">Update</b> ' + esc(stack.why || "") + ".</p>" +
     (busy ? '<div class="row"><progress class="meter"></progress><span class="small nowrap" ' +
       'data-since="' + busy.since + '">' + esc(busy.label) + "</span></div>" : "") +
     (!busy && result ? '<div class="notice ' + (result.ok ? "ok" : "danger") + '">' +
@@ -1731,7 +1731,7 @@ function paintDockerStacks(){
           "look at the containers that run on their own.")));
   const behind = all.filter(stackNeedsUpdate);
   $("dk-update-all").hidden = !behind.length;
-  $("dk-update-all").textContent = "Update " + plural(behind.length, "stack");
+  $("dk-update-all").textContent = t("fleet.update_stacks", {count: behind.length});
   $("dk-check").disabled = !!dockerBusy("check");
   $("dk-check").textContent = dockerBusy("check") ? "Checking…" : "Check for updates";
   $("dk-checked").textContent = DK.check
@@ -1782,7 +1782,7 @@ function paintDockerImages(){
   if(DK.images === null){ setHTML("dk-images", skeletonHTML(3)); return; }
   const used = new Set((DK.containers || []).map((entry) => entry.image_id));
   setHTML("dk-images", DK.images.length ? '<div class="table-wrap"><table><thead><tr>' +
-    '<th>Image</th><th class="num">Size</th><th>Created</th><th></th></tr></thead><tbody>' +
+    '<th data-i18n="fleet.image">Image</th><th class="num" data-i18n="fleet.size">Size</th><th data-i18n="fleet.created">Created</th><th></th></tr></thead><tbody>' +
     DK.images.map((image) => {
       const name = image.tags[0] || image.id;
       return '<tr><td class="mono tiny">' + esc(name) +
@@ -1798,13 +1798,13 @@ function paintDockerImages(){
 }
 function paintDockerStorage(){
   setHTML("dk-volumes", DK.volumes === null ? skeletonHTML(2) : DK.volumes.length
-    ? '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Driver</th></tr></thead><tbody>' +
+    ? '<div class="table-wrap"><table><thead><tr><th data-i18n="fleet.name">Name</th><th data-i18n="fleet.driver">Driver</th></tr></thead><tbody>' +
       DK.volumes.map((volume) => '<tr><td class="mono tiny">' + esc(volume.name) + "</td><td>" +
         esc(volume.driver) + "</td></tr>").join("") + "</tbody></table></div>"
     : emptyHTML("No volume"));
   setHTML("dk-networks", DK.networks === null ? skeletonHTML(2) : DK.networks.length
-    ? '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Driver</th><th>Subnet</th>' +
-      '<th class="num">Containers</th></tr></thead><tbody>' +
+    ? '<div class="table-wrap"><table><thead><tr><th data-i18n="fleet.name">Name</th><th data-i18n="fleet.driver">Driver</th><th data-i18n="fleet.subnet">Subnet</th>' +
+      '<th class="num" data-i18n="fleet.containers">Containers</th></tr></thead><tbody>' +
       DK.networks.map((network) => "<tr><td><b>" + esc(network.name) + "</b></td><td>" +
         esc(network.driver) + '</td><td class="mono tiny">' + esc(network.subnet || "—") +
         '</td><td class="num">' + network.attached + "</td></tr>").join("") +
@@ -1838,24 +1838,24 @@ function paintDockerPortainer(){
       stateBadge(server.state) + "</div>" +
       '<div class="card-body"><dl class="kv">' +
       "<dt>Container</dt><dd>" + esc(server.name) + "</dd>" +
-      '<dt>Image</dt><dd class="mono">' + esc(server.image) + "</dd>" +
+      '<dt data-i18n="fleet.image">Image</dt><dd class="mono">' + esc(server.image) + "</dd>" +
       "<dt>Edition</dt><dd>" + esc(server.edition) + "</dd>" +
-      '<dt>Address here</dt><dd class="mono">' + esc(server.url || "publishes no port") + "</dd>" +
+      '<dt data-i18n="fleet.address_here">Address here</dt><dd class="mono">' + esc(server.url || "publishes no port") + "</dd>" +
       "</dl></div></article>";
   }else if(pt.agent){
     html += '<div class="notice">This machine runs a Portainer agent: its stacks are deployed ' +
       "by a Portainer elsewhere. Connect that Portainer to update them through it.</div>";
   }
   if(pt.connected){
-    html += '<article class="card"><div class="card-head"><div class="grow"><h2>Connected</h2>' +
+    html += '<article class="card"><div class="card-head"><div class="grow"><h2 data-i18n="state.connected">Connected</h2>' +
       '<div class="sub">Stacks Portainer owns are updated through its API — it pulls and ' +
       "redeploys with the file and environment it holds, and its own record stays true." +
       "</div></div>" + badge("connected", "ok") + "</div>" +
-      '<div class="card-body"><dl class="kv"><dt>Address</dt><dd class="mono">' + esc(pt.url) +
+      '<div class="card-body"><dl class="kv"><dt data-i18n="fleet.address">Address</dt><dd class="mono">' + esc(pt.url) +
       "</dd><dt>Certificate</dt><dd>" + (pt.pinned ? "pinned" :
         pt.url.startsWith("http:") ? "none: loopback only" : "verified by its chain") +
       "</dd><dt>Token</dt><dd>kept in that node's encrypted drawer, never read back</dd></dl></div>" +
-      '<div class="card-foot"><button class="danger" data-dk="pt-forget">Forget</button></div>' +
+      '<div class="card-foot"><button class="danger" data-dk="pt-forget" data-i18n="fleet.forget">Forget</button></div>' +
       "</article>";
   }else{
     const suggested = (server && server.url) || "";
@@ -1866,21 +1866,21 @@ function paintDockerPortainer(){
       "recreating its containers with the settings they run with. Connected, it is " +
       "redeployed by Portainer itself.</div></div></div>" +
       '<div class="card-body stack">' +
-      '<div class="toolbar"><label class="field grow"><span>Address, as that machine reaches it</span>' +
+      '<div class="toolbar"><label class="field grow"><span data-i18n="fleet.address_as_that_machine_reaches_it">Address, as that machine reaches it</span>' +
       '<input id="pt-url" class="mono" value="' + esc((probe && probe.url) || suggested) +
       '" placeholder="https, host and port" autocomplete="off" spellcheck="false"></label>' +
-      '<button class="ghost" data-dk="pt-probe">Read its certificate</button></div>' +
+      '<button class="ghost" data-dk="pt-probe" data-i18n="fleet.read_its_certificate">Read its certificate</button></div>' +
       (probe ? '<div class="notice ok"><span class="grow">Portainer ' + esc(probe.version) +
         " answers there." + (probe.fingerprint ? ' Its certificate: <span class="mono fp">' +
         esc(probe.fingerprint.match(/../g).join(":")) + "</span>" : "") + "</span></div>" +
         (probe.fingerprint ? '<label class="check"><input id="pt-pin" type="checkbox" checked>' +
           "<span>Trust this certificate (pin it). Compare it with the one your browser shows " +
           "for Portainer if the address is not this machine's own.</span></label>" : "") : "") +
-      '<label class="field"><span>Access token</span><input id="pt-token" type="password" ' +
+      '<label class="field"><span data-i18n="fleet.access_token">Access token</span><input id="pt-token" type="password" ' +
       'autocomplete="new-password" placeholder="ptr_…">' +
       '<span class="hint">In Portainer: your account, then Access tokens, then Add access ' +
       "token. It is written to that node's encrypted drawer and never read back.</span></label>" +
-      '<div class="btn-row"><button class="primary" data-dk="pt-connect">Connect</button></div>' +
+      '<div class="btn-row"><button class="primary" data-dk="pt-connect" data-i18n="console.connect">Connect</button></div>' +
       '<p id="pt-msg" class="msg"></p></div></article>';
   }
   if(!server && !pt.agent && !pt.connected){
@@ -1956,7 +1956,7 @@ async function updateStack(name, quiet){
     return true;
   }catch(error){
     DK.results[name] = {ok:false, text:String(error.message || error), output:""};
-    toast(name + " could not be updated", "danger", String(error.message || error));
+    toast(t("fleet.could_not_be_updated", {name}), "danger", String(error.message || error));
     return false;
   }finally{
     await dockerLoad();
@@ -1968,7 +1968,7 @@ async function updateAll(){
   const agreed = await confirmAction({title:"Update " + plural(names.length, "stack") + "?",
     body:'<p class="small">One after the other, each the way its owner would: ' +
       esc(names.join(", ")) + ".</p>" +
-      '<p class="muted small">Each container whose image changed is recreated.</p>',
+      '<p class="muted small" data-i18n="fleet.each_container_whose_image_changed">Each container whose image changed is recreated.</p>',
     confirmLabel:"Update all"});
   if(!agreed) return;
   let done = 0;
@@ -2029,16 +2029,16 @@ function textDialog(title, sub, text){
   $("modal-title").textContent = title;
   $("modal-body").innerHTML = (sub ? '<p class="muted small mono">' + esc(sub) + "</p>" : "") +
     '<pre class="term" id="dk-text"></pre>' +
-    '<div class="btn-row"><button id="dk-text-copy" class="ghost">Copy</button></div>';
+    '<div class="btn-row"><button id="dk-text-copy" class="ghost" data-i18n="common.copy">Copy</button></div>';
   // Written as text, never as markup: these are bytes a container or a file chose.
   $("dk-text").textContent = text;
   $("dk-text-copy").addEventListener("click", () => copyText(text));
   $("modal").showModal();
 }
 async function dockerLogs(id, label){
-  $("modal-title").textContent = "Logs · " + (label || shortId(id));
+  $("modal-title").textContent = t("fleet.logs_2", {id: (label || shortId(id))});
   $("modal-body").innerHTML = '<pre class="term" id="dk-log">Reading…</pre>' +
-    '<div class="btn-row"><button id="dk-log-more" class="ghost">Reload</button></div>';
+    '<div class="btn-row"><button id="dk-log-more" class="ghost" data-i18n="fleet.reload">Reload</button></div>';
   $("modal").showModal();
   const read = async () => {
     try{
@@ -2058,7 +2058,7 @@ async function stackFile(name){
 }
 async function portainerProbe(button){
   const url = $("pt-url").value.trim();
-  if(!url){ setMessage("pt-msg", "An address is needed.", true); return; }
+  if(!url){ setMessage("pt-msg", t("fleet.an_address_is_needed"), true); return; }
   return withBusy(button, async () => {
     try{
       DK.probe = (await dockerCall("portainer_probe", {url})).info || null;
@@ -2069,7 +2069,7 @@ async function portainerProbe(button){
 async function portainerConnect(button){
   const url = $("pt-url").value.trim();
   const token = $("pt-token").value;
-  if(!url || !token){ setMessage("pt-msg", "An address and a token are needed.", true); return; }
+  if(!url || !token){ setMessage("pt-msg", t("fleet.an_address_and_a_token_are_needed"), true); return; }
   const pin = $("pt-pin") && $("pt-pin").checked && DK.probe && DK.probe.url === url
     ? DK.probe.fingerprint : "";
   return withBusy(button, async () => {
@@ -2078,8 +2078,7 @@ async function portainerConnect(button){
       // Never echoed back: the token now lives in that node's drawer.
       $("pt-token").value = "";
       DK.probe = null;
-      toast("Portainer connected — " + plural((answer.items || []).length, "environment") +
-            " visible", "ok");
+      toast(t("fleet.portainer_connected_environments", {count: (answer.items || []).length}), "ok");
       await dockerLoad();
     }catch(error){ setMessage("pt-msg", String(error.message || error), true); }
   });
@@ -2091,38 +2090,38 @@ async function portainerForget(button){
       "instead of through Portainer.</p>", confirmLabel:"Forget", danger:true});
   if(!agreed) return;
   return withBusy(button, async () => {
-    try{ await dockerCall("portainer", {clear:true}); toast("Portainer forgotten"); }
+    try{ await dockerCall("portainer", {clear:true}); toast(t("fleet.portainer_forgotten")); }
     catch(error){ toast(String(error.message || error), "danger"); }
     await dockerLoad();
   });
 }
 
 function runDialog(){
-  $("modal-title").textContent = "Run a container";
+  $("modal-title").textContent = t("fleet.run_a_container");
   $("modal-body").innerHTML =
     '<div class="form-grid">' +
-    '<label class="field"><span>Name</span><input id="rn-name" class="mono" ' +
+    '<label class="field"><span data-i18n="fleet.name">Name</span><input id="rn-name" class="mono" ' +
     'placeholder="my-service" autocomplete="off" spellcheck="false"></label>' +
-    '<label class="field"><span>Image</span><input id="rn-image" class="mono" ' +
+    '<label class="field"><span data-i18n="fleet.image">Image</span><input id="rn-image" class="mono" ' +
     'placeholder="ghcr.io/owner/image:tag" autocomplete="off" spellcheck="false"></label>' +
-    '<label class="field"><span>Ports</span>' +
+    '<label class="field"><span data-i18n="fleet.ports">Ports</span>' +
     '<textarea id="rn-ports" class="mono" rows="2" placeholder="8080:80"></textarea>' +
-    '<span class="hint">host:container, one per line; add :udp for UDP</span></label>' +
-    '<label class="field"><span>Volumes</span>' +
-    '<textarea id="rn-vols" class="mono" rows="2" placeholder="/srv/data:/data"></textarea>' +
-    '<span class="hint">host path or volume name : container path, :ro for read-only</span></label>' +
-    '<label class="field"><span>Environment</span>' +
-    '<textarea id="rn-env" class="mono" rows="3" placeholder="TZ=Europe/Paris"></textarea>' +
-    '<span class="hint">KEY=value, one per line</span></label>' +
-    '<label class="field"><span>Restart policy</span><select id="rn-restart">' +
-    '<option value="unless-stopped">unless-stopped</option><option value="always">always</option>' +
-    '<option value="on-failure">on-failure</option><option value="no">no</option></select></label>' +
+    '<span class="hint" data-i18n="fleet.host_container_one_per_line_add_udp">host:container, one per line; add :udp for UDP</span></label>' +
+    '<label class="field"><span data-i18n="fleet.volumes">Volumes</span>' +
+    '<textarea id="rn-vols" class="mono" rows="2" placeholder="/srv/data:/data" data-i18n-attr="placeholder:fleet.srv_data_data"></textarea>' +
+    '<span class="hint" data-i18n="fleet.host_path_or_volume_name_container">host path or volume name : container path, :ro for read-only</span></label>' +
+    '<label class="field"><span data-i18n="fleet.environment">Environment</span>' +
+    '<textarea id="rn-env" class="mono" rows="3" placeholder="TZ=Europe/Paris" data-i18n-attr="placeholder:fleet.tz_europe_paris"></textarea>' +
+    '<span class="hint" data-i18n="fleet.key_value_one_per_line">KEY=value, one per line</span></label>' +
+    '<label class="field"><span data-i18n="fleet.restart_policy">Restart policy</span><select id="rn-restart">' +
+    '<option value="unless-stopped" data-i18n="fleet.unless_stopped">unless-stopped</option><option value="always" data-i18n="fleet.always">always</option>' +
+    '<option value="on-failure" data-i18n="fleet.on_failure">on-failure</option><option value="no" data-i18n="console.no">no</option></select></label>' +
     "</div>" +
-    '<div class="btn-row"><button id="rn-go" class="primary">Run</button>' +
-    '<button id="rn-no">Cancel</button></div><p id="rn-msg" class="msg"></p>';
+    '<div class="btn-row"><button id="rn-go" class="primary" data-i18n="fleet.run">Run</button>' +
+    '<button id="rn-no" data-i18n="common.cancel">Cancel</button></div><p id="rn-msg" class="msg"></p>';
   $("rn-go").addEventListener("click", (event) => withBusy(event.target, async () => {
     const image = $("rn-image").value.trim();
-    if(!image){ setMessage("rn-msg", "An image is required.", true); return; }
+    if(!image){ setMessage("rn-msg", t("fleet.an_image_is_required"), true); return; }
     const lines = (id) => $(id).value.split("\n").map((line) => line.trim()).filter(Boolean);
     const ports = lines("rn-ports").map((line) => {
       const [host, container, proto] = line.split(":");
@@ -2143,7 +2142,7 @@ function runDialog(){
       await dockerRun("run", "Starting " + image, "deploy", {spec:{
         name:$("rn-name").value.trim(), image, ports, volumes, env,
         restart:$("rn-restart").value}});
-      toast(image + " is running", "ok");
+      toast(t("fleet.is_running", {image}), "ok");
     }catch(error){ toast(String(error.message || error), "danger"); }
     await dockerLoad();
   }));
@@ -2155,22 +2154,22 @@ function runDialog(){
 function stackDialog(){
   const connected = !!(DK.overview && DK.overview.portainer && DK.overview.portainer.connected);
   const compose = !!(DK.overview && DK.overview.compose);
-  $("modal-title").textContent = "Deploy a stack";
+  $("modal-title").textContent = t("fleet.deploy_a_stack");
   $("modal-body").innerHTML =
-    (connected ? '<div class="segmented" role="group" aria-label="Deployed by">' +
+    (connected ? '<div class="segmented" role="group" aria-label="Deployed by" data-i18n-attr="aria-label:fleet.deployed_by">' +
       '<button data-sk-through="compose" aria-selected="' + (compose ? "true" : "false") +
       '"' + (compose ? "" : " disabled") + ">Compose, on that machine</button>" +
       '<button data-sk-through="portainer" aria-selected="' + (compose ? "false" : "true") +
       '">Portainer</button></div>' : "") +
     '<p id="sk-where" class="muted small"></p>' +
-    '<label class="field"><span>Name</span><input id="sk-name" class="mono" ' +
+    '<label class="field"><span data-i18n="fleet.name">Name</span><input id="sk-name" class="mono" ' +
     'placeholder="my-stack" autocomplete="off" spellcheck="false">' +
-    '<span class="hint">lowercase letters, digits, - and _</span></label>' +
-    '<label class="field"><span>docker-compose.yml</span>' +
+    '<span class="hint" data-i18n="fleet.lowercase_letters_digits_and">lowercase letters, digits, - and _</span></label>' +
+    '<label class="field"><span data-i18n="fleet.docker_compose_yml">docker-compose.yml</span>' +
     '<textarea id="sk-body" class="mono" rows="14" spellcheck="false" ' +
     'placeholder="services:&#10;  web:&#10;    image: nginx:alpine"></textarea></label>' +
-    '<div class="btn-row"><button id="sk-go" class="primary">Deploy</button>' +
-    '<button id="sk-no">Cancel</button></div><p id="sk-msg" class="msg"></p>';
+    '<div class="btn-row"><button id="sk-go" class="primary" data-i18n="fleet.deploy">Deploy</button>' +
+    '<button id="sk-no" data-i18n="common.cancel">Cancel</button></div><p id="sk-msg" class="msg"></p>';
   let through = connected && !compose ? "portainer" : "compose";
   const explain = () => {
     $("sk-where").textContent = through === "portainer"
@@ -2184,19 +2183,19 @@ function stackDialog(){
   }));
   explain();
   if(!compose && !connected)
-    setMessage("sk-msg", "That machine has no docker compose: install it there first.", true);
+    setMessage("sk-msg", t("fleet.that_machine_has_no_docker_compose"), true);
   $("sk-go").addEventListener("click", (event) => withBusy(event.target, async () => {
     const name = $("sk-name").value.trim();
     const body = $("sk-body").value;
     if(!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(name) || !body.trim()){
-      setMessage("sk-msg", "A lowercase name and a compose file are needed.", true); return;
+      setMessage("sk-msg", t("fleet.a_lowercase_name_and_a_compose_file"), true); return;
     }
     $("modal").close();
     try{
       await dockerRun("deploy:" + name, "Deploying " + name, "deploy_stack",
                       {stack:name, compose:body, portainer:through === "portainer"});
-      toast("Stack " + name + " deployed", "ok");
-    }catch(error){ toast("Stack " + name + " failed", "danger", String(error.message || error)); }
+      toast(t("fleet.stack_deployed", {name}), "ok");
+    }catch(error){ toast(t("fleet.stack_failed", {name}), "danger", String(error.message || error)); }
     await dockerLoad();
   }));
   $("sk-no").addEventListener("click", () => $("modal").close());
@@ -2242,7 +2241,7 @@ document.body.addEventListener("click", async (event) => {
         "again.</p>", confirmLabel:"Deny", danger:true});
     if(!agreed) return;
     await api("/api/fleet/deny", "POST", {node:data.deny});
-    toast("Request denied");
+    toast(t("fleet.request_denied"));
     return poll();
   }
   if(data.revoke){
@@ -2253,7 +2252,7 @@ document.body.addEventListener("click", async (event) => {
       confirmLabel:"Revoke", danger:true});
     if(!agreed) return;
     await api("/api/fleet/revoke", "POST", {node:data.revoke});
-    toast("Relationship revoked");
+    toast(t("fleet.relationship_revoked"));
     return poll();
   }
   if(data.copy) return void copyText(data.copy);
@@ -2279,7 +2278,7 @@ document.body.addEventListener("click", async (event) => {
       confirmLabel:"Update"});
     if(!agreed) return;
     await api("/api/fleet/update", "POST", {node:data.update});
-    toast("Update started — progress shows on the node's card");
+    toast(t("fleet.update_started_progress_shows_on_the"));
     return;
   }
   if(data.scan){
@@ -2311,7 +2310,7 @@ document.body.addEventListener("click", async (event) => {
     const answer = await apiJson("/api/fleet/update-group", "POST",
                                  {group:data.groupUpdate});
     const started = (answer.data && answer.data.started) || [];
-    toast("Update started on " + plural(started.length, "node"),
+    toast(t("fleet.update_started_on_nodes", {count: started.length}),
           started.length ? "ok" : "warn");
     return poll();
   }
@@ -2329,21 +2328,21 @@ const INVITE_WINDOWS = [["300", "5 minutes"], ["3600", "1 hour"],
 
 function inviteDialog(id){
   const who = managedLabel(id);
-  $("modal-title").textContent = "Invite somebody to " + who + "'s mesh";
+  $("modal-title").textContent = t("fleet.invite_somebody_to_s_mesh", {who});
   $("modal-body").innerHTML =
     '<p class="muted small">' + esc(who) + " mints it, not this node: whoever uses it " +
     "joins through that machine and has their certificate signed by it. It is single " +
     "use, and it stops working when the window closes.</p>" +
-    '<label class="field"><span>Stays live for</span><select id="inv-ttl">' +
+    '<label class="field"><span data-i18n="fleet.stays_live_for">Stays live for</span><select id="inv-ttl">' +
     INVITE_WINDOWS.map((pair) => '<option value="' + pair[0] + '">' + pair[1] +
       "</option>").join("") + "</select></label>" +
-    '<div class="btn-row"><button id="inv-go" class="primary">Create</button>' +
-    '<button id="inv-no">Cancel</button></div>' +
+    '<div class="btn-row"><button id="inv-go" class="primary" data-i18n="fleet.create">Create</button>' +
+    '<button id="inv-no" data-i18n="common.cancel">Cancel</button></div>' +
     '<p id="inv-msg" class="msg"></p><div id="inv-out"></div>';
   $("modal").showModal();
   $("inv-no").addEventListener("click", () => $("modal").close());
   $("inv-go").addEventListener("click", (event) => withBusy(event.target, async () => {
-    setMessage("inv-msg", "Asking " + who + "…");
+    setMessage("inv-msg", t("fleet.asking", {who}));
     // Always scannable when that node can manage it: one invitation carries
     // both routes in, and a node with neither answers with the code alone
     // rather than refusing.
@@ -2369,14 +2368,14 @@ function inviteHTML(invite){
       '</code><button class="sm" data-copy="' + esc(invite.ticket) +
       '">Copy invitation</button></div>' : "") +
     (invite.qr_svg ? '<div class="qr-holder">' + invite.qr_svg + "</div>" : "") +
-    (uris ? '<p class="small muted">Reachable at</p>' + uris : "");
+    (uris ? '<p class="small muted" data-i18n="fleet.reachable_at">Reachable at</p>' + uris : "");
 }
 
 // The console's description of a node, in fleet's own sheet: the same view, so
 // a machine looks the same whether it is being managed or being talked to. The
 // fleet button is dropped — you are already here.
 function nodeDialog(id){
-  $("modal-title").textContent = "Node " + shortId(id);
+  $("modal-title").textContent = t("fleet.node", {id: shortId(id)});
   $("modal-body").innerHTML = '<div id="fleet-node-view"></div>';
   $("modal").showModal();
   return NODEVIEW.mount("fleet-node-view", id, {
@@ -2466,17 +2465,17 @@ $("dk-pull-form").addEventListener("submit", async (event) => {
   const image = $("dk-pull").value.trim();
   if(!image) return;
   $("dk-pull").value = "";
-  toast("Pulling " + image + "…");
+  toast(t("fleet.pulling", {image}));
   try{
     const info = (await dockerRun("pull", "Pulling " + image, "pull", {image})).info || {};
-    toast("Pulled " + (info.image || image), "ok");
+    toast(t("fleet.pulled", {image: (info.image || image)}), "ok");
   }catch(error){ toast(String(error.message || error), "danger"); }
   await dockerLoadTab("images", true);
 });
 async function removeImage(image, button){
   const agreed = await confirmAction({title:"Remove this image?",
     body:'<p class="mono small">' + esc(image) + "</p>" +
-      '<p class="muted small">The daemon refuses while a container uses it.</p>',
+      '<p class="muted small" data-i18n="fleet.the_daemon_refuses_while_a_container">The daemon refuses while a container uses it.</p>',
     confirmLabel:"Remove", danger:true});
   if(!agreed) return;
   return withBusy(button, async () => {
@@ -2578,7 +2577,7 @@ $("login-form").addEventListener("submit", async (event) => {
       }
       $("password").value = "";
       await enter((await response.json()).token);
-    }catch(_){ setMessage("err", "Console is not reachable", true); }
+    }catch(_){ setMessage("err", t("console.console_is_not_reachable"), true); }
   });
 });
 (function boot(){

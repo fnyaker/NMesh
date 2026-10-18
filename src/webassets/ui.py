@@ -904,8 +904,8 @@ def ctx_bar(leave: bool = True) -> str:
       <span>Managing <b id="ctx-label"></b></span>
       <span id="ctx-id" class="mono tiny"></span>
       <span id="ctx-note" class="ctx-note"></span>
-      <span id="ctx-trouble" class="ctx-trouble" hidden>not answering</span>
-""" + ('      <button id="ctx-leave" class="sm">Back to this node</button>\n'
+      <span id="ctx-trouble" class="ctx-trouble" hidden data-i18n="ui.not_answering">not answering</span>
+""" + ('      <button id="ctx-leave" class="sm" data-i18n="ui.back_to_this_node">Back to this node</button>\n'
        if leave else "") + """    </div>
 """
 
@@ -990,18 +990,40 @@ const t = (key, params) => {
 // Markup carries its words as data: data-i18n="key" for the text,
 // data-i18n-attr="title:key;placeholder:key" for attributes. One pass names
 // every static sentence of a page; what JS builds calls t() itself.
+function translateNode(node){
+  const key = node.getAttribute("data-i18n");
+  if(key){
+    const text = t(key);
+    if(node.textContent !== text) node.textContent = text;
+  }
+  const pairs = node.getAttribute("data-i18n-attr");
+  if(pairs)
+    for(const pair of pairs.split(";")){
+      const [attribute, name] = pair.split(":");
+      if(!attribute || !name) continue;
+      const text = t(name.trim());
+      if(node.getAttribute(attribute.trim()) !== text)
+        node.setAttribute(attribute.trim(), text);
+    }
+}
 function applyI18n(root){
   const scope = root || document;
-  for(const node of scope.querySelectorAll("[data-i18n]"))
-    node.textContent = t(node.getAttribute("data-i18n"));
-  for(const node of scope.querySelectorAll("[data-i18n-attr]"))
-    for(const pair of node.getAttribute("data-i18n-attr").split(";")){
-      const [attribute, key] = pair.split(":");
-      if(attribute && key) node.setAttribute(attribute.trim(), t(key.trim()));
-    }
+  if(scope.nodeType === 1) translateNode(scope);
+  for(const node of scope.querySelectorAll("[data-i18n], [data-i18n-attr]"))
+    translateNode(node);
 }
 document.documentElement.lang = LANG;
 applyI18n();
+// Markup a page builds later is translated as it arrives. Only the elements
+// added are looked at, and nothing observed here is something applyI18n writes
+// (it sets text and attributes, never adds an element).
+new MutationObserver((records) => {
+  for(const record of records)
+    for(const added of record.addedNodes)
+      if(added.nodeType === 1){
+        applyI18n(added);
+      }
+}).observe(document.documentElement, {childList: true, subtree: true});
 // ---- icons -----------------------------------------------------------------
 // One set for the whole product. Paths only: the wrapper is written once by
 // `icon()`, so every icon shares a stroke weight, a box and a baseline.
@@ -1065,7 +1087,12 @@ function fmtBytes(value){
 function fmtRate(value){ return value == null ? "—" : fmtBytes(value) + "/s"; }
 // "1 node", "2 nodes". Written once so a count and its unit always agree — and
 // so the unit is right there in the call, where a reader can check it.
-function plural(count, word){ return count + " " + word + (count === 1 ? "" : "s"); }
+// "3 nodes": the noun is a catalogue entry (count.<word>) so it takes the plural
+// forms of the language; a word without one falls back to the English rule.
+function plural(count, word){
+  const key = "count." + String(word).replace(/ /g, "_");
+  return STRINGS[key] != null ? t(key, {count}) : count + " " + word + (count === 1 ? "" : "s");
+}
 function fmtNum(value){
   return value == null ? "—" : Number(value).toLocaleString(undefined, {maximumFractionDigits:1});
 }
@@ -1239,7 +1266,7 @@ const CONTEXT = {
     if(!this.node) return;
     const name = this.label || shortId(this.node);
     this.set("", "");
-    toast(name + " is no longer reachable — back on this node", "warn", reason);
+    toast(t("ui.is_no_longer_reachable_back_on_this", {name}), "warn", reason);
   },
 
   // Hand the remote session back and return to this node. The local console
@@ -1434,7 +1461,7 @@ const FEED = {
     if(this.reloading) return false;
     if(!data.build || !BUILD || data.build === BUILD) return true;
     this.reloading = true;
-    toast("This node was updated — reloading", "warn");
+    toast(t("ui.this_node_was_updated_reloading"), "warn");
     setTimeout(() => location.reload(), 400);
     return false;
   },
@@ -1482,7 +1509,7 @@ function toast(text, kind, detail){
   node.className = "toast " + (kind || "");
   node.innerHTML = '<div class="grow"><div class="t">' + esc(text) + "</div>" +
     (detail ? '<div class="b">' + esc(detail) + "</div>" : "") + "</div>" +
-    '<button class="icon sm" aria-label="Dismiss">' + icon("close") + "</button>";
+    '<button class="icon sm" aria-label="Dismiss" data-i18n-attr="aria-label:ui.dismiss">' + icon("close") + "</button>";
   node.querySelector("button").addEventListener("click", () => node.remove());
   region.appendChild(node);
   setTimeout(() => node.remove(), kind === "danger" ? 9000 : 5000);
@@ -1502,8 +1529,8 @@ async function withBusy(button, work){
   finally{ button.removeAttribute("aria-busy"); button.disabled = false; }
 }
 async function copyText(text){
-  try{ await navigator.clipboard.writeText(text); toast("Copied to clipboard"); return true; }
-  catch(_){ toast("Could not copy — select and copy by hand", "warn"); return false; }
+  try{ await navigator.clipboard.writeText(text); toast(t("ui.copied_to_clipboard")); return true; }
+  catch(_){ toast(t("ui.could_not_copy_select_and_copy_by"), "warn"); return false; }
 }
 
 // ---- confirmation ----------------------------------------------------------
@@ -1680,6 +1707,9 @@ function setHTML(target, html){
   const element = typeof target === "string" ? $(target) : target;
   if(!element) return element;
   HTML_PROBE.innerHTML = html;
+  // Translated before it is compared: what is on screen is in the page's
+  // language, and markup compared in English would differ on every pass.
+  applyI18n(HTML_PROBE.content || HTML_PROBE);
   const wanted = HTML_PROBE.innerHTML;
   // `innerHTML`, not `textContent`: a template's parsed nodes live in its
   // `.content` fragment, which `textContent` does not reach — so clearing it
@@ -1756,7 +1786,7 @@ const THEME = {
     // The button offers the theme you would switch *to*, so the sun shows
     // while the page is dark.
     setHTML(button, icon(dark ? "sun" : "moon"));
-    button.title = dark ? "Switch to the light theme" : "Switch to the dark theme";
+    button.title = t(dark ? "ui.switch_to_the_light_theme" : "ui.switch_to_the_dark_theme");
     button.setAttribute("aria-label", button.title);
   },
 };
@@ -1875,7 +1905,7 @@ const PALETTE = {
   },
   paint(){
     const list = $("palette-list"); if(!list) return;
-    if(!this.filtered.length){ list.innerHTML = '<div class="none">Nothing matches that.</div>'; return; }
+    if(!this.filtered.length){ list.innerHTML = '<div class="none" data-i18n="ui.nothing_matches_that">Nothing matches that.</div>'; return; }
     list.innerHTML = this.filtered.map((item, i) =>
       '<div class="it" role="option" data-i="' + i + '" aria-selected="' +
       (i === this.index ? "true" : "false") + '"><span>' + esc(item.label) +

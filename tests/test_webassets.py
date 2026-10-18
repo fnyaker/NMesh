@@ -429,7 +429,7 @@ def test_every_tab_has_a_short_name_for_the_tab_bar(html_name):
     for tab in tabs:
         assert 'data-label="' in tab, tab
         # The long label must be wrapped, or there is nothing to hide.
-        assert '<span class="lbl">' in tab, tab[:90]
+        assert '<span class="lbl"' in tab, tab[:90]
 
 
 def test_the_topbar_does_not_capture_its_own_menus():
@@ -1213,7 +1213,7 @@ def test_the_refresh_interval_is_a_number_here_and_a_list_there():
         assert 'id="refresh-secs"' in html and 'type="number"' in html
         assert 'max="30"' in html
         assert 'id="refresh-pick"' in html
-        assert 'value="0">Off' in html
+        assert re.search(r'value="0"[^>]*>Off', html)
         # Off is not a dead end: one press still reads the node.
         assert 'id="refresh-now"' in html
     narrow = webassets.ui.CSS.split("@media (max-width:720px){", 1)[1]
@@ -1329,7 +1329,7 @@ def test_the_pin_dialog_says_what_the_key_is_accepted_for():
 
 def test_the_key_list_says_what_each_key_is_accepted_for():
     html, source = webassets.INDEX_HTML, webassets.APP_JS
-    assert "<th>Accepted for</th>" in html
+    assert re.search(r"<th[^>]*>Accepted for</th>", html)
     row = source.split("function publisherRowHTML(entry){", 1)[1].split(
         "\n}", 1)[0]
     assert "entry.code" in row
