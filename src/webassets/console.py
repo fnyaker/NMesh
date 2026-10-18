@@ -18,6 +18,7 @@ INDEX_HTML = """<!doctype html>
 <meta name="theme-color" content="#0a0e13" media="(prefers-color-scheme: dark)">
 <title>NMesh Console</title>
 <script src="/theme.js"></script>
+<script src="/i18n.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
 </head>
@@ -4603,7 +4604,8 @@ function paintConfig(data){
     const label = document.createElement("label");
     label.className = "field";
     const title = document.createElement("span");
-    title.textContent = setting.name.replace(/_/g, " ") + (setting.editable ? "" : " (file only)");
+    title.textContent = (setting.name === "language" ? t("language.label")
+      : setting.name.replace(/_/g, " ")) + (setting.editable ? "" : " (file only)");
     // The bar above moves these; a hand edit here makes the node "custom".
     if(profiled.has(setting.name)){
       const mark = document.createElement("span");
@@ -4627,6 +4629,16 @@ function paintConfig(data){
       input.className = "mono"; input.rows = 3;
       input.value = (setting.value || []).join("\n");
       label.appendChild(input);
+    }else if(setting.kind === "choice"){
+      input = document.createElement("select");
+      for(const choice of setting.choices || []){
+        const option = document.createElement("option");
+        option.value = choice;
+        option.textContent = choice ? t("language.name." + choice) : t("language.auto");
+        option.selected = choice === (setting.value || "");
+        input.appendChild(option);
+      }
+      label.appendChild(input);
     }else{
       input = document.createElement("input");
       input.type = setting.kind === "int" ? "number" : "text";
@@ -4643,7 +4655,8 @@ function paintConfig(data){
     if(!setting.editable) input.disabled = true;
     const help = document.createElement("small");
     help.className = "hint";
-    help.textContent = setting.help + (setting.flag ? "  ·  " + setting.flag : "");
+    help.textContent = (setting.name === "language" ? t("language.help") : setting.help) +
+      (setting.flag ? "  ·  " + setting.flag : "");
     (setting.kind === "bool" ? label.lastChild : label).appendChild(help);
     $(setting.live ? "config-fields" : "config-fields-restart").appendChild(label);
   }

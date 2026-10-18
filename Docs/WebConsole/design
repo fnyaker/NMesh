@@ -334,6 +334,13 @@ that has since changed is thrown as `StaleContext` rather than painted, and an
 HTTP 401 means *this* console's session — a managed node's expiring arrives as a
 refusal, not as a sign-out.
 
+## Language
+
+Every page loads `/i18n.js` right after `/theme.js`; `ui.JS` then offers `t(key,
+params)` and `applyI18n(root)` (`data-i18n`, `data-i18n-attr`). A page writes
+**no sentence of its own**: it asks for a key. See
+[`../I18n/guide`](../I18n/guide).
+
 ## Constraints you cannot see
 
 - **No external resource.** No CDN, no web font, no remote image. The console

@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "nmesh"
-version = "0.4.116"
+version = "0.4.117"
 license = "GPL-3.0-only"
 
 [tool.pytest.ini_options]

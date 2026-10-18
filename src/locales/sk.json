@@ -1,0 +1,53 @@
+{
+  "common.add": "Pridať",
+  "common.back": "Späť",
+  "common.cancel": "Zrušiť",
+  "common.close": "Zavrieť",
+  "common.copy": "Kopírovať",
+  "common.delete": "Odstrániť",
+  "common.edit": "Upraviť",
+  "common.failed": "Niečo sa pokazilo",
+  "common.loading": "Načítava sa…",
+  "common.none": "Žiadne",
+  "common.refresh": "Obnoviť",
+  "common.remove": "Odstrániť",
+  "common.retry": "Skúsiť znova",
+  "common.save": "Uložiť",
+  "common.saved": "Uložené",
+  "common.search": "Hľadať",
+  "common.send": "Odoslať",
+  "common.unknown": "Neznáme",
+  "config.saved": "Konfigurácia uložená",
+  "count.link": {
+    "one": "{count} spojenie",
+    "few": "{count} spojenia",
+    "other": "{count} spojení",
+    "many": "{count} spojenia"
+  },
+  "count.message": {
+    "one": "{count} správa",
+    "few": "{count} správy",
+    "other": "{count} správ",
+    "many": "{count} správy"
+  },
+  "count.node": {
+    "one": "{count} uzol",
+    "few": "{count} uzly",
+    "other": "{count} uzlov",
+    "many": "{count} uzla"
+  },
+  "language.auto": "Automaticky (podľa prehliadača)",
+  "language.help": "Jazyk konzoly a aplikácií. Automaticky sleduje prehliadač.",
+  "language.label": "Jazyk",
+  "language.name.de": "Deutsch",
+  "language.name.en": "English",
+  "language.name.fr": "Français",
+  "language.name.pl": "Polski",
+  "language.name.ru": "Русский",
+  "language.name.sk": "Slovenčina",
+  "language.name.zh": "中文",
+  "state.connected": "Pripojené",
+  "state.disconnected": "Odpojené",
+  "state.offline": "Offline",
+  "state.online": "Online"
+}

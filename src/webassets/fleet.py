@@ -21,6 +21,7 @@ FLEET_HTML = """<!doctype html>
 <meta name="theme-color" content="#0a0e13" media="(prefers-color-scheme: dark)">
 <title>NMesh Fleet</title>
 <script src="/theme.js"></script>
+<script src="/i18n.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/fleet.css">
 </head>

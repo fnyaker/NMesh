@@ -348,9 +348,11 @@ class AppHost:
     Every method is a coroutine driven from the event loop; the console
     marshals its calls onto that loop like every other node interaction."""
 
-    def __init__(self, registry: AppRegistry, *, app_storage=None) -> None:
+    def __init__(self, registry: AppRegistry, *, app_storage=None,
+                 language=None) -> None:
         self._registry = registry
         self._storage = app_storage
+        self._language = language
         self._factories: dict[str, object] = {}
         self._running: dict[str, tuple] = {}      # name -> (app, bridge)
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -364,6 +366,31 @@ class AppHost:
         ``app`` must expose ``start()`` and ``stop()`` coroutines."""
         if self._registry.known(name):
             self._factories[name] = factory
+
+    @property
+    def language(self) -> str:
+        """The language the operator chose, or ``""`` to follow the browser.
+
+        What an app answers in when no browser is asking (a notification, a
+        message it composes itself). An app that wants to be told when it
+        changes defines ``set_language(code)`` on itself or its bridge."""
+        try:
+            value = self._language() if self._language else ""
+        except Exception:
+            return ""
+        return value if isinstance(value, str) else ""
+
+    def set_language(self, code: str) -> None:
+        """Tell every running app the language changed. One that fails costs
+        only itself."""
+        for name, (app, bridge) in list(self._running.items()):
+            for target in (app, bridge):
+                hook = getattr(target, "set_language", None)
+                if callable(hook):
+                    try:
+                        hook(code)
+                    except Exception as exc:  # noqa: BLE001
+                        faults.note(f"app {name} language", exc)
 
     def bridge(self, name: str):
         entry = self._running.get(name)
@@ -425,6 +452,7 @@ class AppHost:
             except Exception as exc:  # noqa: BLE001
                 faults.note(f"app {name} bridge", exc)
         self._running[name] = (app, bridge)
+        self.set_language(self.language)
         return True
 
     async def _stop(self, name: str) -> bool:

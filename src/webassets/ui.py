@@ -967,6 +967,41 @@ const shortId = (id) => id ? id.slice(0, 6) + "…" + id.slice(-4) : "unknown";
 // same one, and a lookalike costs an attacker nothing to register. So the id
 // always travels with it — never a name on its own.
 const nodeLabel = (id, pseudo) => pseudo ? pseudo + " · " + shortId(id) : shortId(id);
+// ---- language --------------------------------------------------------------
+// /i18n.js (served by the node, loaded before this file) defines NMESH_LANG and
+// NMESH_I18N. A page asks for a sentence by key and never writes one: t() for a
+// sentence, with {name} filled from `params`; a plural entry is chosen by
+// `params.count`. A key nobody defined is shown as itself, on purpose.
+const LANG = (typeof NMESH_LANG === "string" && NMESH_LANG) || "en";
+const STRINGS = (typeof NMESH_I18N === "object" && NMESH_I18N) || {};
+const PLURALS = (() => { try{ return new Intl.PluralRules(LANG); }catch(_){ return null; } })();
+const t = (key, params) => {
+  let text = STRINGS[key];
+  if(text == null) return key;
+  const values = params || {};
+  if(typeof text === "object"){
+    const form = PLURALS ? PLURALS.select(Number(values.count)) : "other";
+    text = text[form] != null ? text[form] : text.other;
+  }
+  return String(text).replace(/\{([a-z][a-z0-9_]*)\}/g,
+    (whole, name) => Object.prototype.hasOwnProperty.call(values, name)
+      ? String(values[name]) : whole);
+};
+// Markup carries its words as data: data-i18n="key" for the text,
+// data-i18n-attr="title:key;placeholder:key" for attributes. One pass names
+// every static sentence of a page; what JS builds calls t() itself.
+function applyI18n(root){
+  const scope = root || document;
+  for(const node of scope.querySelectorAll("[data-i18n]"))
+    node.textContent = t(node.getAttribute("data-i18n"));
+  for(const node of scope.querySelectorAll("[data-i18n-attr]"))
+    for(const pair of node.getAttribute("data-i18n-attr").split(";")){
+      const [attribute, key] = pair.split(":");
+      if(attribute && key) node.setAttribute(attribute.trim(), t(key.trim()));
+    }
+}
+document.documentElement.lang = LANG;
+applyI18n();
 // ---- icons -----------------------------------------------------------------
 // One set for the whole product. Paths only: the wrapper is written once by
 // `icon()`, so every icon shares a stroke weight, a box and a baseline.

@@ -273,6 +273,19 @@ def _as_link_idle(raw: str) -> int:
     return value
 
 
+# The languages the product ships, spelled out here because this module imports
+# nothing of its own; `tests/test_i18n.py` holds the list to `src/i18n.py`.
+LANGUAGES = ("en", "fr", "de", "ru", "zh", "pl", "sk")
+
+
+def _as_language(raw: str) -> str:
+    """A shipped language, or empty to follow the browser."""
+    value = raw.strip().lower()
+    if value and value not in LANGUAGES:
+        raise ConfigError("not a shipped language (%s)" % ", ".join(LANGUAGES))
+    return value
+
+
 def _as_branch(raw: str) -> str:
     """A branch to follow instead of the published releases. Empty = releases.
 
@@ -471,6 +484,9 @@ SETTINGS = {
                         "Branch whose src/version.py says what the latest "
                         "version is, instead of the published GitHub releases "
                         "(empty = releases)"),
+    "language":        (_as_language, "", True,
+                        "Language of the console and of the apps (empty = "
+                        "follow the browser): " + ", ".join(LANGUAGES)),
     "no_chat":         (_as_bool, False, True, "Disable the built-in chat app"),
     "fleet":           (_as_bool, False, True,
                         "Enable the fleet app (remote management, can open a shell)"),
@@ -497,7 +513,7 @@ LIVE = frozenset({
     "keepalive_slow_min_ms", "keepalive_slow_max_ms",
     "pseudo", "no_abuse_gossip", "release_quorum", "release_auto_publish",
     "update_check_minutes", "update_when_active", "recommend_version",
-    "update_branch",
+    "update_branch", "language",
 })
 
 # Keys the launcher takes on the command line, spelled as CLI flags.
@@ -602,6 +618,17 @@ def load(path: str) -> tuple[dict, list]:
     except OSError as exc:
         return {}, [f"could not read {path}: {exc.strerror or 'error'}"]
     return parse(text)
+
+
+def language(path: str | None) -> str:
+    """The ``language`` stored in the file at ``path``, or ``""`` (follow the
+    browser). Read each time, like ``updater.update_branch``: saving the file is
+    the whole of applying it."""
+    if not path:
+        return ""
+    values, _problems = load(path)
+    value = values.get("language", "")
+    return value if value in LANGUAGES else ""
 
 
 _HEADER = """\
@@ -727,7 +754,7 @@ def apply_edits(current: dict, edits) -> tuple[dict, list]:
     return merged, rejected
 
 
-_KINDS = {_as_bool: "bool", _as_port: "int", _as_optional_port: "int",
+_KINDS = {_as_language: "choice", _as_bool: "bool", _as_port: "int", _as_optional_port: "int",
           _as_store_mb: "int", _as_score: "text", _as_seconds: "text",
           _as_quorum: "int"}
 
@@ -754,5 +781,6 @@ def public(values: dict) -> list:
             "live": name in LIVE,
             "help": help_text,
             "flag": CLI_NAMES[name],
+            **({"choices": [""] + list(LANGUAGES)} if name == "language" else {}),
         })
     return shown

@@ -1,0 +1,44 @@
+{
+  "common.add": "添加",
+  "common.back": "返回",
+  "common.cancel": "取消",
+  "common.close": "关闭",
+  "common.copy": "复制",
+  "common.delete": "删除",
+  "common.edit": "编辑",
+  "common.failed": "出了点问题",
+  "common.loading": "加载中…",
+  "common.none": "无",
+  "common.refresh": "刷新",
+  "common.remove": "移除",
+  "common.retry": "重试",
+  "common.save": "保存",
+  "common.saved": "已保存",
+  "common.search": "搜索",
+  "common.send": "发送",
+  "common.unknown": "未知",
+  "config.saved": "配置已保存",
+  "count.link": {
+    "other": "{count} 条链路"
+  },
+  "count.message": {
+    "other": "{count} 条消息"
+  },
+  "count.node": {
+    "other": "{count} 个节点"
+  },
+  "language.auto": "自动（跟随浏览器）",
+  "language.help": "控制台和应用使用的语言。自动模式跟随浏览器。",
+  "language.label": "语言",
+  "language.name.de": "Deutsch",
+  "language.name.en": "English",
+  "language.name.fr": "Français",
+  "language.name.pl": "Polski",
+  "language.name.ru": "Русский",
+  "language.name.sk": "Slovenčina",
+  "language.name.zh": "中文",
+  "state.connected": "已连接",
+  "state.disconnected": "已断开",
+  "state.offline": "离线",
+  "state.online": "在线"
+}
