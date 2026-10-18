@@ -244,7 +244,7 @@ class TestWhatThePageHolds:
         assert got["proto"] == 2 and got["full"] is True
         assert set(got["revs"]) == {
             "peer", "me", "pseudo", "bio", "has_avatar",
-            "contacts", "known", "groups", "unread", "typing"}
+            "contacts", "contacts_access", "known", "groups", "unread", "typing"}
         assert set(got["sections"]) == set(got["revs"])
 
     async def test_a_section_that_did_not_move_is_not_sent_again(self):
@@ -310,3 +310,43 @@ class TestWhatThePageHolds:
             assert "contacts" not in held["sections"]
         finally:
             server.stop()
+
+
+class TestVoiceMessages:
+    """A voice message is a file whose name says so. The name is the sender's, so
+    it is checked before anything is played, and a file that merely borrows the
+    name stays the plain file it is."""
+
+    @pytest.mark.parametrize("name,size", [
+        ("voice-1500.webm", 4096), ("voice-1.ogg", 1), ("voice-600000.webm", 8 * 1024 * 1024),
+    ])
+    def test_a_name_and_a_size_that_fit_are_a_voice_message(self, name, size):
+        from src.apps.chat_web import voice_length
+        assert voice_length(name, size) == int(name[6:].split(".")[0])
+
+    @pytest.mark.parametrize("name,size", [
+        ("voice-0.webm", 10), ("voice-600001.webm", 10),
+        ("voice-1500.webm", 0), ("voice-1500.webm", 8 * 1024 * 1024 + 1),
+        ("voice-1500.mp3", 10), ("voice-1500.WEBM", 10), ("Voice-1500.webm", 10),
+        ("voice-15e2.webm", 10), ("voice--5.webm", 10), ("voice-1500.webm.exe", 10),
+        ("../voice-1500.webm", 10), ("voice-1500.webm\n", 10), ("voice-12345678.webm", 10),
+        ("voice- 5.webm", 10), ("xvoice-5.webm", 10), ("", 10), (None, 10), (5, 10),
+        ("voice-5.webm", None), ("voice-5.webm", "10"), ("voice-5.webm", True),
+    ])
+    def test_anything_else_is_not(self, name, size):
+        from src.apps.chat_web import voice_length
+        assert voice_length(name, size) is None
+
+    async def test_the_record_carries_the_length_the_name_gave(self):
+        bridge = ChatWebServer(ChatApp(StubClient()), host="127.0.0.1", port=0,
+                               token=TOKEN, peer=PEER).bridge
+        rec = bridge._file_rec(b"\x01" * 8, "voice-4200.webm", 900, None)
+        assert rec["kind"] == "voice" and rec["duration_ms"] == 4200
+
+    async def test_a_file_that_borrows_the_name_is_a_plain_file(self):
+        bridge = ChatWebServer(ChatApp(StubClient()), host="127.0.0.1", port=0,
+                               token=TOKEN, peer=PEER).bridge
+        huge = bridge._file_rec(b"\x01" * 8, "voice-4200.webm", 9 * 1024 * 1024, None)
+        assert huge["kind"] == "file" and "duration_ms" not in huge
+        picture = bridge._file_rec(b"\x01" * 8, "voice-4200.png", 100, None)
+        assert picture["kind"] == "image"

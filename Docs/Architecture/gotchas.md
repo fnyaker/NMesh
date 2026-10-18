@@ -2801,3 +2801,12 @@ the code, and each looked right from reading it.
   `ROUTER.onChange` set beside the panels, which loads the Docker panel when it
   is opened and refreshes the Logs one, never ran (BUGSVULNS 119). Call
   `ROUTER.start()` with no argument where the handler is set elsewhere.
+- **A `bool` is an `int`.** `chat_web.voice_length(name, True)` measured a
+  one-byte file because `isinstance(True, int)`; the size a peer declares is
+  checked with `type(size) is int`.
+- **A built-in app with no book at start.** `ContactsApp.start()` creates the
+  default book (`ensure_default`); a page reading the state before the first
+  write otherwise found nothing to save a contact into.
+- **A coroutine handed to a loop that is not there.** `ChatBridge._run` closes
+  the coroutine when the loop is `None`; left unawaited it warned at exit and
+  hid the real refusal.

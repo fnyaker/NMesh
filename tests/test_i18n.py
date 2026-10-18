@@ -398,12 +398,51 @@ class TestTheConsoleSpeaks:
         assert 'NMESH_LANG="en"' in text
 
 
+class TestEveryKeyAPageAsksForIsDefined:
+    """`t("x.y")` shows `x.y` itself when nobody defined it — on purpose, so a gap
+    is visible. It should be visible here, in a test, and not to a person."""
+
+    @staticmethod
+    def _asked(*sources):
+        keys = set()
+        for text in sources:
+            keys |= set(re.findall(r'data-i18n="([^"]+)"', text))
+            for pairs in re.findall(r'data-i18n-attr="([^"]+)"', text):
+                keys |= {pair.split(":", 1)[1] for pair in pairs.split(";")}
+            keys |= set(re.findall(r'\bt\("([a-z][a-z0-9_.]*[a-z0-9_])"', text))
+            # `t(flag ? "a.b" : "a.c")`: both arms are asked for.
+            for arms in re.findall(r'\bt\(\w+(?: \|\| \w+)? \? "([^"]+)" : "([^"]+)"', text):
+                keys |= set(arms)
+        return keys
+
+    @pytest.mark.parametrize("language", sorted(REQUIRED_FORMS))
+    def test_chat_and_contacts_say_everything_in_every_language(self, language):
+        from src.webassets import chat, contacts
+        asked = self._asked(chat.CHAT_HTML, chat.CHAT_PAGE_JS,
+                            contacts.CONTACTS_HTML, contacts.CONTACTS_PAGE_JS)
+        # What a page builds from a code (`contacts.err.<why>`, `.color.<name>`)
+        # is asked for by prefix; each code the node can send is listed here.
+        for why in ("no_book", "read_only", "no_contact", "empty", "full", "bad_node",
+                    "not_owner", "self", "gone", "permission"):
+            asked.add("contacts.err." + why)
+        for color in ("blue", "green", "teal", "amber", "red", "purple", "pink", "gray"):
+            asked.add("contacts.color." + color)
+        defined = _raw(language)
+        missing = sorted(key for key in asked if key not in defined)
+        assert not missing, missing
+
+    def test_the_node_cannot_send_a_refusal_the_page_has_no_words_for(self):
+        from src.apps import contacts_web
+        for why in contacts_web._CHANGES:
+            assert "contacts.err." + why in _raw("en"), why
+
+
 # -- the pages ask the catalogue, and what they show before it answers is the
 # English it holds ---------------------------------------------------------
 
 import html as _html
 
-_PAGES = ("console", "fleet", "nodeview", "packages", "terminal", "ui")
+_PAGES = ("chat", "console", "contacts", "fleet", "nodeview", "packages", "terminal", "ui")
 _SOURCES = {name: open(os.path.join(os.path.dirname(ui.__file__), name + ".py"),
                        encoding="utf-8").read() for name in _PAGES}
 _LEAF = re.compile(
@@ -422,7 +461,7 @@ def _norm(text):
 
 
 _QUOTED = re.compile(
-    r'"((?:console|fleet|node|pkg|term|ui|common|state|count|language|config)\.[a-z0-9_]+)"')
+    r'"((?:chat|console|contacts|fleet|node|pkg|term|ui|common|state|count|language|config)(?:\.[a-z0-9_]+)+)"')
 _PLURALS = re.compile(r'plural\([^"]*"([a-z ]+)"')
 
 
@@ -431,6 +470,7 @@ def _asked_keys():
     keys = set()
     for text in _SOURCES.values():
         keys.update(re.findall(r'data-i18n="([a-z0-9_.]+)"', text))
+        keys.update(re.findall(r'data-ctx-local-key="([a-z0-9_.]+)"', text))
         for pairs in _ATTRS.findall(text):
             keys.update(pair.split(":", 1)[1] for pair in pairs.split(";"))
         keys.update(_CALLS.findall(text))
@@ -482,8 +522,10 @@ class TestThePagesUseTheCatalogue:
     def test_no_key_is_left_unused(self):
         used = _used_keys()
         shared = ("common.", "state.", "count.", "language.", "config.")
+        # Contacts builds these two families from a code the node sends.
+        built = shared + ("contacts.err.", "contacts.color.")
         orphans = sorted(key for key in _raw("en")
-                         if key not in used and not key.startswith(shared))
+                         if key not in used and not key.startswith(built))
         assert not orphans, orphans[:10]
 
     @pytest.mark.parametrize("name", _PAGES)

@@ -39,6 +39,9 @@ manifest that asks for something else is told which name it got wrong.
 | `readstate.trust` | sensitive | trust anchors, witnesses, membership, signing keys held (never the keys) |
 | `readstate.updates` | sensitive | releases, packages, the installed set, transfers |
 | `readstate.apps` | sensitive | apps, their state, and their read-only operations |
+| `contacts` | sensitive | **everything below** — the address books ([`../Apps/contacts`](../Apps/contacts)) |
+| `contacts.read` | sensitive | the books, the contacts in them and the names they were given; searching them |
+| `contacts.write` | sensitive | adding a node to the books, taking one out |
 | `control` | dangerous | **everything below** — what an operator at the console can do |
 | `control.node` | dangerous | ping, speed test, forget, retry, restart, rename |
 | `control.network` | dangerous | probing, punching, listening, discovery, multi-link |
@@ -51,7 +54,8 @@ manifest that asks for something else is told which name it got wrong.
 | `modding` | dangerous | standing in front of the node's own operations — before, after, or instead of them |
 
 **A parent covers its children.** Granting `readstate` grants all nine reads;
-granting `readstate.logs` grants that one. Taking a parent back takes its children
+granting `readstate.logs` grants that one. Reading is not writing: `contacts.read`
+does not give `contacts.write`. Taking a parent back takes its children
 with it: a page that unticks `readstate` and leaves `readstate.logs` ticked has
 said two contradictory things, and the narrower one is kept.
 
@@ -255,6 +259,15 @@ for confirmation first. *Connected apps* lists every app that is not built in an
 declared a manifest: attached now (with its own token or only the shared one),
 installed with a `nmesh.json`, or remembered from before; it is where an app's
 connector token is read (this machine only) and where an app is forgotten.
+
+An operation another app declares can name its own permission
+(`app_api.operation(..., permission="contacts.read")`): a call **from an app**
+is then answered from that name (`app_perms.app_call_need`) instead of the
+blanket `readstate.apps` / `control.apps`. A name that is not on the tree is
+ignored, so naming one cannot be a way to need nothing. Chat uses it to reach the
+address books, and when a person has not answered yet it shows the question the
+way a phone does: *Allow*, *Read only*, *Not now* (the last is remembered in that
+browser only).
 
 *Apps → Internal API*: every endpoint, what it does, the permission an app needs,
 and the MCP tool it becomes.

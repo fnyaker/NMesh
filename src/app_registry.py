@@ -39,6 +39,7 @@ from .app_channel import CHAT_APP_ID, builtin_id
 
 FLEET_APP_ID = builtin_id("fleet")
 MCP_APP_ID = builtin_id("mcp")
+CONTACTS_APP_ID = builtin_id("contacts")
 
 # What every built-in app does through the connector anyway — its own section,
 # names, reports, a log line. Asked for like any other app asks, so the Apps
@@ -62,7 +63,25 @@ BUILTIN_APPS = (
         "page": "/chat",
         "app_id": CHAT_APP_ID,
         "default_enabled": True,
-        "description": "Messaging, files and calls across the mesh.",
+        "description": "Messaging, voice messages, files and calls across the mesh.",
+        "permissions": _BASE + [
+            {"name": "contacts.read",
+             "why": "It shows the people you know by the names you gave them, "
+                    "and finds someone you have already saved."},
+            {"name": "contacts.write",
+             "why": "It adds a person to your address book when you press "
+                    "\"Add to contacts\"."},
+        ],
+    },
+    {
+        "name": "contacts",
+        "title": "Contacts",
+        "page": "/contacts",
+        "app_id": CONTACTS_APP_ID,
+        "default_enabled": True,
+        "description": ("Address books: the people you know and the nodes they "
+                        "answer to, kept in as many books as you like, shared "
+                        "with other nodes, and offered to the apps you allow."),
         "permissions": _BASE,
     },
     {

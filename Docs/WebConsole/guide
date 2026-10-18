@@ -276,7 +276,7 @@ never get wrong.
   console.
 
 - **The apps follow the node exactly as far as it granted.** A managed node
-  opens `/api/chat/` to a console holding its **`apps`** grant and `/api/fleet/`
+  opens `/api/chat/` and `/api/contacts/` to a console holding its **`apps`** grant and `/api/fleet/`
   to one holding **`full`**, and refuses them otherwise (somebody else's
   conversations are not part of managing their machine unless they said so; a
   managed node is not a jump host unless they said so). `/api/remote/` is this
@@ -803,9 +803,13 @@ now answers `{"error": …}` with the same status.
 | POST    | `/api/chat/read`   | `{conv}` — marks read (sends the read receipt) |
 | POST    | `/api/chat/typing` | `{conv, active}` — typing indicator            |
 | POST    | `/api/chat/profile`| `{bio?, avatar?:b64}` — updates my profile (the **name** is the node's, see `/api/pseudo`) |
-| POST    | `/api/chat/contact`| `{op:add\|remove, id}`                          |
+| POST    | `/api/chat/contact`| `{op:add\|remove, id}` — through the contacts app; `403 {error:"permission", permission}` when chat was not allowed |
 | POST    | `/api/chat/group`  | `{op:create, name, members[]}` / `{op:remove, id}` |
 | POST    | `/api/chat/search` | `{pseudo}` → the node's ranked name search, merged with this screen's contacts |
+| GET     | `/api/contacts/state` | `?book=` → books, invitations, one book's contacts and names (sectioned like chat's feed) |
+| GET     | `/api/contacts/people` | `?q=&wide=` → saved contacts first, then the directory |
+| GET     | `/api/contacts/export` | `?book=` → a vCard download |
+| POST    | `/api/contacts/<op>` | `save delete move book share unshare answer people import` — see [`../Apps/contacts`](../Apps/contacts); `import` accepts a 2 MiB body |
 | GET     | `/api/pseudo`      | this node's name, id and the length limit (`pseudo.get`); `?q=…` searches the names this node holds (`pseudo.search`), `&wide=1` asks the directory instead (`pseudo.lookup`, **local only** — a Kademlia round does not fit the relay) |
 | POST    | `/api/pseudo`      | `{pseudo}` → renames this node (empty removes the name); signs a fresh claim, announces it, and records it in the configuration file when there is one (the node keeps the name across a restart either way — see [`../Pseudos/guide`](../Pseudos/guide)) |
 | GET     | `/api/fleet/state` | `?since=N` → managed nodes, enrolment notifications, log, capabilities, machine facts. `&proto=2&have=name:rev,…` asks for the **sectioned** shape and gets back only what moved (`src/console_feed.py`); without `proto` it is the flat snapshot it has always been |
@@ -908,6 +912,9 @@ The node ships a **default chat app**, plugged into the mesh like any other app
   (per tab, never on disk) for explicit use; opened cold with no valid session,
   the page asks for the console password and logs in by itself. A plain
   **refresh** no longer asks for anything.
+- the **`/contacts`** sub-page is the address books (`Docs/Apps/contacts`), served
+  the same way: the markup is public, every `/api/contacts/*` call needs the
+  session, and with the app off neither exists (404).
 - the `/api/chat/*` endpoints require the **same token** as the rest of the
   console. With no chat app attached, neither `/chat` nor `/api/chat/*` exists
   (404) and the app list is empty.

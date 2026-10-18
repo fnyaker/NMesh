@@ -129,6 +129,17 @@ PERMISSIONS = (
                     "Apps, their state, and the read-only operations they "
                     "declare."),
           )),
+    # -- what a person keeps about the people they know -----------------------
+    _perm("contacts", "Use the address books", SENSITIVE,
+          "Everything below: read the contacts, and change them.",
+          children=(
+              _perm("contacts.read", "Read the contacts", SENSITIVE,
+                    "Who is in the address books: names, the nodes they answer "
+                    "to, the notes written beside them."),
+              _perm("contacts.write", "Change the contacts", SENSITIVE,
+                    "Add, edit and remove contacts in the books this node "
+                    "keeps, and so in every node a book is shared with."),
+          )),
     # -- driving it ---------------------------------------------------------
     _perm("control", "Drive this node", DANGEROUS,
           "Everything below: what an operator at the console can do.",
@@ -612,8 +623,21 @@ class PermissionBook:
 
 # Anything here makes the plane worth reaching at all: an app holding none of
 # it is shown an empty catalogue, and its jobs and app calls are refused.
-_DRIVING = ("readstate", "control") + tuple(
-    child for root in ("readstate", "control") for child in children(root))
+_DRIVING = ("readstate", "control", "contacts") + tuple(
+    child for root in ("readstate", "control", "contacts") for child in children(root))
+
+
+def app_call_need(declared: dict) -> str:
+    """The permission an *app* needs to call one operation another app declared.
+
+    An operation names its own (``permission=``, on the built-in apps that
+    guard something more specific than "the apps"); the rest are a read or a
+    change of the apps, as they always were. A name that is not on the tree is
+    ignored: it must not be a way to ask for nothing."""
+    named = declared.get("permission")
+    if isinstance(named, str) and named in _BY_NAME:
+        return named
+    return "control.apps" if declared.get("changes") else "readstate.apps"
 
 
 class ControlGate:
@@ -674,7 +698,8 @@ class ControlGate:
     def _carried_app_call(self, app_hex, params):
         if not isinstance(params, dict) or "app" not in params:
             return (None if self._book.allows_any(
-                        app_hex, ("readstate.apps", "control.apps"))
+                        app_hex, ("readstate.apps", "control.apps",
+                                  "contacts.read", "contacts.write"))
                     else "this app may not call other apps")
         declared = None
         if self._find_app_op is not None:
@@ -685,7 +710,7 @@ class ControlGate:
                 declared = None
         if declared is None:
             return None              # "no such operation", said by the module
-        need = "control.apps" if declared.get("changes") else "readstate.apps"
+        need = app_call_need(declared)
         if self._book.allows(app_hex, need):
             return None
         return f"that operation needs the {need} permission"

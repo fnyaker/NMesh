@@ -122,12 +122,23 @@ operation itself declared with `remote=True` — and only through the control
 plane, which is the one door that knows the difference. An app is not asked to
 work out whether its caller is at the keyboard.
 
+### An operation that names its own permission
+
+`app_api.operation(name, doc, params, changes=…, permission="contacts.read")`
+says which permission an **app** caller needs; without it the call is the read or
+the change of the apps it always was. The name is kept in the declaration (it
+travels in the catalogue, so the Internal API page shows it) but is **not**
+carried by `declare_all`, which is what an app outside the node declares: a
+permission is the node's to name, not a thing a package states about itself.
+
 ## What ships today
 
 | app | operation | changes | remote | what it answers |
 |---|---|---|---|---|
 | `chat` | `peer` | no | no | pseudo, whether it is a contact, unread count, where the conversation lives |
-| `chat` | `contact` | yes | no | add a node to the address book (not a grant, and not a name — that is the node's own, signed) |
+| `chat` | `contact` | yes | no | add a node to the address books through the contacts app (not a grant, and not a name — that is the node's own, signed); refused with a named permission when chat was not allowed to write |
+| `contacts` | `books` `list` `names` `search` `find` | no | no | the address books — each declares `contacts.read` |
+| `contacts` | `add` `remove` | yes | no | save or take out a node — each declares `contacts.write` |
 | `fleet` | `relation` | no | **yes** | both directions of the ledger: rights held over that node, rights it holds here, requests pending either way |
 | `fleet` | `enrol` | yes | no | ask a node for the right to manage it |
 | `fleet` | `request` | yes | no | ask a node already managed for extra rights |

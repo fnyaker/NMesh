@@ -78,6 +78,7 @@ class ChatState:
         self._store = store
         self._lock = threading.Lock()
         self.pseudo = ""
+        self.migrated = False                 # legacy contacts now live in the books
         self.bio = ""
         self.avatar = b""                     # my own avatar thumbnail bytes
         self.contacts: dict[str, dict] = {}   # id_hex -> {pseudo, added, bio}
@@ -108,10 +109,12 @@ class ChatState:
         if not isinstance(doc, dict):
             return
         self.bio = str(doc.get("bio", ""))[:_MAX_BIO]
+        self.migrated = doc.get("migrated") is True
         if isinstance(doc.get("contacts"), dict):
             for k, v in list(doc["contacts"].items())[:_MAX_CONTACTS]:
                 if _is_id(k) and isinstance(v, dict):
                     self.contacts[k] = {"pseudo": normalize_pseudo(str(v.get("pseudo", ""))),
+                                        "label": normalize_pseudo(str(v.get("label", ""))),
                                         "added": float(v.get("added", 0) or 0),
                                         "bio": str(v.get("bio", ""))[:_MAX_BIO]}
         if isinstance(doc.get("known"), dict):
@@ -141,7 +144,7 @@ class ChatState:
     def _save_locked(self) -> None:
         # Our own pseudo is deliberately absent: it lives on the node, which
         # signs it. Persisting a copy here would only let the two disagree.
-        doc = {"bio": self.bio,
+        doc = {"bio": self.bio, "migrated": self.migrated,
                "contacts": self.contacts, "known": self.known,
                "groups": self.groups, "avatar_ids": list(self._avatars.keys())}
         if self._store is not None:
@@ -197,12 +200,37 @@ class ChatState:
             self.contacts[id_hex] = {
                 "pseudo": existing.get("pseudo", "")
                           or self.known.get(id_hex, {}).get("pseudo", ""),
+                "label": existing.get("label", ""),
                 "added": existing.get("added") or time.time(),
                 "bio": existing.get("bio", "") or self.known.get(id_hex, {}).get("bio", ""),
             }
             self.known.pop(id_hex, None)  # promoted from learned → confirmed
             self._save_locked()
             return True
+
+    def replace_contacts(self, labels: dict) -> None:
+        """Mirror the address books: ``labels`` is every node in them and the
+        name its owner gave it. Chat keeps no list of its own beyond this copy,
+        which it needs to render a screen without asking on every frame."""
+        with self._lock:
+            kept: dict[str, dict] = {}
+            for id_hex, label in list(labels.items())[:_MAX_CONTACTS]:
+                if not _is_id(id_hex):
+                    continue
+                before = self.contacts.get(id_hex) or {}
+                kept[id_hex] = {
+                    "pseudo": before.get("pseudo", "")
+                              or self.known.get(id_hex, {}).get("pseudo", ""),
+                    "label": normalize_pseudo(str(label or "")),
+                    "added": before.get("added") or time.time(),
+                    "bio": before.get("bio", "") or self.known.get(id_hex, {}).get("bio", "")}
+            if kept == self.contacts and self.migrated:
+                return
+            for id_hex in kept:
+                self.known.pop(id_hex, None)
+            self.contacts = kept
+            self.migrated = True
+            self._save_locked()
 
     def remove_contact(self, id_hex: str) -> bool:
         with self._lock:
@@ -313,8 +341,9 @@ class ChatState:
         with self._lock:
             for src, kind in ((self.contacts, "contact"), (self.known, "known")):
                 for id_hex, rec in src.items():
-                    if needle in rec.get("pseudo", "").casefold():
-                        out.append({"id": id_hex, "pseudo": rec["pseudo"], "kind": kind})
+                    shown = rec.get("label") or rec.get("pseudo", "")
+                    if needle in shown.casefold() or needle in rec.get("pseudo", "").casefold():
+                        out.append({"id": id_hex, "pseudo": shown, "kind": kind})
         return out
 
     def snapshot(self) -> dict:

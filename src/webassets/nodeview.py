@@ -328,7 +328,7 @@ const NODEVIEW = {
   },
 
   async extras(id, self){
-    const out = {chat:null, fleet:null, packages:[]};
+    const out = {chat:null, fleet:null, contacts:null, packages:[]};
     // What this machine publishes is asked of every node, its own included: a
     // node that published its own code is exactly the one an operator wants to
     // see it on. Answered from what this node already holds — the button below
@@ -339,11 +339,23 @@ const NODEVIEW = {
     if(this.has("chat", "peer"))
       jobs.push(this.call("chat", "peer", {node:id})
                     .then((value) => { out.chat = value; }).catch(() => {}));
+    // Whether somebody is in the address books is the contacts app's answer, not
+    // chat's: chat only keeps a copy of it, and only where it was allowed to.
+    if(this.has("contacts", "find"))
+      jobs.push(this.call("contacts", "find", {node:id})
+                    .then((value) => { out.contacts = value; }).catch(() => {}));
     if(this.has("fleet", "relation"))
       jobs.push(this.call("fleet", "relation", {node:id})
                     .then((value) => { out.fleet = value; }).catch(() => {}));
     await Promise.all(jobs);
     return out;
+  },
+
+  // In the address books, as the contacts app says; chat's own copy of that
+  // answer only where the contacts app is not running to ask.
+  saved(extras){
+    if(extras.contacts) return (extras.contacts.contacts || []).length > 0;
+    return !!(extras.chat && extras.chat.contact);
   },
 
   // -- drawing --------------------------------------------------------------
@@ -378,7 +390,7 @@ const NODEVIEW = {
       view.addresses.map((row) => row.uri),
       (extras.packages || []).map(
         (row) => row.id + ":" + row.version + ":" + (row.published ? "p" : "s")),
-      (options.hide || []), !!extras.chat, !!chat.contact, !!chat.seen,
+      (options.hide || []), !!extras.chat, this.saved(extras), !!chat.seen,
       !!chat.unread, !!extras.fleet, !!fleet.managed, !!fleet.operator,
       (fleet.caps || []), (fleet.operator_caps || []),
       !!fleet.waiting_on_them, !!fleet.waiting_on_us, (fleet.asked_caps || []),
@@ -493,7 +505,7 @@ const NODEVIEW = {
     else
       say("link", "Reached through the mesh — no direct link to it.");
 
-    if(chat && chat.contact)
+    if(this.saved(extras))
       say("person", "In your contacts" +
           (chat.unread ? ", with " + plural(chat.unread, "unread message") : "") + ".");
     else if(chat && chat.seen)
@@ -585,7 +597,7 @@ const NODEVIEW = {
                    icon("copy") + "Copy the identity</button>",
                    '<button class="item" data-nv-act="window" data-menu-close>' +
                    icon("window") + "Open in its own window</button>"];
-    if(chat && !chat.contact)
+    if(this.has("contacts", "add") && !this.saved(extras))
       items.push('<button class="item" data-nv-act="contact" data-menu-close>' +
                  icon("person") + "Add to contacts</button>");
     if(fleet && fleet.managed && (fleet.caps || []).indexOf("invite") >= 0)
@@ -1136,7 +1148,7 @@ const NODEVIEW = {
   async contact(element, button, id, options){
     await withBusy(button, async () => {
       try{
-        await this.call("chat", "contact", {node:id});
+        await this.call("contacts", "add", {node:id});
         toast(t("node.added_to_contacts"), "ok");
         await this.mount(element, id, options);
       }catch(error){ this.say(element, String(error.message || error), true); }

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import re
 import secrets
 import threading
 import time
@@ -27,6 +28,7 @@ from ..http_server import CONNECTION_TIMEOUT, HardenedServer
 from .. import console_feed
 from ..http_headers import SECURITY_HEADERS
 from ..node_id import NodeID
+from . import contacts_link
 from .chat import (
     TextMessage, FileReceived, GroupMessage,
     Receipt, Typing, Edited, Deleted, Reaction,
@@ -62,6 +64,25 @@ def _is_image(name: str) -> bool:
     return name.lower().endswith(_IMAGE_EXTS)
 
 
+# A voice message is a file whose name says what it is: Opus in a WebM or Ogg
+# container, with its length in milliseconds. The name is the sender's, so it is
+# checked here and the length is bounded; anything that does not fit is shown
+# as the plain file it is.
+_VOICE_NAME = re.compile(r"voice-([0-9]{1,7})\.(webm|ogg)")
+VOICE_MAX_BYTES = 8 * 1024 * 1024
+VOICE_MAX_MS = 10 * 60 * 1000
+
+
+def voice_length(name, size) -> int | None:
+    """Length in milliseconds when ``name`` and ``size`` describe a voice
+    message this node will play, otherwise ``None``."""
+    found = _VOICE_NAME.fullmatch(name) if isinstance(name, str) else None
+    if found is None or type(size) is not int or not 0 < size <= VOICE_MAX_BYTES:
+        return None
+    length = int(found.group(1))
+    return length if 0 < length <= VOICE_MAX_MS else None
+
+
 
 
 class ChatBridge:
@@ -92,9 +113,13 @@ class ChatBridge:
             changes=True),
     )
 
-    def __init__(self, chat_app, *, peer: NodeID | None = None, store=None) -> None:
+    def __init__(self, chat_app, *, peer: NodeID | None = None, store=None,
+                 contacts=None) -> None:
         self._chat = chat_app
         self._peer = peer
+        # The address books, reached the way any app reaches them: through the
+        # contacts app's declared operations and the permission it was given.
+        self._contacts = contacts
         self._store = store        # DrawerStore | None — persists the feed if set
         self._loop: asyncio.AbstractEventLoop | None = None
         self._messages: list = []               # ordered records (trimmed manually)
@@ -243,9 +268,14 @@ class ChatBridge:
                 "reply": reply.hex() if reply else None, "reactions": {}}
 
     def _file_rec(self, mid: bytes, name: str, size: int, reply: bytes | None) -> dict:
-        return {"mid": mid.hex(), "kind": "image" if _is_image(name) else "file",
-                "name": name, "size": size, "available": True,
-                "reply": reply.hex() if reply else None, "reactions": {}}
+        rec = {"mid": mid.hex(), "kind": "image" if _is_image(name) else "file",
+               "name": name, "size": size, "available": True,
+               "reply": reply.hex() if reply else None, "reactions": {}}
+        length = voice_length(name, size)
+        if length is not None:
+            rec["kind"] = "voice"
+            rec["duration_ms"] = length
+        return rec
 
     def _auto_deliver(self, src: NodeID, mid: bytes, group_id) -> None:
         # Acknowledge receipt of a 1:1 message so the sender sees a delivered tick.
@@ -341,6 +371,7 @@ class ChatBridge:
 
     def _run(self, coro, timeout: float = _CALL_TIMEOUT):
         if self._loop is None:
+            coro.close()
             raise RuntimeError("bridge not started")
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
 
@@ -490,11 +521,71 @@ class ChatBridge:
     def set_profile(self, *, bio=None, avatar=None) -> None:
         self._run(self._chat.set_profile(bio=bio, avatar=avatar))
 
+    # -- contacts: the books are the contacts app's, chat only asks ----------
+
+    def contacts_access(self) -> str:
+        """``"write"``, ``"read"``, ``"denied"`` or ``"unavailable"``: what chat
+        may do with the address books right now."""
+        return self._contacts.access() if self._contacts is not None else "unavailable"
+
+    def sync_contacts(self) -> str:
+        """Bring the copy chat renders from in step with the books.
+
+        Contacts chat kept before the books existed move into them the first
+        time chat is allowed to write; until then they are shown as they were,
+        so a node that has not answered the permission prompt loses nothing."""
+        access = self.contacts_access()
+        if access not in ("read", "write"):
+            return access
+        state = self._chat.state
+        try:
+            if not state.migrated and state.contacts:
+                if access != "write":
+                    return access
+                for id_hex, rec in list(state.contacts.items()):
+                    self._contacts.call("add", node=id_hex,
+                                        name=rec.get("label") or rec.get("pseudo") or "")
+            names = self._contacts.call("names").get("names", {})
+        except (contacts_link.Denied, contacts_link.Unavailable, app_api.AppAPIError):
+            return self.contacts_access()
+        state.replace_contacts(names if isinstance(names, dict) else {})
+        return access
+
     def add_contact(self, id_hex: str) -> bool:
-        return self._run(self._chat.add_contact(NodeID(bytes.fromhex(id_hex))))
+        """Save a node in the address books, then say hello with our profile.
+
+        ``PermissionError`` (naming the permission) when chat was not allowed to
+        write — the page turns that into the question a person answers."""
+        if self._contacts is None:
+            return self._run(self._chat.add_contact(NodeID(bytes.fromhex(id_hex))))
+        pseudo = next((r.get("pseudo", "") for r in
+                       self._chat.state.snapshot()["known"] if r["id"] == id_hex), "")
+        try:
+            result = self._contacts.call("add", node=id_hex, name=pseudo)
+        except contacts_link.Denied as exc:
+            raise PermissionError(exc.permission or "contacts.write") from None
+        except (contacts_link.Unavailable, app_api.AppAPIError):
+            return False
+        self.sync_contacts()
+        target = NodeID(bytes.fromhex(id_hex))
+        if self._chat.node_id is None or target != self._chat.node_id:
+            try:
+                self._run(self._chat.send_profile(target))
+            except Exception:
+                pass
+        return bool(result.get("added"))
 
     def remove_contact(self, id_hex: str) -> bool:
-        return self._chat.state.remove_contact(id_hex)
+        if self._contacts is None:
+            return self._chat.state.remove_contact(id_hex)
+        try:
+            removed = self._contacts.call("remove", node=id_hex).get("removed", 0)
+        except contacts_link.Denied as exc:
+            raise PermissionError(exc.permission or "contacts.write") from None
+        except (contacts_link.Unavailable, app_api.AppAPIError):
+            return False
+        self.sync_contacts()
+        return bool(removed)
 
     def remove_group(self, gid_hex: str) -> bool:
         return self._chat.state.remove_group(gid_hex)
@@ -512,13 +603,25 @@ class ChatBridge:
         the same way. ``wide`` asks the network too, for an exact name whose
         owner we have never met."""
         hits = {h["id"]: h for h in self._chat.state.find_by_pseudo(pseudo)}
+        if self._contacts is not None:
+            # People already in the books come first, found by the name their
+            # owner gave them as well as by the one the node signs.
+            try:
+                saved = self._contacts.call("search", query=pseudo[:200], limit=20)
+            except (contacts_link.Denied, contacts_link.Unavailable, app_api.AppAPIError):
+                saved = {}
+            for contact in saved.get("contacts", []):
+                for node in contact.get("nodes", []):
+                    hits[node["id"]] = {"id": node["id"], "match": -1, "contact": True,
+                                        "pseudo": contact.get("name") or node.get("label") or ""}
         try:
             for r in self._run(self._chat.search_pseudo(pseudo, wide=True),
                                timeout=_SEARCH_TIMEOUT):
                 nid = r.get("id")
                 if isinstance(nid, str):
-                    hits[nid] = {"id": nid, "pseudo": r.get("pseudo", ""),
-                                 "match": r.get("match", 3)}
+                    if nid not in hits or not hits[nid].get("contact"):
+                        hits[nid] = {"id": nid, "pseudo": r.get("pseudo", ""),
+                                     "match": r.get("match", 3)}
         except Exception:
             pass
         return sorted(hits.values(), key=lambda h: (h.get("match", 3),
@@ -540,7 +643,7 @@ class ChatBridge:
         return {"node": node,
                 "contact": known,
                 "seen": entry is not None,
-                "pseudo": (entry or {}).get("pseudo", ""),
+                "pseudo": (entry or {}).get("label") or (entry or {}).get("pseudo", ""),
                 "has_avatar": bool((entry or {}).get("has_avatar")),
                 "unread": unread,
                 "conversation": "/chat#c/" + node}
@@ -549,7 +652,11 @@ class ChatBridge:
         """Add someone to the address book. Adding a contact grants nothing, and
         names nothing: what a node is called is its own to say, in a signed
         claim. This only says that this node is one we care about."""
-        return {"added": bool(self.add_contact(node))}
+        try:
+            return {"added": bool(self.add_contact(node))}
+        except PermissionError as exc:
+            raise app_api.AppAPIError(
+                "chat was not given the %s permission" % (str(exc) or "contacts")) from None
 
     def snapshot(self, since: int, *, have=None, proto: int = 1) -> dict:
         """What a page reads, in the shape it asked for.
@@ -559,6 +666,7 @@ class ChatBridge:
         one message that arrived. Split into sections and handed to
         :mod:`src.console_feed`, which sends back only what moved. The messages
         are already read by sequence and travel beside them."""
+        access = self.sync_contacts()
         state = self._chat.state.snapshot()
         now = time.time()
         with self._lock:
@@ -571,6 +679,7 @@ class ChatBridge:
                 "bio": state.get("bio", ""),
                 "has_avatar": state.get("has_avatar", False),
                 "contacts": state["contacts"],
+                "contacts_access": access,
                 "known": state["known"],
                 "groups": state["groups"],
                 "unread": dict(self._unread),

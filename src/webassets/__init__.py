@@ -16,7 +16,7 @@ Layout, and the rule that keeps it from drifting:
   target rather than a second set of paths. It ships with every page, right
   after ``ui.JS``, because a page that could not reach the plane could not read
   the node at all.
-* :mod:`.console`, :mod:`.chat`, :mod:`.fleet` and :mod:`.nodeview` hold one
+* :mod:`.console`, :mod:`.chat`, :mod:`.contacts`, :mod:`.fleet` and :mod:`.nodeview` hold one
   page each: markup, the page's own JS, and only the CSS that genuinely belongs
   to that page.
 * :mod:`.terminal` is the other shared piece: the emulator, the session driver
@@ -41,6 +41,7 @@ page cannot quietly grow a second button style: there is one to reach for.
 from . import ui
 from . import channel
 from .chat import CHAT_HTML, CHAT_PAGE_CSS, CHAT_PAGE_JS
+from .contacts import CONTACTS_HTML, CONTACTS_PAGE_CSS, CONTACTS_PAGE_JS
 from .console import INDEX_HTML, CONSOLE_PAGE_CSS, CONSOLE_PAGE_JS
 from .fleet import FLEET_HTML, FLEET_PAGE_CSS, FLEET_PAGE_JS
 from .nodeview import (NODE_PAGE_CSS_FULL as _NODE_PAGE_CSS,
@@ -58,6 +59,9 @@ APP_JS = ui.JS + channel.JS + packages.JS + nodeview.JS + CONSOLE_PAGE_JS
 # same code, same document, nothing to let through a frame.
 CHAT_CSS = ui.CSS + packages.CSS + nodeview.CSS + CHAT_PAGE_CSS
 CHAT_JS = ui.JS + channel.JS + packages.JS + nodeview.JS + CHAT_PAGE_JS
+
+CONTACTS_CSS = ui.CSS + CONTACTS_PAGE_CSS
+CONTACTS_JS = ui.JS + channel.JS + CONTACTS_PAGE_JS
 
 FLEET_CSS = ui.CSS + packages.CSS + nodeview.CSS + terminal.CSS + FLEET_PAGE_CSS
 FLEET_JS = (ui.JS + channel.JS + packages.JS + nodeview.JS + terminal.JS
@@ -77,6 +81,7 @@ PKG_JS = ui.JS + channel.JS + packages.JS + packages.PAGE_JS
 
 __all__ = ["INDEX_HTML", "STYLE_CSS", "APP_JS",
            "CHAT_HTML", "CHAT_CSS", "CHAT_JS",
+           "CONTACTS_HTML", "CONTACTS_CSS", "CONTACTS_JS",
            "FLEET_HTML", "FLEET_CSS", "FLEET_JS",
            "TERM_HTML", "TERM_CSS", "TERM_JS",
            "NODE_HTML", "NODE_CSS", "NODE_JS",
