@@ -76,6 +76,28 @@ builds a key from a code lists the codes there.
 A key nobody defined shows as itself — ugly on purpose. `applyI18n(root)`
 translates markup a page built later.
 
+### What a page carries
+
+A static sentence keeps its **English inside the element** and names its key:
+
+```html
+<button data-i18n="common.save">Save</button>
+```
+
+The English is what shows before `/i18n.js` answers, and what a page shows with
+scripts off; `tests/test_i18n.py` holds it to the catalogue's English word for
+word, so the two cannot drift. Markup that JS builds later is translated as it
+arrives (`setHTML` translates before it compares, a `MutationObserver` catches
+the rest). A message JS composes asks `t("area.key", {param: value})`;
+`plural(n, "node")` looks up `count.node`, so a noun takes its language's forms.
+
+Two things are **not** done yet and are the next ones to migrate, in this order:
+paragraphs that mix text with inline markup (`<p>… <code>x</code> …</p>`), and
+JS strings composed outside `toast()`, `setMessage()` and `.textContent =`. A
+test refuses any new literal in those three calls. The chat page is being
+rewritten on this system and is not migrated here. Text a *machine* reads
+(API errors, protocol names) stays English.
+
 ## In an app
 
 * **Python**: `from src import i18n` then `i18n.t("common.saved", "de")`.

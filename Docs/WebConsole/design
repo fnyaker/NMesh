@@ -338,7 +338,8 @@ refusal, not as a sign-out.
 
 Every page loads `/i18n.js` right after `/theme.js`; `ui.JS` then offers `t(key,
 params)` and `applyI18n(root)` (`data-i18n`, `data-i18n-attr`). A page writes
-**no sentence of its own**: it asks for a key. See
+**no sentence of its own**: it asks for a key; a static sentence keeps its
+English inside the element beside `data-i18n`, and a test holds the two equal. See
 [`../I18n/guide`](../I18n/guide).
 
 ## Constraints you cannot see

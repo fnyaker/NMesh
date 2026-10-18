@@ -545,6 +545,19 @@ scope. Add yours.
   containers is a `dict` too, so every lookup returned the table and the test
   failed for a reason that looked like the code's. → A fake that serves one
   thing or many decides by a field of the thing, not by its type.
+- **A slice anchored on the first match, not the intended one.** Editing a
+  test file with a Python slice from `subprocess.run([NODE, "-e", script]` to
+  `return result.stdout.strip()` cut from the first test that contained the
+  first string to the helper that contained the second, deleting ninety tests
+  in between; the file was not committed and had to be rebuilt from memory. →
+  Anchor both ends of a slice inside the block you mean, assert the slice's
+  length is what you expect, and commit a test file before rewriting it by
+  script.
+- **A key registered before it was used.** The extraction script wrote a
+  catalogue entry as soon as it saw a candidate and only then checked the
+  candidate was safe to rewrite, leaving a dozen keys no page asked for. →
+  Register an effect after the decision to take it, never before; a test
+  that every key is used (`test_no_key_is_left_unused`) catches the rest.
 
 ### Running the tests (read this before trusting "green")
 

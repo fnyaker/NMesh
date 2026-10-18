@@ -16,6 +16,7 @@ undone:
 And the simple/expert split: one attribute, set before the first paint, that
 decides what is shown and never what the node does.
 """
+import re
 import pathlib
 import shutil
 import subprocess
@@ -156,11 +157,11 @@ class TestExpertMode:
 
     def test_the_simple_view_hides_the_numbers_the_bar_is_made_of(self):
         html = webassets.console.INDEX_HTML
-        mlo = html.split("<h2>Multi-link operation</h2>", 1)[0].rsplit("<article", 1)[1]
+        mlo = re.split(r"<h2[^>]*>Multi-link operation</h2>", html, 1)[0].rsplit("<article", 1)[1]
         assert "only-expert" in mlo
-        transports = html.split("<h2>Transports</h2>", 1)[0].rsplit("<article", 1)[1]
+        transports = re.split(r"<h2[^>]*>Transports</h2>", html, 1)[0].rsplit("<article", 1)[1]
         assert "only-expert" in transports
-        config = html.split("<h2>Configuration file</h2>", 1)[0].rsplit("<article", 1)[1]
+        config = re.split(r"<h2[^>]*>Configuration file</h2>", html, 1)[0].rsplit("<article", 1)[1]
         assert "only-expert" in config
         power = html.split('id="power-card"', 1)[1].split("</article>", 1)[0]
         assert "only-expert" not in power.split('id="power-values"', 1)[0]

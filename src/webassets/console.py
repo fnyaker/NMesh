@@ -16,7 +16,7 @@ INDEX_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f6f8fa" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0a0e13" media="(prefers-color-scheme: dark)">
-<title>NMesh Console</title>
+<title data-i18n="console.nmesh_console">NMesh Console</title>
 <script src="/theme.js"></script>
 <script src="/i18n.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -26,39 +26,39 @@ INDEX_HTML = """<!doctype html>
 
 <div id="login" class="gate">
   <form id="login-form">
-    <div class="mark" aria-hidden="true">NM</div>
+    <div class="mark" aria-hidden="true" data-i18n="console.nm">NM</div>
     <div>
-      <p class="eyebrow">Local management plane</p>
-      <h1>Unlock this node</h1>
+      <p class="eyebrow" data-i18n="console.local_management_plane">Local management plane</p>
+      <h1 data-i18n="console.unlock_this_node">Unlock this node</h1>
     </div>
-    <p class="muted small">The password is checked on this machine and never leaves it. It
+    <p class="muted small" data-i18n="console.the_password_is_checked_on_this">The password is checked on this machine and never leaves it. It
       protects every management action, including the ones that can restart or update the node.</p>
-    <label class="field"><span>Console password</span>
+    <label class="field"><span data-i18n="console.console_password">Console password</span>
       <input id="password" type="password" autocomplete="current-password" autofocus>
     </label>
-    <button type="submit" class="primary wide">Open console</button>
+    <button type="submit" class="primary wide" data-i18n="console.open_console">Open console</button>
     <p id="login-error" class="msg error" role="alert"></p>
   </form>
 </div>
 
-<a class="skip" href="#main">Skip to content</a>
+<a class="skip" href="#main" data-i18n="console.skip_to_content">Skip to content</a>
 <div id="shell" class="shell hidden">
   <aside class="rail">
-    <a class="brand" href="/"><span class="mark" aria-hidden="true">NM</span>
-      <span><b>NMesh</b><span>Console</span></span></a>
-    <nav id="nav" class="nav" role="tablist" aria-label="Console sections">
-      <button role="tab" data-tab="overview" data-label="Overview" aria-label="Overview" aria-controls="panel-overview" aria-selected="true"><span class="lbl">Overview</span></button>
-      <button role="tab" data-tab="network" data-label="Network" aria-label="Network" aria-controls="panel-network" aria-selected="false"><span class="lbl">Network</span><span id="nav-peers" class="tail"></span></button>
-      <button role="tab" data-tab="apps" data-label="Apps" aria-label="Apps" aria-controls="panel-apps" aria-selected="false"><span class="lbl">Apps</span></button>
-      <button role="tab" data-tab="settings" data-label="Settings" aria-label="Settings" aria-controls="panel-settings" aria-selected="false"><span class="lbl">Settings</span></button>
-      <p class="eyebrow nav-label">Applications</p>
+    <a class="brand" href="/"><span class="mark" aria-hidden="true" data-i18n="console.nm">NM</span>
+      <span><b>NMesh</b><span data-i18n="console.console">Console</span></span></a>
+    <nav id="nav" class="nav" role="tablist" aria-label="Console sections" data-i18n-attr="aria-label:console.console_sections">
+      <button role="tab" data-tab="overview" data-label="Overview" aria-label="Overview" aria-controls="panel-overview" aria-selected="true" data-i18n-attr="data-label:console.overview;aria-label:console.overview"><span class="lbl" data-i18n="console.overview">Overview</span></button>
+      <button role="tab" data-tab="network" data-label="Network" aria-label="Network" aria-controls="panel-network" aria-selected="false" data-i18n-attr="data-label:console.network;aria-label:console.network"><span class="lbl" data-i18n="console.network">Network</span><span id="nav-peers" class="tail"></span></button>
+      <button role="tab" data-tab="apps" data-label="Apps" aria-label="Apps" aria-controls="panel-apps" aria-selected="false" data-i18n-attr="data-label:console.apps;aria-label:console.apps"><span class="lbl" data-i18n="console.apps">Apps</span></button>
+      <button role="tab" data-tab="settings" data-label="Settings" aria-label="Settings" aria-controls="panel-settings" aria-selected="false" data-i18n-attr="data-label:console.settings;aria-label:console.settings"><span class="lbl" data-i18n="console.settings">Settings</span></button>
+      <p class="eyebrow nav-label" data-i18n="console.applications">Applications</p>
       <div id="app-links"></div>
     </nav>
     <div class="rail-foot">
-      <div class="rail-state"><span id="rail-dot" class="dot"></span><span id="rail-text">Connecting…</span></div>
+      <div class="rail-state"><span id="rail-dot" class="dot"></span><span id="rail-text" data-i18n="console.connecting">Connecting…</span></div>
       <label class="check rail-switch"><input type="checkbox" role="switch" data-expert-toggle>
-        <span>Expert mode</span></label>
-      <button id="logout" class="ghost wide">Sign out</button>
+        <span data-i18n="console.expert_mode">Expert mode</span></label>
+      <button id="logout" class="ghost wide" data-i18n="console.sign_out">Sign out</button>
     </div>
   </aside>
 
@@ -66,44 +66,44 @@ INDEX_HTML = """<!doctype html>
     <header class="topbar">
       <div class="who">
         <span class="badge" id="node-state">…</span>
-        <button id="self-node" class="ghost sm mono" title="Show this node's details"></button>
+        <button id="self-node" class="ghost sm mono" title="Show this node's details" data-i18n-attr="title:console.show_this_node_s_details"></button>
       </div>
-      <label class="ctx-pick" id="ctx-pick" hidden><span class="sr-only">Node being managed</span>
+      <label class="ctx-pick" id="ctx-pick" hidden><span class="sr-only" data-i18n="console.node_being_managed">Node being managed</span>
         <select id="ctx-node"></select></label>
       <span class="grow"></span>
       <div id="refresh" class="refresh">
         <i id="refresh-live" class="live" aria-hidden="true"></i>
-        <label class="sr-only" for="refresh-secs">How often the changing numbers are re-read, in seconds (0 turns it off)</label>
+        <label class="sr-only" for="refresh-secs" data-i18n="console.how_often_the_changing_numbers_are">How often the changing numbers are re-read, in seconds (0 turns it off)</label>
         <input id="refresh-secs" type="number" min="0" max="30" step="1" inputmode="numeric">
         <span class="unit" aria-hidden="true">s</span>
-        <label class="sr-only" for="refresh-pick">Auto-refresh</label>
+        <label class="sr-only" for="refresh-pick" data-i18n="console.auto_refresh">Auto-refresh</label>
         <select id="refresh-pick">
-          <option value="0">Off</option>
+          <option value="0" data-i18n="console.off">Off</option>
           <option value="1">1s</option>
           <option value="2">2s</option>
           <option value="5">5s</option>
           <option value="10">10s</option>
           <option value="30">30s</option>
         </select>
-        <button id="refresh-now" class="icon sm" aria-label="Refresh now" title="Refresh now">⟳</button>
+        <button id="refresh-now" class="icon sm" aria-label="Refresh now" title="Refresh now" data-i18n-attr="aria-label:console.refresh_now;title:console.refresh_now">⟳</button>
       </div>
       <button id="palette-open" class="ghost sm">Search <span class="kbd">⌘K</span></button>
-      <button id="theme-toggle" class="icon" aria-label="Switch theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
+      <button id="theme-toggle" class="icon" aria-label="Switch theme" data-i18n-attr="aria-label:console.switch_theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
       <div class="menu-wrap more-wrap">
         <button class="icon" data-menu="more" aria-haspopup="true" aria-expanded="false"
-                aria-label="More">⋯</button>
-        <div id="more" class="menu" role="region" hidden aria-label="More">
-          <div class="menu-head"><span class="grow">This node</span>
+                aria-label="More" data-i18n-attr="aria-label:console.more">⋯</button>
+        <div id="more" class="menu" role="region" hidden aria-label="More" data-i18n-attr="aria-label:console.more">
+          <div class="menu-head"><span class="grow" data-i18n="console.this_node">This node</span>
             <span class="row"><i id="more-dot" class="dot"></i>
-              <span id="more-state" class="muted">Connecting…</span></span></div>
-          <button class="item" id="more-search" data-menu-close>Search &amp; commands</button>
+              <span id="more-state" class="muted" data-i18n="console.connecting">Connecting…</span></span></div>
+          <button class="item" id="more-search" data-menu-close data-i18n="console.search_commands">Search &amp; commands</button>
           <label class="item check"><input type="checkbox" role="switch" data-expert-toggle>
-            <span>Expert mode</span></label>
+            <span data-i18n="console.expert_mode">Expert mode</span></label>
           <div id="more-apps"></div>
           <div class="sep"></div>
-          <button class="item danger" id="more-restart" data-menu-close>Restart this node</button>
+          <button class="item danger" id="more-restart" data-menu-close data-i18n="console.restart_this_node">Restart this node</button>
           <p id="more-restart-why" class="menu-note" hidden></p>
-          <button class="item" id="more-logout" data-menu-close>Sign out</button>
+          <button class="item" id="more-logout" data-menu-close data-i18n="console.sign_out">Sign out</button>
         </div>
       </div>
     </header>
@@ -111,28 +111,28 @@ INDEX_HTML = """<!doctype html>
 """ + ui.CTX_BAR + """
     <div id="standing-bar" class="standing-bar" role="status" hidden>
       <span><b id="standing-head"></b> <span id="standing-what" class="what"></span></span>
-      <button id="standing-go" class="sm">Join or invite</button>
+      <button id="standing-go" class="sm" data-i18n="console.join_or_invite">Join or invite</button>
     </div>
 
     <!-- ── Overview ─────────────────────────────────────────────────────── -->
     <section id="panel-overview" class="content panel" role="tabpanel" data-panel="overview">
       <div class="page-head">
         <div class="grow">
-          <p class="eyebrow">This node</p>
-          <h1 id="overview-title">Reading node status…</h1>
-          <p class="lede" id="overview-lede">Health, throughput, and the links this node has authenticated.</p>
+          <p class="eyebrow" data-i18n="console.this_node">This node</p>
+          <h1 id="overview-title" data-i18n="console.reading_node_status">Reading node status…</h1>
+          <p class="lede" id="overview-lede" data-i18n="console.health_throughput_and_the_links_this">Health, throughput, and the links this node has authenticated.</p>
         </div>
         <div class="actions">
-          <button id="ping-btn">Ping active nodes</button>
-          <button id="go-join" class="primary">Add a node</button>
+          <button id="ping-btn" data-i18n="console.ping_active_nodes">Ping active nodes</button>
+          <button id="go-join" class="primary" data-i18n="console.add_a_node">Add a node</button>
         </div>
       </div>
       <article id="alerts-card" class="card" hidden>
         <div class="card-head"><div class="grow"><h2>Wants attention
           <span id="alerts-count" class="badge"></span></h2>
-          <div class="sub">What this node noticed about itself and about the
+          <div class="sub" data-i18n="console.what_this_node_noticed_about_itself">What this node noticed about itself and about the
             machines it talks to. One line per problem, with how often</div></div>
-          <button id="alerts-clear" class="sm">Clear all</button></div>
+          <button id="alerts-clear" class="sm" data-i18n="console.clear_all">Clear all</button></div>
         <div class="card-body tight"><div id="alerts-list" class="stack"></div></div>
       </article>
       <article id="first-run" class="card" hidden>
@@ -140,16 +140,16 @@ INDEX_HTML = """<!doctype html>
           <div class="sub" id="first-run-sub"></div></div></div>
         <div class="card-body">
           <ol class="steps" id="first-run-steps"></ol>
-          <div class="btn-row"><button id="first-run-go" class="primary">Add a node</button></div>
+          <div class="btn-row"><button id="first-run-go" class="primary" data-i18n="console.add_a_node">Add a node</button></div>
         </div>
       </article>
       <div id="metrics" class="stats"></div>
       <div class="split wide-first">
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Throughput</h2>
-            <div class="sub">NMesh packet bytes, excluding transport overhead</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.throughput">Throughput</h2>
+            <div class="sub" data-i18n="console.nmesh_packet_bytes_excluding">NMesh packet bytes, excluding transport overhead</div></div></div>
           <div class="card-body">
-            <canvas id="chart" height="240" role="img" aria-label="Inbound and outbound bytes per second"></canvas>
+            <canvas id="chart" height="240" role="img" aria-label="Inbound and outbound bytes per second" data-i18n-attr="aria-label:console.inbound_and_outbound_bytes_per"></canvas>
             <div class="chart-legend small">
               <span class="row"><i class="dot in"></i>Inbound <b id="rate-in" class="num"></b></span>
               <span class="row"><i class="dot out"></i>Outbound <b id="rate-out" class="num"></b></span>
@@ -158,15 +158,15 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Topology</h2>
-            <div class="sub">Nodes linked directly, and nodes reached through them</div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.topology">Topology</h2>
+            <div class="sub" data-i18n="console.nodes_linked_directly_and_nodes">Nodes linked directly, and nodes reached through them</div></div>
             <span id="map-count" class="badge"></span>
-            <button id="map-open" class="sm">Expand</button></div>
+            <button id="map-open" class="sm" data-i18n="console.expand">Expand</button></div>
           <div class="card-body">
             <svg id="graph" class="mesh-graph clickable" viewBox="0 0 420 250" role="img"
-                 aria-label="Connected nodes — click to open the full map"></svg>
-            <details id="map-legend-text" class="tiny muted"><summary>What the lines mean</summary>
-              <p>A line is an authenticated direct link: amber while it
+                 aria-label="Connected nodes — click to open the full map" data-i18n-attr="aria-label:console.connected_nodes_click_to_open_the"></svg>
+            <details id="map-legend-text" class="tiny muted"><summary data-i18n="console.what_the_lines_mean">What the lines mean</summary>
+              <p data-i18n="console.a_line_is_an_authenticated_direct">A line is an authenticated direct link: amber while it
               loses probes, red and dashed once it is failing, doubled when MLO bundles
               it, dotted beside it while MLO looks for a second link. A faint dashed
               line is a session routed through a first hop — anything deeper is opaque
@@ -177,8 +177,8 @@ INDEX_HTML = """<!doctype html>
       <article id="feed-card" class="card" hidden>
         <!-- Under the drawings, not above them: a card that comes and goes with
              what just happened must not push the graph up and down. -->
-        <div class="card-head"><div class="grow"><h2>Happening now</h2>
-          <div class="sub">The last things this node did, or was told</div></div></div>
+        <div class="card-head"><div class="grow"><h2 data-i18n="console.happening_now">Happening now</h2>
+          <div class="sub" data-i18n="console.the_last_things_this_node_did_or_was">The last things this node did, or was told</div></div></div>
         <div class="card-body"><ul id="feed-list" class="feed"></ul></div>
       </article>
     </section>
@@ -186,43 +186,43 @@ INDEX_HTML = """<!doctype html>
     <!-- ── Network ──────────────────────────────────────────────────────── -->
     <section id="panel-network" class="content panel" role="tabpanel" data-panel="network" hidden>
       <div class="page-head">
-        <div class="grow"><p class="eyebrow">Mesh</p><h1>Network</h1>
-          <p class="lede">Who this node is connected to, how it can be reached, and how to bring
+        <div class="grow"><p class="eyebrow" data-i18n="console.mesh">Mesh</p><h1 data-i18n="console.network">Network</h1>
+          <p class="lede" data-i18n="console.who_this_node_is_connected_to_how_it">Who this node is connected to, how it can be reached, and how to bring
             another node in.</p></div>
       </div>
-      <nav class="subnav" role="tablist" aria-label="Network views">
-        <button role="tab" data-subtab="peers" aria-selected="true">Peers</button>
-        <button role="tab" data-subtab="reach" aria-selected="false">Reachability</button>
-        <button role="tab" data-subtab="join" aria-selected="false">Add a node</button>
+      <nav class="subnav" role="tablist" aria-label="Network views" data-i18n-attr="aria-label:console.network_views">
+        <button role="tab" data-subtab="peers" aria-selected="true" data-i18n="console.peers">Peers</button>
+        <button role="tab" data-subtab="reach" aria-selected="false" data-i18n="console.reachability">Reachability</button>
+        <button role="tab" data-subtab="join" aria-selected="false" data-i18n="console.add_a_node">Add a node</button>
       </nav>
 
       <div data-sub="peers" class="stack">
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Connected nodes <span id="active-count" class="badge"></span></h2>
-            <div class="sub">Authenticated and open. A node holding several links unfolds onto them</div></div>
-            <label class="search"><span class="sr-only">Search active nodes</span>
-              <input id="active-search" type="search" placeholder="Search name, id, address, transport…" spellcheck="false"></label>
+            <div class="sub" data-i18n="console.authenticated_and_open_a_node">Authenticated and open. A node holding several links unfolds onto them</div></div>
+            <label class="search"><span class="sr-only" data-i18n="console.search_active_nodes">Search active nodes</span>
+              <input id="active-search" type="search" placeholder="Search name, id, address, transport…" spellcheck="false" data-i18n-attr="placeholder:console.search_name_id_address_transport"></label>
           </div>
           <div class="card-body tight"><div class="table-wrap"><table id="active-table">
-            <thead><tr><th>Node</th><th>State</th><th>Transport</th><th class="num">RTT</th><th>Seen</th><th class="tight"></th></tr></thead>
+            <thead><tr><th data-i18n="node.node">Node</th><th data-i18n="node.state">State</th><th data-i18n="console.transport">Transport</th><th class="num" data-i18n="console.rtt">RTT</th><th data-i18n="console.seen">Seen</th><th class="tight"></th></tr></thead>
             <tbody id="active-list"></tbody></table></div>
             <div id="active-pager" class="pager"></div></div>
         </article>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Known nodes <span id="known-count" class="badge"></span></h2>
-            <div class="sub">The routing table — reachable, not necessarily connected</div></div>
-            <label class="search"><span class="sr-only">Search known nodes</span>
-              <input id="known-search" type="search" placeholder="Search name, id or address…" spellcheck="false"></label>
-            <label class="field"><span class="sr-only">Rows per page</span>
-              <select id="known-limit" aria-label="Rows per page">
-                <option value="10">10 rows</option>
-                <option value="20" selected>20 rows</option>
-                <option value="50">50 rows</option>
-                <option value="100">100 rows</option>
+            <div class="sub" data-i18n="console.the_routing_table_reachable_not">The routing table — reachable, not necessarily connected</div></div>
+            <label class="search"><span class="sr-only" data-i18n="console.search_known_nodes">Search known nodes</span>
+              <input id="known-search" type="search" placeholder="Search name, id or address…" spellcheck="false" data-i18n-attr="placeholder:console.search_name_id_or_address"></label>
+            <label class="field"><span class="sr-only" data-i18n="console.rows_per_page">Rows per page</span>
+              <select id="known-limit" aria-label="Rows per page" data-i18n-attr="aria-label:console.rows_per_page">
+                <option value="10" data-i18n="console.10_rows">10 rows</option>
+                <option value="20" selected data-i18n="console.20_rows">20 rows</option>
+                <option value="50" data-i18n="console.50_rows">50 rows</option>
+                <option value="100" data-i18n="console.100_rows">100 rows</option>
               </select></label>
           </div>
           <div class="card-body tight"><div class="table-wrap"><table>
-            <thead><tr><th>Node</th><th>State</th><th>Transport</th><th class="num">RTT</th><th>Seen</th><th class="tight"></th></tr></thead>
+            <thead><tr><th data-i18n="node.node">Node</th><th data-i18n="node.state">State</th><th data-i18n="console.transport">Transport</th><th class="num" data-i18n="console.rtt">RTT</th><th data-i18n="console.seen">Seen</th><th class="tight"></th></tr></thead>
             <tbody id="known-list"></tbody></table></div>
             <div id="known-pager" class="pager"></div></div>
         </article>
@@ -230,112 +230,112 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="reach" class="stack" hidden>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Reachability</h2>
-            <div class="sub">Whether other nodes can open a link to this one</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.reachability">Reachability</h2>
+            <div class="sub" data-i18n="console.whether_other_nodes_can_open_a_link">Whether other nodes can open a link to this one</div></div></div>
           <div class="card-body">
             <div id="network-summary" class="stats"></div>
             <div class="btn-row">
-              <button id="reach-probe">Confirm reachability</button>
-              <button id="net-recheck">Re-check network</button>
+              <button id="reach-probe" data-i18n="console.confirm_reachability">Confirm reachability</button>
+              <button id="net-recheck" data-i18n="console.re_check_network">Re-check network</button>
               <button id="dyn-toggle" class="only-expert"></button>
             </div>
             <div class="only-expert stack">
               <p class="muted small">Dynamic addressing moves a live link onto another address
-                of the <em>same</em> node when that one scores better — a LAN address instead
+                of the <em data-i18n="console.same">same</em> node when that one scores better — a LAN address instead
                 of the public one, IPv6 instead of IPv4. It costs a dial and a handshake to find
                 out, so it is off unless you ask for it.</p>
               <hr>
-              <label class="field" for="balance"><span>Choosing between a node&rsquo;s addresses</span>
+              <label class="field" for="balance"><span data-i18n="console.choosing_between_a_node_s_addresses">Choosing between a node&rsquo;s addresses</span>
                 <span class="hint">Nodes are often reachable more than one way. This decides
-                  which one is tried first: what the link <em>measures</em>, or what you said
-                  the <em>medium</em> is worth. Each transport carries its own priority, in its
+                  which one is tried first: what the link <em data-i18n="console.measures">measures</em>, or what you said
+                  the <em data-i18n="console.medium">medium</em> is worth. Each transport carries its own priority, in its
                   block below.</span>
                 <input id="balance" type="range" min="0" max="100" step="5" value="50"
                        aria-describedby="balance-order"></label>
-              <div class="scale"><span>Fastest measured</span><b id="balance-value"></b>
-                <span>Preferred medium</span></div>
+              <div class="scale"><span data-i18n="console.fastest_measured">Fastest measured</span><b id="balance-value"></b>
+                <span data-i18n="console.preferred_medium">Preferred medium</span></div>
               <p id="balance-order" class="hint"></p>
             </div>
-            <p class="muted small only-simple">How this node trades energy for speed is one
+            <p class="muted small only-simple" data-i18n="console.how_this_node_trades_energy_for">How this node trades energy for speed is one
               setting, under Settings &rarr; Configuration. Expert mode shows the numbers it
               is made of here.</p>
             <p id="transport-status" class="msg"></p>
           </div>
         </article>
         <article class="card only-expert">
-          <div class="card-head"><div class="grow"><h2>Multi-link operation</h2>
-            <div class="sub">Two links to one node, carrying its traffic together</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.multi_link_operation">Multi-link operation</h2>
+            <div class="sub" data-i18n="console.two_links_to_one_node_carrying_its">Two links to one node, carrying its traffic together</div></div></div>
           <div class="card-body">
             <div id="mlo-summary" class="stats"></div>
             <p class="muted small">When this node holds two links to the same peer over media
-              you marked <em>MLO ready</em> below, and the two measure within the skew, packets
+              you marked <em data-i18n="console.mlo_ready">MLO ready</em> below, and the two measure within the skew, packets
               go down them in turn. It costs a probe every hundred milliseconds on each link,
               so it runs only while somebody is using this node — the console open, an app
               attached — unless you say otherwise. A link losing more than the drop share is
               benched: it keeps its probes, which is how it measures its way back in, and it
               rejoins at half that share.</p>
-            <p class="muted small">Packets spread over two links arrive out of order by roughly
+            <p class="muted small" data-i18n="console.packets_spread_over_two_links_arrive">Packets spread over two links arrive out of order by roughly
               twice the measured skew. Apps have to expect that, with or without this: a mesh
               routes, and a routed reply was never obliged to arrive after the one before it.</p>
             <div class="btn-row"><button id="mlo-always"></button></div>
             <div class="form-grid">
-              <label class="field" for="mlo-skew"><span>Skew two links may differ by</span>
-                <span class="hint">Further apart than this and they are not bundled: striping
+              <label class="field" for="mlo-skew"><span data-i18n="console.skew_two_links_may_differ_by">Skew two links may differ by</span>
+                <span class="hint" data-i18n="console.further_apart_than_this_and_they_are">Further apart than this and they are not bundled: striping
                   across a fast link and a slow one delivers half the packets late.</span>
                 <input id="mlo-skew" type="number" min="1" max="10000" step="1"></label>
-              <label class="field" for="mlo-drop"><span>Drop share that benches a link</span>
-                <span class="hint">Percent of its last 50 probes. It rejoins at half this, so
+              <label class="field" for="mlo-drop"><span data-i18n="console.drop_share_that_benches_a_link">Drop share that benches a link</span>
+                <span class="hint" data-i18n="console.percent_of_its_last_50_probes_it">Percent of its last 50 probes. It rejoins at half this, so
                   a link at the threshold does not flap in and out on one probe.</span>
                 <input id="mlo-drop" type="number" min="1" max="100" step="1"></label>
             </div>
             <hr>
-            <p class="muted small">What this node agrees to be <em>asked</em> for, one range
+            <p class="muted small">What this node agrees to be <em data-i18n="console.asked">asked</em> for, one range
               per mode. Two nodes take the fastest floor both offered, so raising a floor here
               is an opt-out no peer can talk back down — and a peer whose fast range does not
               reach this one gets no striping rather than one of the two paying for the
               other&rsquo;s idea of it. Nothing a peer sends lowers either number.</p>
             <div class="form-grid">
-              <label class="field" for="ka-fast-min"><span>Fastest, ever</span>
-                <span class="hint">The fastest this node will be probed, striping or not.</span>
+              <label class="field" for="ka-fast-min"><span data-i18n="console.fastest_ever">Fastest, ever</span>
+                <span class="hint" data-i18n="console.the_fastest_this_node_will_be_probed">The fastest this node will be probed, striping or not.</span>
                 <input id="ka-fast-min" type="number" min="50" max="600000" step="10"></label>
-              <label class="field" for="ka-fast-max"><span>Slowest still &ldquo;fast&rdquo;</span>
-                <span class="hint">Beyond this, striping is not worth it to this node.</span>
+              <label class="field" for="ka-fast-max"><span data-i18n="console.slowest_still_fast">Slowest still &ldquo;fast&rdquo;</span>
+                <span class="hint" data-i18n="console.beyond_this_striping_is_not_worth_it">Beyond this, striping is not worth it to this node.</span>
                 <input id="ka-fast-max" type="number" min="50" max="600000" step="10"></label>
-              <label class="field" for="ka-slow-min"><span>Fastest when idle</span>
-                <span class="hint">With nothing happening, no more often than this.</span>
+              <label class="field" for="ka-slow-min"><span data-i18n="console.fastest_when_idle">Fastest when idle</span>
+                <span class="hint" data-i18n="console.with_nothing_happening_no_more_often">With nothing happening, no more often than this.</span>
                 <input id="ka-slow-min" type="number" min="50" max="600000" step="1000"></label>
-              <label class="field" for="ka-slow-max"><span>Slowest when idle</span>
-                <span class="hint">Past this the link stops being believable. Kept under the
+              <label class="field" for="ka-slow-max"><span data-i18n="console.slowest_when_idle">Slowest when idle</span>
+                <span class="hint" data-i18n="console.past_this_the_link_stops_being">Past this the link stops being believable. Kept under the
                   medium&rsquo;s own timeout whatever is agreed.</span>
                 <input id="ka-slow-max" type="number" min="50" max="600000" step="1000"></label>
             </div>
             <div class="table-wrap"><table>
-              <thead><tr><th>Node</th><th>Link</th><th class="num">Round trip</th>
-                <th class="num">Loss</th><th>State</th><th class="num">Reordering</th></tr></thead>
+              <thead><tr><th data-i18n="node.node">Node</th><th data-i18n="console.link">Link</th><th class="num" data-i18n="console.round_trip">Round trip</th>
+                <th class="num" data-i18n="console.loss">Loss</th><th data-i18n="node.state">State</th><th class="num" data-i18n="console.reordering">Reordering</th></tr></thead>
               <tbody id="mlo-list"></tbody></table></div>
             <p id="mlo-status" class="msg"></p>
           </div>
         </article>
         <article class="card only-expert">
-          <div class="card-head"><div class="grow"><h2>Transports</h2>
-            <div class="sub">One block per medium: what is bound, what it carries, what it takes</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.transports">Transports</h2>
+            <div class="sub" data-i18n="console.one_block_per_medium_what_is_bound">One block per medium: what is bound, what it carries, what it takes</div></div></div>
           <div class="card-body">
-            <p class="muted small">Settings apply to the running node immediately unless one
+            <p class="muted small" data-i18n="console.settings_apply_to_the_running_node">Settings apply to the running node immediately unless one
               says otherwise, then go to the configuration file so they survive a restart.
               A value the transport refuses never reaches the file.</p>
             <div id="transport-blocks" class="stack"></div>
           </div>
         </article>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Addressing</h2>
-            <div class="sub">What this node tells other nodes about itself</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.addressing">Addressing</h2>
+            <div class="sub" data-i18n="console.what_this_node_tells_other_nodes">What this node tells other nodes about itself</div></div></div>
           <div class="card-body"><dl id="addressing" class="kv"></dl></div>
         </article>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Membership</h2>
-            <div class="sub">The certificate chain this node presents to prove it belongs</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.membership">Membership</h2>
+            <div class="sub" data-i18n="console.the_certificate_chain_this_node">The certificate chain this node presents to prove it belongs</div></div></div>
           <div class="card-body">
-            <p class="muted small">A membership is issued for a year and renewed automatically a
+            <p class="muted small" data-i18n="console.a_membership_is_issued_for_a_year">A membership is issued for a year and renewed automatically a
               month before it runs out, from the node that admitted this one. It is the one trust
               failure a node can see coming: once the chain expires nothing will authenticate it,
               and the only way back in is a fresh invitation.</p>
@@ -343,22 +343,22 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
         <article class="card" id="abuse-card" hidden>
-          <div class="card-head"><div class="grow"><h2>Nodes under suspicion</h2>
-            <div class="sub">What the applications and the core have reported</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.nodes_under_suspicion">Nodes under suspicion</h2>
+            <div class="sub" data-i18n="console.what_the_applications_and_the_core">What the applications and the core have reported</div></div></div>
           <div class="card-body">
-            <p class="muted small">Being in the network is not being trusted. Each application sets
+            <p class="muted small" data-i18n="console.being_in_the_network_is_not_being">Being in the network is not being trusted. Each application sets
               its own idea of too much — only chat knows what too many messages is — and reports
               the sender; this node decides what the reports add up to. A node past the first
               threshold stops being served, silently: it is told nothing, so it learns as late as
               possible. Complaints fade on their own, so a node that misbehaved once and then
               behaved comes back without anyone doing anything.</p>
             <div class="table-wrap"><table class="rows">
-            <thead><tr><th>Node</th><th>Standing</th><th class="num">Score</th>
-              <th class="num">Accusers</th><th>Why</th><th></th></tr></thead>
+            <thead><tr><th data-i18n="node.node">Node</th><th data-i18n="console.standing">Standing</th><th class="num" data-i18n="console.score">Score</th>
+              <th class="num" data-i18n="console.accusers">Accusers</th><th data-i18n="console.why">Why</th><th></th></tr></thead>
             <tbody id="abuse-list"></tbody></table></div>
             <div id="notice-block" hidden>
-              <h3>Noticed, not judged</h3>
-              <p class="muted small">Things this node saw and will not decide about, because the
+              <h3 data-i18n="console.noticed_not_judged">Noticed, not judged</h3>
+              <p class="muted small" data-i18n="console.things_this_node_saw_and_will_not">Things this node saw and will not decide about, because the
                 honest explanation is usually you: a peer whose traffic suddenly looks like a
                 different machine (you upgraded it), or a member of the network that admitted far
                 more nodes at once than it ever has (you rolled some out). It cannot tell either
@@ -371,135 +371,135 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
         <article class="card only-expert" id="refusals-card" hidden>
-          <div class="card-head"><div class="grow"><h2>Refused handshakes</h2>
-            <div class="sub">Links that reached this node and were turned away, and why</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.refused_handshakes">Refused handshakes</h2>
+            <div class="sub" data-i18n="console.links_that_reached_this_node_and">Links that reached this node and were turned away, and why</div></div></div>
           <div class="card-body">
-            <p class="muted small">A node drops anything it cannot verify, which is the point —
+            <p class="muted small" data-i18n="console.a_node_drops_anything_it_cannot">A node drops anything it cannot verify, which is the point —
               but a mesh that will not connect looks the same from outside as one nobody is
               calling. These are the tests that failed, newest first. Nothing here is an error
               on its own: a stranger dialling a closed door lands here too.</p>
             <div class="table-wrap"><table class="rows">
-            <thead><tr><th>Reason</th><th>From</th><th class="num">Times</th><th>Last</th></tr></thead>
+            <thead><tr><th data-i18n="console.reason">Reason</th><th data-i18n="console.from">From</th><th class="num" data-i18n="console.times">Times</th><th data-i18n="console.last">Last</th></tr></thead>
             <tbody id="refusals-list"></tbody></table></div>
           </div>
         </article>
       </div>
 
       <div data-sub="join" class="stack" hidden>
-        <p class="eyebrow">One invitation, both ways round</p>
+        <p class="eyebrow" data-i18n="console.one_invitation_both_ways_round">One invitation, both ways round</p>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Invite a node</h2>
-            <div class="sub">One short string: where to connect, a way through somebody else
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.invite_a_node">Invite a node</h2>
+            <div class="sub" data-i18n="console.one_short_string_where_to_connect_a">One short string: where to connect, a way through somebody else
               when that fails, and a single-use code</div></div></div>
           <div class="card-body">
-            <div class="notice warn"><span>The invitation <b>is</b> the secret. Anyone who can
+            <div class="notice warn"><span>The invitation <b data-i18n="console.is">is</b> the secret. Anyone who can
               read it can join this mesh until it expires or is used once.</span></div>
             <div class="split">
               <div class="stack">
-                <h3>Create one</h3>
-                <label class="field"><span>Into which node's network</span>
-                  <select id="inv-from"><option value="">This node</option></select></label>
-                <label class="field"><span>Valid for</span>
+                <h3 data-i18n="console.create_one">Create one</h3>
+                <label class="field"><span data-i18n="console.into_which_node_s_network">Into which node's network</span>
+                  <select id="inv-from"><option value="" data-i18n="console.this_node">This node</option></select></label>
+                <label class="field"><span data-i18n="console.valid_for">Valid for</span>
                   <select id="tk-ttl">
-                    <option value="60">1 minute</option>
-                    <option value="300">5 minutes</option>
-                    <option value="600" selected>10 minutes</option>
-                    <option value="3600">1 hour</option>
-                    <option value="21600">6 hours (maximum)</option>
+                    <option value="60" data-i18n="console.1_minute">1 minute</option>
+                    <option value="300" data-i18n="node.5_minutes">5 minutes</option>
+                    <option value="600" selected data-i18n="console.10_minutes">10 minutes</option>
+                    <option value="3600" data-i18n="node.1_hour">1 hour</option>
+                    <option value="21600" data-i18n="console.6_hours_maximum">6 hours (maximum)</option>
                   </select></label>
-                <button id="tk-make" class="primary">Create invitation</button>
+                <button id="tk-make" class="primary" data-i18n="console.create_invitation">Create invitation</button>
                 <div id="tk-qr" class="qr-holder"></div>
                 <div id="tk-out" class="copyable" hidden>
                   <code id="tk-text" class="mono"></code>
-                  <button id="tk-copy" class="sm">Copy</button>
+                  <button id="tk-copy" class="sm" data-i18n="common.copy">Copy</button>
                 </div>
                 <p id="tk-routes" class="muted small"></p>
                 <p id="tk-status" class="msg"></p>
               </div>
               <div class="stack">
-                <h3>Use one</h3>
-                <label class="field"><span>Invitation</span>
-                  <textarea id="tk-in" class="mono" rows="3" placeholder="Paste or scan an invitation…" spellcheck="false"></textarea></label>
+                <h3 data-i18n="console.use_one">Use one</h3>
+                <label class="field"><span data-i18n="console.invitation">Invitation</span>
+                  <textarea id="tk-in" class="mono" rows="3" placeholder="Paste or scan an invitation…" spellcheck="false" data-i18n-attr="placeholder:console.paste_or_scan_an_invitation"></textarea></label>
                 <div class="btn-row">
-                  <button id="tk-join" class="primary">Join</button>
-                  <button id="tk-scan">Scan with camera</button>
-                  <button id="tk-scan-stop" hidden>Stop camera</button>
+                  <button id="tk-join" class="primary" data-i18n="console.join">Join</button>
+                  <button id="tk-scan" data-i18n="console.scan_with_camera">Scan with camera</button>
+                  <button id="tk-scan-stop" hidden data-i18n="console.stop_camera">Stop camera</button>
                 </div>
                 <video id="tk-video" class="qr-video" hidden muted playsinline></video>
-                <p class="muted small">This field takes any of them — an invitation, or a block
+                <p class="muted small" data-i18n="console.this_field_takes_any_of_them_an">This field takes any of them — an invitation, or a block
                   pasted from an older node. There is nothing to choose between.</p>
                 <p id="tk-scan-status" class="msg"></p>
               </div>
             </div>
           </div>
         </article>
-        <p class="eyebrow">When neither node can reach the other</p>
-        <details class="card"><summary>Connect two nodes by hand</summary>
+        <p class="eyebrow" data-i18n="console.when_neither_node_can_reach_the">When neither node can reach the other</p>
+        <details class="card"><summary data-i18n="console.connect_two_nodes_by_hand">Connect two nodes by hand</summary>
           <div class="card-body">
-            <p class="muted small">For nodes that cannot see each other yet: three blocks of text,
+            <p class="muted small" data-i18n="console.for_nodes_that_cannot_see_each_other">For nodes that cannot see each other yet: three blocks of text,
               moved by whatever channel you already trust.</p>
             <div class="split">
-              <div class="stack"><h3>Join someone</h3>
-                <button id="cx-request">1 · Create request</button>
-                <textarea id="cx-request-out" class="mono" rows="3" readonly placeholder="Send this request block"></textarea>
-                <textarea id="cx-reply-in" class="mono" rows="3" placeholder="3 · Paste their reply block"></textarea>
-                <button id="cx-complete" class="primary">Connect</button>
+              <div class="stack"><h3 data-i18n="console.join_someone">Join someone</h3>
+                <button id="cx-request" data-i18n="console.1_create_request">1 · Create request</button>
+                <textarea id="cx-request-out" class="mono" rows="3" readonly placeholder="Send this request block" data-i18n-attr="placeholder:console.send_this_request_block"></textarea>
+                <textarea id="cx-reply-in" class="mono" rows="3" placeholder="3 · Paste their reply block" data-i18n-attr="placeholder:console.3_paste_their_reply_block"></textarea>
+                <button id="cx-complete" class="primary" data-i18n="console.connect">Connect</button>
               </div>
-              <div class="stack"><h3>Accept someone</h3>
-                <textarea id="cx-accept-in" class="mono" rows="3" placeholder="Paste their request block"></textarea>
-                <button id="cx-accept">2 · Make invite</button>
-                <textarea id="cx-accept-out" class="mono" rows="3" readonly placeholder="Send this invite block back"></textarea>
+              <div class="stack"><h3 data-i18n="console.accept_someone">Accept someone</h3>
+                <textarea id="cx-accept-in" class="mono" rows="3" placeholder="Paste their request block" data-i18n-attr="placeholder:console.paste_their_request_block"></textarea>
+                <button id="cx-accept" data-i18n="console.2_make_invite">2 · Make invite</button>
+                <textarea id="cx-accept-out" class="mono" rows="3" readonly placeholder="Send this invite block back" data-i18n-attr="placeholder:console.send_this_invite_block_back_2"></textarea>
               </div>
             </div>
             <p id="connect-status" class="msg"></p>
           </div>
         </details>
-        <p class="eyebrow">The primitives</p>
-        <details class="card"><summary>Invite codes and certificates</summary>
+        <p class="eyebrow" data-i18n="console.the_primitives">The primitives</p>
+        <details class="card"><summary data-i18n="console.invite_codes_and_certificates">Invite codes and certificates</summary>
           <div class="card-body">
-            <div class="toolbar"><button id="gen-invite">Generate invite code</button>
+            <div class="toolbar"><button id="gen-invite" data-i18n="console.generate_invite_code">Generate invite code</button>
               <code id="invite-out" class="mono grow"></code></div>
             <div class="toolbar">
-              <label class="field grow"><span class="sr-only">Address</span>
-                <input id="join-uri" class="mono" placeholder="host:port" spellcheck="false"></label>
-              <label class="field grow"><span class="sr-only">Invite code</span>
-                <input id="join-code" class="mono" placeholder="Invite code" spellcheck="false"></label>
-              <button id="join-btn">Join</button></div>
+              <label class="field grow"><span class="sr-only" data-i18n="fleet.address">Address</span>
+                <input id="join-uri" class="mono" placeholder="host:port" spellcheck="false" data-i18n-attr="placeholder:console.host_port"></label>
+              <label class="field grow"><span class="sr-only" data-i18n="console.invite_code">Invite code</span>
+                <input id="join-code" class="mono" placeholder="Invite code" spellcheck="false" data-i18n-attr="placeholder:console.invite_code"></label>
+              <button id="join-btn" data-i18n="console.join">Join</button></div>
             <hr>
-            <div class="btn-row"><button id="show-cert">Show our root certificate</button></div>
+            <div class="btn-row"><button id="show-cert" data-i18n="console.show_our_root_certificate">Show our root certificate</button></div>
             <textarea id="cert-out" class="mono" rows="3" readonly></textarea>
-            <textarea id="trust-in" class="mono" rows="3" placeholder="Paste a root certificate to trust"></textarea>
-            <div class="btn-row"><button id="trust-btn">Trust certificate</button></div>
+            <textarea id="trust-in" class="mono" rows="3" placeholder="Paste a root certificate to trust" data-i18n-attr="placeholder:console.paste_a_root_certificate_to_trust"></textarea>
+            <div class="btn-row"><button id="trust-btn" data-i18n="console.trust_certificate">Trust certificate</button></div>
             <p id="invite-status" class="msg"></p>
           </div>
         </details>
 
-        <p class="eyebrow">Trust already given</p>
-        <details class="card"><summary>Anchors, and taking a membership back</summary>
+        <p class="eyebrow" data-i18n="console.trust_already_given">Trust already given</p>
+        <details class="card"><summary data-i18n="console.anchors_and_taking_a_membership_back">Anchors, and taking a membership back</summary>
           <div class="card-body">
-            <p class="muted small">The other direction. Nothing here adds a node — these are the two
+            <p class="muted small" data-i18n="console.the_other_direction_nothing_here">The other direction. Nothing here adds a node — these are the two
               ways trust is withdrawn, and they are not the same act.</p>
-            <h3>Anchors this node trusts</h3>
+            <h3 data-i18n="console.anchors_this_node_trusts">Anchors this node trusts</h3>
             <p class="muted small">Every chain that ends on one of these authenticates. Dropping an
               anchor is a decision only whoever runs this node can take — a root's certificate is
               signed by itself, so there is nobody above it to take it back.</p>
             <div id="roots-list" class="stack"></div>
             <hr>
-            <h3>Take back a membership</h3>
+            <h3 data-i18n="console.take_back_a_membership">Take back a membership</h3>
             <p class="muted small">Only for a node this one admitted: the statement is signed, so it
               cannot reach anybody else's members. It travels the mesh, ends the links that node
               holds here, and every node that hears it stops accepting its chain.</p>
             <div class="toolbar">
-              <label class="field grow"><span class="sr-only">Node</span>
-                <input id="revoke-node" class="mono" placeholder="Node id" spellcheck="false"></label>
-              <label class="field"><span class="sr-only">Reason</span>
+              <label class="field grow"><span class="sr-only" data-i18n="node.node">Node</span>
+                <input id="revoke-node" class="mono" placeholder="Node id" spellcheck="false" data-i18n-attr="placeholder:fleet.node_id"></label>
+              <label class="field"><span class="sr-only" data-i18n="console.reason">Reason</span>
                 <select id="revoke-reason">
-                  <option value="1">Key compromised</option>
-                  <option value="3">Left the network</option>
-                  <option value="2">Superseded</option>
-                  <option value="0">Unspecified</option>
+                  <option value="1" data-i18n="console.key_compromised">Key compromised</option>
+                  <option value="3" data-i18n="console.left_the_network">Left the network</option>
+                  <option value="2" data-i18n="console.superseded">Superseded</option>
+                  <option value="0" data-i18n="console.unspecified">Unspecified</option>
                 </select></label>
-              <button id="revoke-btn" class="danger">Revoke</button></div>
+              <button id="revoke-btn" class="danger" data-i18n="console.revoke">Revoke</button></div>
             <p id="manage-status" class="msg"></p>
           </div>
         </details>
@@ -509,31 +509,31 @@ INDEX_HTML = """<!doctype html>
     <!-- ── Apps ─────────────────────────────────────────────────────────── -->
     <section id="panel-apps" class="content panel" role="tabpanel" data-panel="apps" hidden>
       <div class="page-head">
-        <div class="grow"><p class="eyebrow">Software</p><h1>Apps</h1>
-          <p class="lede">Built-in applications on this node, and how to find one on the mesh.
+        <div class="grow"><p class="eyebrow" data-i18n="console.software">Software</p><h1 data-i18n="console.apps">Apps</h1>
+          <p class="lede" data-i18n="console.built_in_applications_on_this_node">Built-in applications on this node, and how to find one on the mesh.
             There is no catalogue to browse: you ask for a name and signed records come back.</p></div>
       </div>
-      <nav class="subnav" role="tablist" aria-label="App views">
-        <button role="tab" data-subtab="installed" aria-selected="true">Installed</button>
-        <button role="tab" data-subtab="store" aria-selected="false">Find an app</button>
-        <button role="tab" data-subtab="api" aria-selected="false">Internal API</button>
+      <nav class="subnav" role="tablist" aria-label="App views" data-i18n-attr="aria-label:console.app_views">
+        <button role="tab" data-subtab="installed" aria-selected="true" data-i18n="console.installed">Installed</button>
+        <button role="tab" data-subtab="store" aria-selected="false" data-i18n="console.find_an_app">Find an app</button>
+        <button role="tab" data-subtab="api" aria-selected="false" data-i18n="console.internal_api">Internal API</button>
       </nav>
 
       <div data-sub="installed" class="stack">
         <div id="builtin-apps" class="cards"></div>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Connected apps</h2>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.connected_apps">Connected apps</h2>
             <div class="sub">Apps outside this node's own code that asked for permissions — attached
               to its data connector, or installed with a manifest</div></div></div>
           <div class="card-body tight"><div id="attached-apps"></div></div>
         </article>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>Local packages <span id="installed-count" class="badge"></span></h2>
-            <div class="sub">Fetched from the mesh and unpacked on this node</div></div>
-            <label class="search"><span class="sr-only">Search installed apps</span>
-              <input id="installed-search" type="search" placeholder="Search installed…"></label></div>
+            <div class="sub" data-i18n="console.fetched_from_the_mesh_and_unpacked">Fetched from the mesh and unpacked on this node</div></div>
+            <label class="search"><span class="sr-only" data-i18n="console.search_installed_apps">Search installed apps</span>
+              <input id="installed-search" type="search" placeholder="Search installed…" data-i18n-attr="placeholder:console.search_installed"></label></div>
           <div class="card-body tight"><div class="table-wrap"><table>
-            <thead><tr><th>App</th><th>Version</th><th>Id</th><th class="tight"></th></tr></thead>
+            <thead><tr><th data-i18n="console.app">App</th><th data-i18n="console.version">Version</th><th data-i18n="console.id">Id</th><th class="tight"></th></tr></thead>
             <tbody id="installed-list"></tbody></table></div>
             <div id="installed-pager" class="pager"></div></div>
         </article>
@@ -541,35 +541,35 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="api" class="stack" hidden>
         <article class="card" id="mcp-card">
-          <div class="card-head"><div class="grow"><h2>MCP server</h2>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.mcp_server">MCP server</h2>
             <div class="sub">This node's operations as tools for an AI client — exactly the ones
               the MCP app was granted, and no others</div></div>
-            <span id="mcp-state" class="badge">off</span></div>
+            <span id="mcp-state" class="badge" data-i18n="console.off_2">off</span></div>
           <div class="card-body stack">
-            <p id="mcp-off" class="muted small">The MCP app is off. Enable it on the Installed tab,
+            <p id="mcp-off" class="muted small" data-i18n="console.the_mcp_app_is_off_enable_it_on_the">The MCP app is off. Enable it on the Installed tab,
               then grant it what it may read and do — its tools are generated from that.</p>
             <div id="mcp-on" class="stack" hidden>
               <dl class="kv">
-                <dt>Endpoint</dt><dd><code id="mcp-url" class="inline"></code></dd>
-                <dt>Listening on</dt><dd id="mcp-where"></dd>
-                <dt>Tools right now</dt><dd id="mcp-tools"></dd>
+                <dt data-i18n="console.endpoint">Endpoint</dt><dd><code id="mcp-url" class="inline"></code></dd>
+                <dt data-i18n="console.listening_on">Listening on</dt><dd id="mcp-where"></dd>
+                <dt data-i18n="console.tools_right_now">Tools right now</dt><dd id="mcp-tools"></dd>
               </dl>
               <p id="mcp-error" class="msg error"></p>
-              <p id="mcp-exposed" class="notice warn" hidden>It listens beyond this machine. Anybody
+              <p id="mcp-exposed" class="notice warn" hidden data-i18n="console.it_listens_beyond_this_machine">It listens beyond this machine. Anybody
                 who can reach that address and holds the token can do whatever the MCP app was
                 granted.</p>
               <div class="btn-row">
-                <button id="mcp-show">Show the client configuration</button>
-                <button id="mcp-rotate" class="danger">New token</button>
+                <button id="mcp-show" data-i18n="console.show_the_client_configuration">Show the client configuration</button>
+                <button id="mcp-rotate" class="danger" data-i18n="console.new_token">New token</button>
               </div>
               <pre id="mcp-config" class="mono small" hidden></pre>
-              <details><summary>Listen elsewhere</summary>
+              <details><summary data-i18n="console.listen_elsewhere">Listen elsewhere</summary>
                 <form id="mcp-form" class="form-grid">
-                  <label class="field"><span>Address</span>
+                  <label class="field"><span data-i18n="fleet.address">Address</span>
                     <input id="mcp-host" class="mono" autocomplete="off" spellcheck="false"></label>
-                  <label class="field"><span>Port</span>
+                  <label class="field"><span data-i18n="console.port">Port</span>
                     <input id="mcp-port" class="mono" inputmode="numeric" autocomplete="off"></label>
-                  <div class="btn-row"><button type="submit" class="primary">Apply</button></div>
+                  <div class="btn-row"><button type="submit" class="primary" data-i18n="console.apply">Apply</button></div>
                 </form>
                 <p class="muted small">127.0.0.1 keeps it on this machine. Any other address makes
                   the node's operations reachable by whoever reaches that address with the token.</p>
@@ -581,18 +581,18 @@ INDEX_HTML = """<!doctype html>
           <div class="card-head"><div class="grow"><h2>Endpoints <span id="api-count" class="badge"></span></h2>
             <div class="sub">Every operation this node exposes — the console's, the apps', and the
               routes of apps that declare none — with the permission an app needs for each</div></div>
-            <label class="search"><span class="sr-only">Search endpoints</span>
-              <input id="api-search" type="search" placeholder="Search endpoints…"></label></div>
+            <label class="search"><span class="sr-only" data-i18n="console.search_endpoints">Search endpoints</span>
+              <input id="api-search" type="search" placeholder="Search endpoints…" data-i18n-attr="placeholder:console.search_endpoints_2"></label></div>
           <div class="card-body stack">
-            <div class="segmented" role="group" aria-label="Which endpoints">
-              <button type="button" data-api-kind="all" aria-selected="true">All</button>
-              <button type="button" data-api-kind="node" aria-selected="false">Node</button>
-              <button type="button" data-api-kind="app" aria-selected="false">Apps</button>
-              <button type="button" data-api-kind="web" aria-selected="false">App pages</button>
+            <div class="segmented" role="group" aria-label="Which endpoints" data-i18n-attr="aria-label:console.which_endpoints">
+              <button type="button" data-api-kind="all" aria-selected="true" data-i18n="console.all">All</button>
+              <button type="button" data-api-kind="node" aria-selected="false" data-i18n="node.node">Node</button>
+              <button type="button" data-api-kind="app" aria-selected="false" data-i18n="console.apps">Apps</button>
+              <button type="button" data-api-kind="web" aria-selected="false" data-i18n="console.app_pages">App pages</button>
             </div>
             <p id="api-how" class="muted small"></p>
             <div class="table-wrap"><table>
-              <thead><tr><th>Endpoint</th><th>What it does</th><th>An app needs</th><th>MCP tool</th></tr></thead>
+              <thead><tr><th data-i18n="console.endpoint">Endpoint</th><th data-i18n="console.what_it_does">What it does</th><th data-i18n="console.an_app_needs">An app needs</th><th data-i18n="console.mcp_tool">MCP tool</th></tr></thead>
               <tbody id="api-rows"></tbody></table></div>
           </div>
         </article>
@@ -600,9 +600,9 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="store" class="stack" hidden>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Find an app</h2>
-            <div class="sub">Type a name — the mesh answers, nothing is listed</div></div>
-            <button id="app-wide" title="Ask the network, not just what this node already holds">Ask the network</button></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.find_an_app">Find an app</h2>
+            <div class="sub" data-i18n="console.type_a_name_the_mesh_answers_nothing">Type a name — the mesh answers, nothing is listed</div></div>
+            <button id="app-wide" title="Ask the network, not just what this node already holds" data-i18n="console.ask_the_network" data-i18n-attr="title:console.ask_the_network_not_just_what_this">Ask the network</button></div>
           <div class="card-body stack">
             <p class="muted small">There is no store. A store is a list, and a list is a thing to
               fill with whatever an attacker feels like publishing — keeping that clean is a
@@ -610,22 +610,22 @@ INDEX_HTML = """<!doctype html>
               works the way finding a person by name does: you ask for something, and signed
               records filed under that name come back. Each carries its author's key, checked
               against the signature it made.</p>
-            <label class="field"><span>App name</span>
+            <label class="field"><span data-i18n="console.app_name">App name</span>
               <input id="app-search" type="search" autocomplete="off" spellcheck="false"
-                     placeholder="sketchpad"></label>
+                     placeholder="sketchpad" data-i18n-attr="placeholder:console.sketchpad"></label>
             <div id="app-results"></div>
           </div>
         </article>
-        <details class="card"><summary>Publish a signed release</summary>
+        <details class="card"><summary data-i18n="console.publish_a_signed_release">Publish a signed release</summary>
           <div class="card-body">
             <div class="form-grid">
-              <label class="field"><span>Name</span><input id="store-name"></label>
-              <label class="field"><span>Version</span><input id="store-version" value="1.0.0"></label>
+              <label class="field"><span data-i18n="fleet.name">Name</span><input id="store-name"></label>
+              <label class="field"><span data-i18n="console.version">Version</span><input id="store-version" value="1.0.0"></label>
             </div>
-            <label class="field"><span>What it is</span>
-              <textarea id="store-notes" rows="3" placeholder="a few lines — this is all anybody sees before they fetch it"></textarea></label>
-            <label class="field"><span>Files</span><input id="store-files" type="file" multiple></label>
-            <div class="btn-row"><button id="store-publish-btn" class="primary">Publish</button></div>
+            <label class="field"><span data-i18n="console.what_it_is">What it is</span>
+              <textarea id="store-notes" rows="3" placeholder="a few lines — this is all anybody sees before they fetch it" data-i18n-attr="placeholder:console.a_few_lines_this_is_all_anybody_sees"></textarea></label>
+            <label class="field"><span data-i18n="term.files">Files</span><input id="store-files" type="file" multiple></label>
+            <div class="btn-row"><button id="store-publish-btn" class="primary" data-i18n="console.publish">Publish</button></div>
             <p id="store-status" class="msg"></p>
           </div>
         </details>
@@ -635,51 +635,51 @@ INDEX_HTML = """<!doctype html>
     <!-- ── Settings ─────────────────────────────────────────────────────── -->
     <section id="panel-settings" class="content panel" role="tabpanel" data-panel="settings" hidden>
       <div class="page-head">
-        <div class="grow"><p class="eyebrow">Node controls</p><h1>Settings</h1>
-          <p class="lede">Everything that changes how this node runs. Kept apart from live status
+        <div class="grow"><p class="eyebrow" data-i18n="console.node_controls">Node controls</p><h1 data-i18n="console.settings">Settings</h1>
+          <p class="lede" data-i18n="console.everything_that_changes_how_this">Everything that changes how this node runs. Kept apart from live status
             so nothing here is a click away from a graph you were only reading.</p></div>
       </div>
-      <nav class="subnav" role="tablist" aria-label="Settings sections">
-        <button role="tab" data-subtab="identity" aria-selected="true">Identity</button>
-        <button role="tab" data-subtab="updates" aria-selected="false">Updates</button>
-        <button role="tab" data-subtab="security" aria-selected="false">Security</button>
-        <button role="tab" data-subtab="appearance" aria-selected="false">This browser</button>
-        <button role="tab" data-subtab="config" aria-selected="false">Configuration</button>
-        <button role="tab" data-subtab="diagnostics" aria-selected="false">Diagnostics</button>
-        <button role="tab" data-subtab="logs" aria-selected="false">Logs</button>
-        <button role="tab" data-subtab="advanced" aria-selected="false">Advanced</button>
+      <nav class="subnav" role="tablist" aria-label="Settings sections" data-i18n-attr="aria-label:console.settings_sections">
+        <button role="tab" data-subtab="identity" aria-selected="true" data-i18n="console.identity">Identity</button>
+        <button role="tab" data-subtab="updates" aria-selected="false" data-i18n="console.updates">Updates</button>
+        <button role="tab" data-subtab="security" aria-selected="false" data-i18n="console.security">Security</button>
+        <button role="tab" data-subtab="appearance" aria-selected="false" data-i18n="console.this_browser">This browser</button>
+        <button role="tab" data-subtab="config" aria-selected="false" data-i18n="console.configuration">Configuration</button>
+        <button role="tab" data-subtab="diagnostics" aria-selected="false" data-i18n="console.diagnostics">Diagnostics</button>
+        <button role="tab" data-subtab="logs" aria-selected="false" data-i18n="fleet.logs">Logs</button>
+        <button role="tab" data-subtab="advanced" aria-selected="false" data-i18n="console.advanced">Advanced</button>
       </nav>
 
       <div data-sub="identity" class="stack">
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>What this node is called</h2>
-            <div class="sub">A name you choose, beside the id you cannot</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.what_this_node_is_called">What this node is called</h2>
+            <div class="sub" data-i18n="console.a_name_you_choose_beside_the_id_you">A name you choose, beside the id you cannot</div></div></div>
           <div class="card-body">
             <p class="muted small">The id is this node's identity and never changes. A
               name is only a label, and not unique: check the id before you trust anything.</p>
             <div class="form-grid">
-              <label class="field"><span>Name</span>
+              <label class="field"><span data-i18n="fleet.name">Name</span>
                 <input id="pseudo-input" type="text" maxlength="50" autocomplete="off"
-                       placeholder="unnamed" spellcheck="false"></label>
-              <label class="field"><span>Node id</span>
+                       placeholder="unnamed" spellcheck="false" data-i18n-attr="placeholder:console.unnamed"></label>
+              <label class="field"><span data-i18n="fleet.node_id">Node id</span>
                 <input id="pseudo-id" type="text" class="mono" readonly></label>
             </div>
-            <div class="btn-row"><button id="pseudo-save" class="primary">Save name</button>
-              <button id="pseudo-clear">Remove the name</button></div>
+            <div class="btn-row"><button id="pseudo-save" class="primary" data-i18n="console.save_name">Save name</button>
+              <button id="pseudo-clear" data-i18n="console.remove_the_name">Remove the name</button></div>
             <p id="pseudo-status" class="msg"></p>
           </div>
         </article>
 
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Find a node by name</h2>
-            <div class="sub">Whole or partial — best match first</div></div>
-            <button id="pseudo-wide" title="Also ask the network for this exact name">Ask the network</button></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.find_a_node_by_name">Find a node by name</h2>
+            <div class="sub" data-i18n="console.whole_or_partial_best_match_first">Whole or partial — best match first</div></div>
+            <button id="pseudo-wide" title="Also ask the network for this exact name" data-i18n="console.ask_the_network" data-i18n-attr="title:console.also_ask_the_network_for_this_exact">Ask the network</button></div>
           <div class="card-body">
-            <label class="field"><span>Name</span>
+            <label class="field"><span data-i18n="fleet.name">Name</span>
               <input id="pseudo-search" type="search" autocomplete="off"
-                     placeholder="alice" spellcheck="false"></label>
+                     placeholder="alice" spellcheck="false" data-i18n-attr="placeholder:console.alice"></label>
             <div class="table-wrap"><table class="rows">
-              <thead><tr><th>Name</th><th>Node id</th><th></th></tr></thead>
+              <thead><tr><th data-i18n="fleet.name">Name</th><th data-i18n="fleet.node_id">Node id</th><th></th></tr></thead>
               <tbody id="pseudo-results"></tbody></table></div>
             <p id="pseudo-search-status" class="msg"></p>
           </div>
@@ -690,7 +690,7 @@ INDEX_HTML = """<!doctype html>
         <article class="card">
           <div class="card-head"><div class="grow"><h2>This node runs
             <span id="version-pill" class="badge num"></span></h2>
-            <div class="sub">Two channels can replace that, and they are independent</div></div></div>
+            <div class="sub" data-i18n="console.two_channels_can_replace_that_and">Two channels can replace that, and they are independent</div></div></div>
           <div class="card-body">
             <p class="muted small">The project's own releases come from GitHub and need this
               machine to reach it. Mesh releases come from nodes, signed by a key you pinned, and
@@ -700,10 +700,10 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
 
-        <p class="eyebrow">Getting an update</p>
+        <p class="eyebrow" data-i18n="console.getting_an_update">Getting an update</p>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>From the project</h2>
-            <div class="sub">This project's published releases, on GitHub</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.from_the_project">From the project</h2>
+            <div class="sub" data-i18n="console.this_project_s_published_releases_on">This project's published releases, on GitHub</div></div></div>
           <div class="card-body">
             <p class="muted small">Nothing is installed without you confirming the exact version.
               Applying an update replaces the node's files, then restarts the node if something
@@ -714,8 +714,8 @@ INDEX_HTML = """<!doctype html>
               takes its tree — a branch moves, so one that no longer carries the version you
               confirmed is refused.</p>
             <div class="btn-row">
-              <button id="update-check">Check for updates</button>
-              <button id="update-apply" class="primary" hidden>Install</button>
+              <button id="update-check" data-i18n="console.check_for_updates">Check for updates</button>
+              <button id="update-apply" class="primary" hidden data-i18n="console.install">Install</button>
             </div>
             <p id="update-status" class="msg"></p>
             <pre id="update-notes" class="block" hidden></pre>
@@ -723,18 +723,18 @@ INDEX_HTML = """<!doctype html>
         </article>
 
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>From the mesh</h2>
-            <div class="sub">Find a package by name, or by the node that publishes it</div></div>
-            <button id="pkg-wide" title="Ask the network, not just what this node already holds">Ask the network</button></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.from_the_mesh">From the mesh</h2>
+            <div class="sub" data-i18n="console.find_a_package_by_name_or_by_the">Find a package by name, or by the node that publishes it</div></div>
+            <button id="pkg-wide" title="Ask the network, not just what this node already holds" data-i18n="console.ask_the_network" data-i18n-attr="title:console.ask_the_network_not_just_what_this">Ask the network</button></div>
           <div class="card-body stack">
             <p class="muted small">A node publishes its own code, signed with its identity, and
               hands the package to whoever asks — publisher or any node that kept a copy. Nothing
               is listed anywhere: you ask for a name and the directory answers with signed records,
               each carrying its publisher's key. Opening one shows what it says about itself, what
               agrees with it, and the three things you can do — read it, install it, watch it.</p>
-            <label class="field"><span>Package name</span>
+            <label class="field"><span data-i18n="console.package_name">Package name</span>
               <input id="pkg-search" type="search" autocomplete="off" spellcheck="false"
-                     placeholder="nmesh"></label>
+                     placeholder="nmesh" data-i18n-attr="placeholder:console.nmesh"></label>
             <div id="pkg-results"></div>
             <p class="muted small">A node's own details page answers the other half of the
               question: open any node and it says whether that machine publishes a version, or
@@ -743,18 +743,18 @@ INDEX_HTML = """<!doctype html>
         </article>
 
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>What you are watching</h2>
-            <div class="sub">Packages this node checks on, and what it may install alone</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.what_you_are_watching">What you are watching</h2>
+            <div class="sub" data-i18n="console.packages_this_node_checks_on_and">Packages this node checks on, and what it may install alone</div></div></div>
           <div class="card-body stack">
             <div class="table-wrap">
-              <table><thead><tr><th>Package</th><th>Signed by</th><th>Agreeing</th>
-                <th>Automatic</th><th></th></tr></thead>
+              <table><thead><tr><th data-i18n="pkg.package">Package</th><th data-i18n="console.signed_by">Signed by</th><th data-i18n="console.agreeing">Agreeing</th>
+                <th data-i18n="console.automatic">Automatic</th><th></th></tr></thead>
                 <tbody id="watch-rows"></tbody></table>
             </div>
             <p id="watch-empty" class="empty" hidden>Nothing is being watched. Open a package and
-              turn on <em>Watch for new versions</em>.</p>
+              turn on <em data-i18n="console.watch_for_new_versions">Watch for new versions</em>.</p>
             <p class="muted small">A subscription names the package, never a publisher, so a
-              new signer of one is found without anybody watching them. <strong>Agreeing</strong>
+              new signer of one is found without anybody watching them. <strong data-i18n="console.agreeing">Agreeing</strong>
               counts the keys you chose one at a time — the key a release is pinned under, and any
               other you endorsed — that have signed a package carrying the same code, with its
               documentation left out of the comparison. One is that key on its own; ask for more
@@ -764,48 +764,48 @@ INDEX_HTML = """<!doctype html>
         </article>
 
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>When this node looks</h2>
-            <div class="sub">How often it goes checking, and whether it bothers when idle</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.when_this_node_looks">When this node looks</h2>
+            <div class="sub" data-i18n="console.how_often_it_goes_checking_and">How often it goes checking, and whether it bothers when idle</div></div></div>
           <div class="card-body">
-            <div class="kv"><div>Sweep</div><div id="update-cadence">—</div></div>
-            <div class="kv"><div>While nobody is here</div><div id="update-idle">—</div></div>
-            <div class="kv"><div>Says which version it runs</div><div id="update-recommend">—</div></div>
+            <div class="kv"><div data-i18n="console.sweep">Sweep</div><div id="update-cadence">—</div></div>
+            <div class="kv"><div data-i18n="console.while_nobody_is_here">While nobody is here</div><div id="update-idle">—</div></div>
+            <div class="kv"><div data-i18n="console.says_which_version_it_runs">Says which version it runs</div><div id="update-recommend">—</div></div>
             <p class="muted small">An announcement always wakes the node, whatever these say: what
               they control is the node going to look on its own, which on a phone is where the
-              battery goes. Change them under <strong>Configuration</strong>
+              battery goes. Change them under <strong data-i18n="console.configuration">Configuration</strong>
               (<code>update_check_minutes</code>, <code>update_when_active</code>,
               <code>recommend_version</code>).</p>
           </div>
         </article>
 
-        <p class="eyebrow">Signing keys you accept</p>
+        <p class="eyebrow" data-i18n="console.signing_keys_you_accept">Signing keys you accept</p>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Signing keys you accept</h2>
-            <div class="sub">Each key, and what its signature is accepted for</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.signing_keys_you_accept">Signing keys you accept</h2>
+            <div class="sub" data-i18n="console.each_key_and_what_its_signature_is">Each key, and what its signature is accepted for</div></div></div>
           <div class="card-body stack">
             <div class="table-wrap">
-              <table><thead><tr><th>Name</th><th>Key</th><th>Accepted for</th>
-                <th>Install automatically</th>
-                <th>Counts towards a quorum</th><th></th></tr></thead>
+              <table><thead><tr><th data-i18n="fleet.name">Name</th><th data-i18n="console.key">Key</th><th data-i18n="console.accepted_for">Accepted for</th>
+                <th data-i18n="console.install_automatically">Install automatically</th>
+                <th data-i18n="console.counts_towards_a_quorum">Counts towards a quorum</th><th></th></tr></thead>
                 <tbody id="publisher-rows"></tbody></table>
             </div>
-            <p id="publisher-empty" class="empty" hidden>No key pinned — this node installs
+            <p id="publisher-empty" class="empty" hidden data-i18n="console.no_key_pinned_this_node_installs">No key pinned — this node installs
               nothing from the mesh on its own. Find a package above and pin the key that signed
               it.</p>
-            <p class="muted small">Keys are pinned from the package they signed, one press and a
+            <p class="muted small" data-i18n="console.keys_are_pinned_from_the_package">Keys are pinned from the package they signed, one press and a
               confirmation: the key arrives inside the record and is checked against the signature
               it made, so there is nothing to copy across from anywhere and nothing to get wrong.</p>
             <p class="muted small">Being on this list is not one permission.
-              <strong>Accepted for</strong> is the first and strongest of the three: a key pinned
+              <strong data-i18n="console.accepted_for">Accepted for</strong> is the first and strongest of the three: a key pinned
               from an app is a party to that app, and nothing signed by it may replace this node's
               own program. That is decided by the record it was pinned from, never by a box here —
               an app's author is not somebody you decided to take a program from.</p>
             <p class="muted small">The other two are separate statements again.
-              <strong>Install automatically</strong> hands that one key a scheduled restart: whoever
+              <strong data-i18n="console.install_automatically">Install automatically</strong> hands that one key a scheduled restart: whoever
               holds it holds this machine, so it applies only to a key accepted for this node's
-              code. <strong>Counts towards a quorum</strong> is far weaker —
+              code. <strong data-i18n="console.counts_towards_a_quorum">Counts towards a quorum</strong> is far weaker —
               it only lets the key's word count when several endorsed publishers have independently
-              signed the <em>same</em> release, which is how code from people you would not trust
+              signed the <em data-i18n="console.same">same</em> release, which is how code from people you would not trust
               individually can still install itself. Set <code>release_quorum</code> in the
               configuration to say how many must agree; 0 turns that route off. Endorsing is done
               by hand, one key at a time, because that is what somebody minting two hundred
@@ -814,10 +814,10 @@ INDEX_HTML = """<!doctype html>
           </div>
         </article>
 
-        <p class="eyebrow">Publishing under a key</p>
+        <p class="eyebrow" data-i18n="console.publishing_under_a_key">Publishing under a key</p>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Publisher keys held here</h2>
-            <div class="sub">Keys this node can sign a release with</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.publisher_keys_held_here">Publisher keys held here</h2>
+            <div class="sub" data-i18n="console.keys_this_node_can_sign_a_release">Keys this node can sign a release with</div></div></div>
           <div class="card-body stack">
             <p class="muted small">A publisher key is not this node's identity. The identity is
               unlocked for as long as the node runs, because handshakes need it; a publisher key
@@ -825,30 +825,30 @@ INDEX_HTML = """<!doctype html>
               sign. Of everything a key signs here, a release is the one that replaces somebody
               else's program, and it is the one signed least often.</p>
             <div class="table-wrap">
-              <table><thead><tr><th>Name</th><th>Key</th><th>Where it came from</th>
+              <table><thead><tr><th data-i18n="fleet.name">Name</th><th data-i18n="console.key">Key</th><th data-i18n="console.where_it_came_from">Where it came from</th>
                 <th></th></tr></thead>
                 <tbody id="key-rows"></tbody></table>
             </div>
-            <p id="key-empty" class="empty" hidden>No publisher key here — this node signs
+            <p id="key-empty" class="empty" hidden data-i18n="console.no_publisher_key_here_this_node">No publisher key here — this node signs
               releases with its own identity.</p>
             <div class="form-grid">
-              <label class="field"><span>Name</span>
-                <input id="key-label" placeholder="what this key is for" autocomplete="off"></label>
-              <label class="field"><span>Passphrase</span>
+              <label class="field"><span data-i18n="fleet.name">Name</span>
+                <input id="key-label" placeholder="what this key is for" autocomplete="off" data-i18n-attr="placeholder:console.what_this_key_is_for"></label>
+              <label class="field"><span data-i18n="console.passphrase">Passphrase</span>
                 <input id="key-pass" type="password" autocomplete="new-password">
-                <span class="hint">It never leaves this machine. Lose it and the key is
+                <span class="hint" data-i18n="console.it_never_leaves_this_machine_lose_it">It never leaves this machine. Lose it and the key is
                   gone — there is no recovery, which is what makes a copied file useless.</span></label>
             </div>
-            <div class="btn-row"><button id="key-create" class="primary">Make a key</button></div>
-            <details><summary class="small">Already have a key file?</summary>
+            <div class="btn-row"><button id="key-create" class="primary" data-i18n="console.make_a_key">Make a key</button></div>
+            <details><summary class="small" data-i18n="console.already_have_a_key_file">Already have a key file?</summary>
               <div class="stack">
-                <p class="muted small">A key made before this node had somewhere to keep them is
+                <p class="muted small" data-i18n="console.a_key_made_before_this_node_had">A key made before this node had somewhere to keep them is
                   a file nothing can name — and naming it by id is what lets a release be signed
                   with it, or offered to somebody. Give the path and the passphrase above.</p>
-                <label class="field"><span>Path on this machine</span>
+                <label class="field"><span data-i18n="console.path_on_this_machine">Path on this machine</span>
                   <input id="key-path" class="mono" placeholder="/path/to/publisher.key"
-                         autocomplete="off" spellcheck="false"></label>
-                <div class="btn-row"><button id="key-import">Take it in</button></div>
+                         autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:console.path_to_publisher_key"></label>
+                <div class="btn-row"><button id="key-import" data-i18n="console.take_it_in">Take it in</button></div>
               </div>
             </details>
             <p id="key-status" class="msg"></p>
@@ -856,60 +856,60 @@ INDEX_HTML = """<!doctype html>
         </article>
 
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Sharing a key</h2>
-            <div class="sub">Handing one to somebody else, and taking one they offer</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.sharing_a_key">Sharing a key</h2>
+            <div class="sub" data-i18n="console.handing_one_to_somebody_else_and">Handing one to somebody else, and taking one they offer</div></div></div>
           <div class="card-body stack">
             <p class="muted small">Whoever holds this key can publish under it, and every node
-              that pinned it will accept what they sign. It is worth doing when a <em>team</em>
+              that pinned it will accept what they sign. It is worth doing when a <em data-i18n="console.team">team</em>
               publishes one thing under one identity; the alternative — everybody keeps their own
               key and consumers pin several — makes a compromise one signer rather than the
               project. Nothing here can tell the two situations apart, so both sides say yes
               explicitly and this node records who handed what to whom.</p>
-            <p class="muted small">The secret is sealed to a key the other side generates when
+            <p class="muted small" data-i18n="console.the_secret_is_sealed_to_a_key_the">The secret is sealed to a key the other side generates when
               they accept, so it cannot travel before somebody agrees to receive it, and only
               they can open it. They choose their own passphrase — never yours.</p>
 
             <div id="key-offers-in" class="stack"></div>
 
             <div class="form-grid">
-              <label class="field"><span>Key to share</span>
+              <label class="field"><span data-i18n="console.key_to_share">Key to share</span>
                 <select id="share-key"></select></label>
-              <label class="field"><span>Node id</span>
+              <label class="field"><span data-i18n="fleet.node_id">Node id</span>
                 <input id="share-node" placeholder="who receives it" autocomplete="off"
-                       spellcheck="false" class="mono"></label>
-              <label class="field"><span>Its passphrase</span>
+                       spellcheck="false" class="mono" data-i18n-attr="placeholder:console.who_receives_it"></label>
+              <label class="field"><span data-i18n="console.its_passphrase">Its passphrase</span>
                 <input id="share-pass" type="password" autocomplete="current-password">
-                <span class="hint">Yours, to unlock the key here. It is not sent.</span></label>
+                <span class="hint" data-i18n="console.yours_to_unlock_the_key_here_it_is">Yours, to unlock the key here. It is not sent.</span></label>
             </div>
-            <div class="btn-row"><button id="share-go" class="primary">Offer this key</button></div>
+            <div class="btn-row"><button id="share-go" class="primary" data-i18n="console.offer_this_key">Offer this key</button></div>
             <p id="share-status" class="msg"></p>
             <div id="key-offers-out" class="stack"></div>
           </div>
         </article>
 
-        <p class="eyebrow">Giving one</p>
+        <p class="eyebrow" data-i18n="console.giving_one">Giving one</p>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Publish this node's code</h2>
-            <div class="sub">Sign what is installed here and offer it to the mesh</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.publish_this_node_s_code">Publish this node's code</h2>
+            <div class="sub" data-i18n="console.sign_what_is_installed_here_and">Sign what is installed here and offer it to the mesh</div></div></div>
           <div class="card-body stack">
             <p class="muted small">Publishing signs the tree and announces it — nothing is sent
-              anywhere. The package moves only when someone who pinned <strong>this node's</strong>
+              anywhere. The package moves only when someone who pinned <strong data-i18n="console.this_node_s">this node's</strong>
               key asks for it, and whoever receives it keeps it and can serve the next node. The
               version comes from the tree itself, so a release cannot announce one version and
               carry another.</p>
-            <label class="field"><span>Release notes</span>
-              <textarea id="publish-notes" rows="3" placeholder="what changed"></textarea></label>
+            <label class="field"><span data-i18n="console.release_notes">Release notes</span>
+              <textarea id="publish-notes" rows="3" placeholder="what changed" data-i18n-attr="placeholder:console.what_changed"></textarea></label>
             <div class="form-grid">
-              <label class="field"><span>Sign with</span>
+              <label class="field"><span data-i18n="console.sign_with">Sign with</span>
                 <select id="publish-signer"></select>
-                <span class="hint">A publisher key is the safer choice: it is unlocked for this
+                <span class="hint" data-i18n="console.a_publisher_key_is_the_safer_choice">A publisher key is the safer choice: it is unlocked for this
                   one signature. The node identity is already unlocked and always will be.</span></label>
-              <label class="field" id="publish-pass-field" hidden><span>Its passphrase</span>
+              <label class="field" id="publish-pass-field" hidden><span data-i18n="console.its_passphrase">Its passphrase</span>
                 <input id="publish-pass" type="password" autocomplete="current-password"></label>
             </div>
-            <div class="kv"><div>This node's identity key</div>
+            <div class="kv"><div data-i18n="console.this_node_s_identity_key">This node's identity key</div>
               <div><code id="publish-key" class="inline"></code></div></div>
-            <div class="btn-row"><button id="publish-go">Publish</button></div>
+            <div class="btn-row"><button id="publish-go" data-i18n="console.publish">Publish</button></div>
             <p id="publish-status" class="msg"></p>
           </div>
         </article>
@@ -917,22 +917,22 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="security" class="stack" hidden>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Console password</h2>
-            <div class="sub">The only credential between the network and this node's controls</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.console_password">Console password</h2>
+            <div class="sub" data-i18n="console.the_only_credential_between_the">The only credential between the network and this node's controls</div></div></div>
           <div class="card-body">
             <p class="muted small">Changing it needs the current one, even from a signed-in session:
               a stolen session must never be able to lock you out of your own node. Every other
               session is signed out; this one stays. Lost it entirely?
               Run <code class="inline">./install.sh --reset-password</code> on the machine itself.</p>
             <div class="form-grid">
-              <label class="field"><span>Current password</span>
+              <label class="field"><span data-i18n="console.current_password">Current password</span>
                 <input id="pw-current" type="password" autocomplete="current-password"></label>
-              <label class="field"><span>New password</span>
+              <label class="field"><span data-i18n="console.new_password">New password</span>
                 <input id="pw-new" type="password" autocomplete="new-password"></label>
-              <label class="field"><span>Repeat new password</span>
+              <label class="field"><span data-i18n="console.repeat_new_password">Repeat new password</span>
                 <input id="pw-repeat" type="password" autocomplete="new-password"></label>
             </div>
-            <div class="btn-row"><button id="pw-save" class="primary">Change password</button></div>
+            <div class="btn-row"><button id="pw-save" class="primary" data-i18n="console.change_password">Change password</button></div>
             <p id="pw-status" class="msg"></p>
           </div>
         </article>
@@ -940,30 +940,30 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="appearance" class="stack" hidden>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>This browser</h2>
-            <div class="sub">Preferences about this screen, kept here and nowhere else</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.this_browser">This browser</h2>
+            <div class="sub" data-i18n="console.preferences_about_this_screen_kept">Preferences about this screen, kept here and nowhere else</div></div></div>
           <div class="card-body">
-            <p class="muted small">These are not settings of the node: they live in this
+            <p class="muted small" data-i18n="console.these_are_not_settings_of_the_node">These are not settings of the node: they live in this
               browser, so a different machine signed into the same console keeps its own.
               Nothing here is sent anywhere.</p>
             <div class="form-grid">
-              <label class="field" for="pref-theme"><span>Theme</span>
+              <label class="field" for="pref-theme"><span data-i18n="console.theme">Theme</span>
                 <select id="pref-theme">
-                  <option value="system">Follow the system</option>
-                  <option value="light">Light</option>
-                  <option value="dark">Dark</option>
+                  <option value="system" data-i18n="console.follow_the_system">Follow the system</option>
+                  <option value="light" data-i18n="console.light">Light</option>
+                  <option value="dark" data-i18n="console.dark">Dark</option>
                 </select></label>
               <label class="check card-like"><input type="checkbox" role="switch" data-expert-toggle>
-                <span><b>Expert mode</b><br><span class="muted small">Every number and
+                <span><b data-i18n="console.expert_mode">Expert mode</b><br><span class="muted small" data-i18n="console.every_number_and_every_setting">Every number and
                   every setting, rather than the decisions they add up to. Only changes what
                   this browser shows — the node behaves the same either way.</span></span></label>
-              <label class="field" for="pref-open"><span>Opening another app</span>
+              <label class="field" for="pref-open"><span data-i18n="console.opening_another_app">Opening another app</span>
                 <select id="pref-open">
-                  <option value="auto">Decide by screen size</option>
-                  <option value="window">In a separate window</option>
-                  <option value="tab">In a new tab</option>
+                  <option value="auto" data-i18n="console.decide_by_screen_size">Decide by screen size</option>
+                  <option value="window" data-i18n="console.in_a_separate_window">In a separate window</option>
+                  <option value="tab" data-i18n="console.in_a_new_tab">In a new tab</option>
                 </select>
-                <span class="hint">Following a link into Chat or Fleet — messaging a node
+                <span class="hint" data-i18n="console.following_a_link_into_chat_or_fleet">Following a link into Chat or Fleet — messaging a node
                   from its details, say. A window keeps what you were doing in view;
                   a phone gets a tab either way.</span></label>
             </div>
@@ -973,58 +973,58 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="config" class="stack" hidden>
         <article class="card" id="power-card">
-          <div class="card-head"><div class="grow"><h2>Energy and performance</h2>
-            <div class="sub">How much this node may spend to stay quick</div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.energy_and_performance">Energy and performance</h2>
+            <div class="sub" data-i18n="console.how_much_this_node_may_spend_to_stay">How much this node may spend to stay quick</div></div>
             <span id="power-pill" class="badge"></span></div>
           <div class="card-body">
-            <nav class="segmented" role="tablist" aria-label="How the balance is chosen">
+            <nav class="segmented" role="tablist" aria-label="How the balance is chosen" data-i18n-attr="aria-label:console.how_the_balance_is_chosen">
               <button role="tab" id="power-tab-manual" data-power-mode="manual"
-                      aria-selected="true">Manual</button>
+                      aria-selected="true" data-i18n="console.manual">Manual</button>
               <button role="tab" id="power-tab-adaptive" data-power-mode="adaptive"
-                      aria-selected="false">Adaptive <span class="badge info">Soon</span></button>
+                      aria-selected="false">Adaptive <span class="badge info" data-i18n="console.soon">Soon</span></button>
             </nav>
             <div data-power-panel="manual" class="stack">
-              <label class="field" for="power-step"><span>Balance</span>
+              <label class="field" for="power-step"><span data-i18n="console.balance">Balance</span>
                 <input id="power-step" type="range" min="1" max="10" step="1" value="6"
                        aria-describedby="power-text"></label>
-              <div class="scale"><span>Saves energy</span><b id="power-name"></b>
-                <span>Performance</span></div>
+              <div class="scale"><span data-i18n="console.saves_energy">Saves energy</span><b id="power-name"></b>
+                <span data-i18n="console.performance">Performance</span></div>
               <p id="power-text" class="power-text"></p>
-              <p id="power-custom" class="notice" hidden>These settings were tuned by hand and
+              <p id="power-custom" class="notice" hidden data-i18n="console.these_settings_were_tuned_by_hand">These settings were tuned by hand and
                 match no step. Moving the bar replaces them with the step you choose.</p>
               <dl id="power-values" class="kv only-expert"></dl>
             </div>
             <div data-power-panel="adaptive" class="stack" hidden>
-              <p class="muted small">Coming soon: the node moves along the bar by itself, with
+              <p class="muted small" data-i18n="console.coming_soon_the_node_moves_along_the">Coming soon: the node moves along the bar by itself, with
                 what it is doing — on battery or on mains, busy or idle. You give it a tendency,
                 and it keeps within it.</p>
-              <label class="field" for="power-trend"><span>Tendency</span>
+              <label class="field" for="power-trend"><span data-i18n="console.tendency">Tendency</span>
                 <input id="power-trend" type="range" min="1" max="5" step="1" value="3" disabled></label>
-              <div class="scale"><span>Save energy</span><b>Neutral</b><span>Performance</span></div>
+              <div class="scale"><span data-i18n="console.save_energy">Save energy</span><b data-i18n="console.neutral">Neutral</b><span data-i18n="console.performance">Performance</span></div>
             </div>
             <p id="power-status" class="msg" role="status"></p>
           </div>
         </article>
-        <p class="muted small only-simple">Expert mode shows every setting in the node&rsquo;s
+        <p class="muted small only-simple" data-i18n="console.expert_mode_shows_every_setting_in">Expert mode shows every setting in the node&rsquo;s
           configuration file, including the ones this bar is made of.</p>
         <article class="card only-expert">
-          <div class="card-head"><div class="grow"><h2>Configuration file</h2>
-            <div class="sub">Every option this node reads from its file</div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.configuration_file">Configuration file</h2>
+            <div class="sub" data-i18n="console.every_option_this_node_reads_from">Every option this node reads from its file</div></div>
             <span id="config-pill" class="badge"></span></div>
           <div class="card-body">
-            <p class="muted small">Saved settings marked <b>applies now</b> take effect on the
+            <p class="muted small">Saved settings marked <b data-i18n="console.applies_now">applies now</b> take effect on the
               running node at once; the others are read when the node starts, and wait for a
               restart. Options passed on the command line still win over the file at the next
               start.</p>
             <p id="config-path" class="msg mono"></p>
             <div id="config-problems" class="notice warn" hidden></div>
-            <h3>Applies now</h3>
+            <h3 data-i18n="console.applies_now_2">Applies now</h3>
             <div id="config-fields" class="form-grid"></div>
-            <h3>After a restart</h3>
+            <h3 data-i18n="console.after_a_restart">After a restart</h3>
             <div id="config-fields-restart" class="form-grid"></div>
             <div class="btn-row">
-              <button id="config-save" class="primary">Save configuration</button>
-              <button id="config-reload">Reload from file</button>
+              <button id="config-save" class="primary" data-i18n="console.save_configuration">Save configuration</button>
+              <button id="config-reload" data-i18n="console.reload_from_file">Reload from file</button>
             </div>
             <p id="config-status" class="msg"></p>
           </div>
@@ -1033,44 +1033,44 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="diagnostics" class="stack" hidden>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>What is running</h2>
-            <div class="sub">Every background job this node keeps, and what wakes it</div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.what_is_running">What is running</h2>
+            <div class="sub" data-i18n="console.every_background_job_this_node_keeps">Every background job this node keeps, and what wakes it</div></div>
             <span id="activity-pill" class="badge"></span></div>
           <div class="card-body">
             <p class="muted small">A process CPU figure says how much, never what. Each loop
               declares who it is when it starts and counts its own passes — two attribute writes,
-              nothing on the path a packet takes. <b>Wakes on</b> is the other half: since these
+              nothing on the path a packet takes. <b data-i18n="console.wakes_on">Wakes on</b> is the other half: since these
               loops stopped polling, what each one waits for is a real question, and this is the
               answer read off the loop itself rather than a second list kept in step by hand.</p>
             <div class="table-wrap">
-              <table><thead><tr><th>Job</th><th>Does</th><th>Wakes on</th>
-                <th class="num">Passes</th><th class="num">Idle</th></tr></thead>
+              <table><thead><tr><th data-i18n="console.job">Job</th><th data-i18n="console.does">Does</th><th data-i18n="console.wakes_on">Wakes on</th>
+                <th class="num" data-i18n="console.passes">Passes</th><th class="num" data-i18n="console.idle">Idle</th></tr></thead>
                 <tbody id="activity-rows"></tbody></table>
             </div>
-            <p id="activity-empty" class="empty" hidden>Nothing registered — the node is not started.</p>
+            <p id="activity-empty" class="empty" hidden data-i18n="console.nothing_registered_the_node_is_not">Nothing registered — the node is not started.</p>
           </div>
         </article>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Protocol trace</h2>
-            <div class="sub">What this node actually sends and receives, by message type</div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.protocol_trace">Protocol trace</h2>
+            <div class="sub" data-i18n="console.what_this_node_actually_sends_and">What this node actually sends and receives, by message type</div></div>
             <span id="trace-pill" class="badge"></span></div>
           <div class="card-body">
             <p class="muted small">For questions the throughput graph cannot answer — like "why are
-              two idle nodes talking at all?". <b>No payload is ever recorded</b>, only routing
+              two idle nodes talking at all?". <b data-i18n="console.no_payload_is_ever_recorded">No payload is ever recorded</b>, only routing
               metadata: type, size, TTL and node ids. It lives in memory, is bounded, and stops on
               its own.</p>
             <div class="toolbar">
-              <button id="trace-start" class="primary">Start recording</button>
-              <button id="trace-stop">Stop</button>
-              <label class="field narrow"><span class="sr-only">Seconds</span>
-                <input id="trace-seconds" type="number" min="1" max="3600" value="120" aria-label="Seconds to record"></label>
+              <button id="trace-start" class="primary" data-i18n="console.start_recording">Start recording</button>
+              <button id="trace-stop" data-i18n="console.stop">Stop</button>
+              <label class="field narrow"><span class="sr-only" data-i18n="console.seconds">Seconds</span>
+                <input id="trace-seconds" type="number" min="1" max="3600" value="120" aria-label="Seconds to record" data-i18n-attr="aria-label:console.seconds_to_record"></label>
               <span class="grow"></span>
-              <button id="trace-export">Download</button>
-              <button id="trace-clear">Clear</button>
+              <button id="trace-export" data-i18n="console.download">Download</button>
+              <button id="trace-clear" data-i18n="console.clear">Clear</button>
             </div>
             <p id="trace-status" class="msg"></p>
             <div class="table-wrap"><table>
-              <thead><tr><th>Message</th><th class="num">Packets</th><th class="num">Bytes</th><th class="num">Rate</th></tr></thead>
+              <thead><tr><th data-i18n="console.message">Message</th><th class="num" data-i18n="console.packets">Packets</th><th class="num" data-i18n="console.bytes">Bytes</th><th class="num" data-i18n="console.rate">Rate</th></tr></thead>
               <tbody id="trace-summary"></tbody></table></div>
           </div>
         </article>
@@ -1078,49 +1078,49 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="logs" class="stack" hidden>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Recording</h2>
-            <div class="sub">What this node says about itself — kept only while somebody asks</div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.recording">Recording</h2>
+            <div class="sub" data-i18n="console.what_this_node_says_about_itself">What this node says about itself — kept only while somebody asks</div></div>
             <span id="nlog-pill" class="badge"></span></div>
           <div class="card-body">
-            <p class="muted small">Nothing is kept until it is started, and what was kept is dropped
+            <p class="muted small" data-i18n="console.nothing_is_kept_until_it_is_started">Nothing is kept until it is started, and what was kept is dropped
               when the last one keeping it stops: an operator here, a trace that is running, or a
               console following this log from elsewhere. It lives in memory only, compressed, and
               is bounded by the size below.</p>
             <div class="toolbar">
-              <button id="nlog-start" class="primary">Start recording</button>
-              <button id="nlog-stop">Stop</button>
-              <label class="field narrow"><span>Size, MB</span>
-                <input id="nlog-size" type="number" min="1" max="512" step="1" aria-label="Ring size in megabytes"></label>
-              <button id="nlog-resize">Apply size</button>
+              <button id="nlog-start" class="primary" data-i18n="console.start_recording">Start recording</button>
+              <button id="nlog-stop" data-i18n="console.stop">Stop</button>
+              <label class="field narrow"><span data-i18n="console.size_mb">Size, MB</span>
+                <input id="nlog-size" type="number" min="1" max="512" step="1" aria-label="Ring size in megabytes" data-i18n-attr="aria-label:console.ring_size_in_megabytes"></label>
+              <button id="nlog-resize" data-i18n="console.apply_size">Apply size</button>
               <span class="grow"></span>
-              <button id="nlog-clear">Clear</button>
+              <button id="nlog-clear" data-i18n="console.clear">Clear</button>
             </div>
             <p id="nlog-state" class="msg"></p>
           </div>
         </article>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Live</h2>
-            <div class="sub">Oldest at the top, follows the end as lines are written</div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.live">Live</h2>
+            <div class="sub" data-i18n="console.oldest_at_the_top_follows_the_end_as">Oldest at the top, follows the end as lines are written</div></div>
             <span id="nlog-live" class="badge"></span></div>
           <div class="card-body">
             <div class="toolbar">
-              <button id="nlog-follow" aria-pressed="true">Pause</button>
-              <label class="field"><span>Level</span>
+              <button id="nlog-follow" aria-pressed="true" data-i18n="console.pause">Pause</button>
+              <label class="field"><span data-i18n="console.level">Level</span>
                 <select id="nlog-level">
-                  <option value="">Everything</option>
-                  <option value="info">info and above</option>
-                  <option value="warn">warnings and errors</option>
-                  <option value="error">errors only</option>
+                  <option value="" data-i18n="console.everything">Everything</option>
+                  <option value="info" data-i18n="console.info_and_above">info and above</option>
+                  <option value="warn" data-i18n="console.warnings_and_errors">warnings and errors</option>
+                  <option value="error" data-i18n="console.errors_only">errors only</option>
                 </select></label>
-              <label class="field"><span>Source</span>
-                <input id="nlog-source" type="search" list="nlog-sources" placeholder="node, peers, app:…"></label>
+              <label class="field"><span data-i18n="console.source">Source</span>
+                <input id="nlog-source" type="search" list="nlog-sources" placeholder="node, peers, app:…" data-i18n-attr="placeholder:console.node_peers_app"></label>
               <datalist id="nlog-sources"></datalist>
-              <label class="field"><span>Contains</span>
-                <input id="nlog-contains" type="search" placeholder="text or a field value"></label>
+              <label class="field"><span data-i18n="console.contains">Contains</span>
+                <input id="nlog-contains" type="search" placeholder="text or a field value" data-i18n-attr="placeholder:console.text_or_a_field_value"></label>
               <span class="grow"></span>
-              <button id="nlog-older">Load older</button>
-              <button id="nlog-save">Download</button>
-              <button id="nlog-wipe">Clear view</button>
+              <button id="nlog-older" data-i18n="console.load_older">Load older</button>
+              <button id="nlog-save" data-i18n="console.download">Download</button>
+              <button id="nlog-wipe" data-i18n="console.clear_view">Clear view</button>
             </div>
             <div id="nlog-view" class="logview" role="log" aria-live="off" tabindex="0"></div>
             <p id="nlog-note" class="muted small"></p>
@@ -1130,21 +1130,21 @@ INDEX_HTML = """<!doctype html>
 
       <div data-sub="advanced" class="stack" hidden>
         <article class="card">
-          <div class="card-head"><div class="grow"><h2>Content-addressed transfer</h2>
-            <div class="sub">Raw DHT package exchange — not the signed app store</div></div></div>
+          <div class="card-head"><div class="grow"><h2 data-i18n="console.content_addressed_transfer">Content-addressed transfer</h2>
+            <div class="sub" data-i18n="console.raw_dht_package_exchange_not_the">Raw DHT package exchange — not the signed app store</div></div></div>
           <div class="card-body">
             <div class="form-grid">
-              <label class="field"><span>Name</span><input id="app-name"></label>
-              <label class="field"><span>Version</span><input id="app-version" value="1.0.0"></label>
+              <label class="field"><span data-i18n="fleet.name">Name</span><input id="app-name"></label>
+              <label class="field"><span data-i18n="console.version">Version</span><input id="app-version" value="1.0.0"></label>
             </div>
-            <label class="field"><span>Files</span><input id="app-files" type="file" multiple></label>
-            <div class="btn-row"><button id="publish-btn">Publish content</button></div>
+            <label class="field"><span data-i18n="term.files">Files</span><input id="app-files" type="file" multiple></label>
+            <div class="btn-row"><button id="publish-btn" data-i18n="console.publish_content">Publish content</button></div>
             <code id="app-id-out" class="mono"></code>
             <hr>
             <div class="toolbar">
-              <label class="field grow"><span class="sr-only">Content id</span>
-                <input id="fetch-id" class="mono" placeholder="40-character content id" spellcheck="false"></label>
-              <button id="fetch-btn">Fetch</button></div>
+              <label class="field grow"><span class="sr-only" data-i18n="console.content_id">Content id</span>
+                <input id="fetch-id" class="mono" placeholder="40-character content id" spellcheck="false" data-i18n-attr="placeholder:console.40_character_content_id"></label>
+              <button id="fetch-btn" data-i18n="console.fetch">Fetch</button></div>
             <div id="app-files-out" class="chips"></div>
             <p id="app-status" class="msg"></p>
           </div>
@@ -1156,8 +1156,8 @@ INDEX_HTML = """<!doctype html>
 
 <dialog id="node-dialog" class="wide" aria-labelledby="node-dialog-title">
   <div class="sheet">
-    <header class="sheet-head"><h2 id="node-dialog-title">Node</h2>
-      <button id="node-dialog-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
+    <header class="sheet-head"><h2 id="node-dialog-title" data-i18n="node.node">Node</h2>
+      <button id="node-dialog-close" class="icon" aria-label="Close" data-i18n-attr="aria-label:common.close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
     <!-- The whole body is the shared node view — the same one /node serves. -->
     <div class="sheet-body"><div id="node-detail"></div></div>
   </div>
@@ -1166,7 +1166,7 @@ INDEX_HTML = """<!doctype html>
 <dialog id="map-dialog" class="full" aria-labelledby="map-title">
   <div class="sheet">
     <header class="sheet-head">
-      <h2 id="map-title">Mesh map</h2>
+      <h2 id="map-title" data-i18n="console.mesh_map">Mesh map</h2>
       <span class="row small muted gap-4 map-legend">
         <span class="row"><i class="dot self"></i>this node</span>
         <span class="row"><i class="dot direct"></i>direct link</span>
@@ -1179,34 +1179,34 @@ INDEX_HTML = """<!doctype html>
       </span>
       <span class="grow"></span>
       <span id="map-summary" class="badge"></span>
-      <button id="map-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      <button id="map-close" class="icon" aria-label="Close" data-i18n-attr="aria-label:common.close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
     </header>
     <div class="sheet-body map-body">
       <div class="map-canvas">
         <svg id="map-svg" class="mesh-graph" viewBox="0 0 900 520" role="img"
-             aria-label="Mesh map, draggable and zoomable"></svg>
-        <div class="map-zoom" role="group" aria-label="Zoom">
-          <button id="map-in" class="icon sm" aria-label="Zoom in">+</button>
-          <button id="map-out" class="icon sm" aria-label="Zoom out">−</button>
-          <button id="map-fit" class="icon sm" aria-label="Fit the whole mesh">⤢</button>
+             aria-label="Mesh map, draggable and zoomable" data-i18n-attr="aria-label:console.mesh_map_draggable_and_zoomable"></svg>
+        <div class="map-zoom" role="group" aria-label="Zoom" data-i18n-attr="aria-label:console.zoom">
+          <button id="map-in" class="icon sm" aria-label="Zoom in" data-i18n-attr="aria-label:console.zoom_in">+</button>
+          <button id="map-out" class="icon sm" aria-label="Zoom out" data-i18n-attr="aria-label:console.zoom_out">−</button>
+          <button id="map-fit" class="icon sm" aria-label="Fit the whole mesh" data-i18n-attr="aria-label:console.fit_the_whole_mesh">⤢</button>
         </div>
-        <p id="map-hint" class="map-hint muted tiny">Drag to move · pinch or scroll to zoom</p>
+        <p id="map-hint" class="map-hint muted tiny" data-i18n="console.drag_to_move_pinch_or_scroll_to_zoom">Drag to move · pinch or scroll to zoom</p>
       </div>
       <aside class="map-side">
-        <h3>Links</h3>
+        <h3 data-i18n="console.links">Links</h3>
         <div id="map-links" class="stack"></div>
         <div id="map-reported" class="stack"></div>
         <div id="map-grow" class="map-grow stack" hidden>
-          <h3>Beyond this node</h3>
+          <h3 data-i18n="console.beyond_this_node">Beyond this node</h3>
           <p class="tiny muted">While this map is open, the machines you manage
-            that granted <code>links</code> report what <i>they</i> are
+            that granted <code>links</code> report what <i data-i18n="console.they">they</i> are
             connected to, and say so again whenever it changes. What comes back
             is their word, not a measurement: it is drawn dashed, it names who
             said it, and a machine that goes quiet leaves the map within
             seconds rather than lingering.</p>
           <div id="map-grow-list" class="stack"></div>
           <div class="row">
-            <button id="map-grow-clear" class="sm">Drop what was reported</button></div>
+            <button id="map-grow-clear" class="sm" data-i18n="console.drop_what_was_reported">Drop what was reported</button></div>
         </div>
       </aside>
     </div>
@@ -1216,25 +1216,25 @@ INDEX_HTML = """<!doctype html>
 <dialog id="modal" aria-labelledby="modal-title">
   <div class="sheet">
     <header class="sheet-head"><h2 id="modal-title"></h2>
-      <button id="modal-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
+      <button id="modal-close" class="icon" aria-label="Close" data-i18n-attr="aria-label:common.close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
     <div id="modal-body" class="sheet-body"></div>
   </div>
 </dialog>
 
 <dialog id="perm-dialog" class="wide" aria-labelledby="perm-title">
   <div class="sheet">
-    <header class="sheet-head"><h2 id="perm-title">Permissions</h2>
-      <button id="perm-close" class="icon" aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
+    <header class="sheet-head"><h2 id="perm-title" data-i18n="console.permissions">Permissions</h2>
+      <button id="perm-close" class="icon" aria-label="Close" data-i18n-attr="aria-label:common.close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></header>
     <div class="sheet-body stack">
       <p id="perm-intro" class="muted small"></p>
       <div id="perm-body" class="perm-list"></div>
       <p id="perm-msg" class="msg"></p>
     </div>
     <footer class="sheet-foot">
-      <button id="perm-token" hidden>Connector token</button>
-      <button id="perm-forget" class="danger" hidden>Forget this app</button>
+      <button id="perm-token" hidden data-i18n="console.connector_token">Connector token</button>
+      <button id="perm-forget" class="danger" hidden data-i18n="console.forget_this_app">Forget this app</button>
       <span class="grow"></span>
-      <button id="perm-done" class="primary">Done</button>
+      <button id="perm-done" class="primary" data-i18n="console.done">Done</button>
     </footer>
   </div>
 </dialog>
@@ -1244,16 +1244,16 @@ INDEX_HTML = """<!doctype html>
     <header class="sheet-head"><h2 id="confirm-title"></h2></header>
     <div class="sheet-body"><div id="confirm-body"></div></div>
     <footer class="sheet-foot">
-      <button id="confirm-cancel">Cancel</button>
-      <button id="confirm-ok" class="primary">Confirm</button>
+      <button id="confirm-cancel" data-i18n="common.cancel">Cancel</button>
+      <button id="confirm-ok" class="primary" data-i18n="console.confirm">Confirm</button>
     </footer>
   </div>
 </dialog>
 
-<dialog id="palette" class="palette" aria-label="Command palette">
+<dialog id="palette" class="palette" aria-label="Command palette" data-i18n-attr="aria-label:console.command_palette">
   <div class="sheet">
     <input id="palette-input" type="text" placeholder="Jump to a section, or run an action…"
-           autocomplete="off" spellcheck="false" aria-controls="palette-list">
+           autocomplete="off" spellcheck="false" aria-controls="palette-list" data-i18n-attr="placeholder:console.jump_to_a_section_or_run_an_action">
     <div id="palette-list" class="list" role="listbox"></div>
   </div>
 </dialog>
@@ -1521,7 +1521,7 @@ $("login-form").addEventListener("submit", async (event) => {
       SESSION.set(data.token);
       $("password").value = "";
       enterConsole();
-    }catch(_){ setMessage("login-error", "Console is not reachable", true); }
+    }catch(_){ setMessage("login-error", t("console.console_is_not_reachable"), true); }
   });
 });
 $("logout").addEventListener("click", async () => {
@@ -1649,7 +1649,7 @@ function paintBroken(state){
   const names = (state.broken || []).join(", ");
   if(names === BROKEN_SAID) return;
   BROKEN_SAID = names;
-  if(names) toast("This node could not build: " + names, "danger",
+  if(names) toast(t("console.this_node_could_not_build", {names}), "danger",
                   "Its log says why. The rest of this page is still true.");
 }
 
@@ -2192,7 +2192,7 @@ function renderGraph(svg, state, size){
     if(size.labels){
       const label = svgEl("text", Object.assign(edgeLabelAt(from, to, .5),
                                                 {class:"elabel"}));
-      label.textContent = "via " + shortId(node.via);
+      label.textContent = t("console.via", {via: shortId(node.via)});
       svg.appendChild(label);
     }
   });
@@ -2209,7 +2209,7 @@ function renderGraph(svg, state, size){
     if(size.labels){
       const label = svgEl("text", Object.assign(edgeLabelAt(from, to, .5),
                                                 {class:"elabel reported"}));
-      label.textContent = "said by " + shortId(edge.from);
+      label.textContent = t("console.said_by", {from: shortId(edge.from)});
       svg.appendChild(label);
     }
   });
@@ -2253,7 +2253,7 @@ function renderGraph(svg, state, size){
     const text = svgEl("text", {x:centre.x, y:centre.y + size.self + 34, class:"lonely"});
     text.setAttribute("fill", "var(--text-faint)");
     text.setAttribute("text-anchor", "middle");
-    text.textContent = "no links yet";
+    text.textContent = t("console.no_links_yet");
     svg.appendChild(text);
   }
   graphSummary(state, size);
@@ -2399,8 +2399,8 @@ $("map-grow-clear").addEventListener("click", async (event) => {
       if(STATE) paintMap();
       // Said plainly, because it is what happens: the machines are still
       // following, so anything still true comes back within seconds.
-      toast("Dropped — whatever is still true will be reported again");
-    }catch(_){ toast("That could not be dropped", "danger"); }
+      toast(t("console.dropped_whatever_is_still_true_will"));
+    }catch(_){ toast(t("console.that_could_not_be_dropped"), "danger"); }
   });
 });
 
@@ -2866,9 +2866,9 @@ $("known-limit").addEventListener("change", () => {
 $("ping-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{
     const data = await CHANNEL.call("node.ping");
-    toast("Sent " + (data.sent || 0) + " probe(s)");
+    toast(t("console.sent_probe_s", {sent: (data.sent || 0)}));
     setTimeout(tick, 800);
-  }catch(_){ toast("Ping failed", "danger"); }
+  }catch(_){ toast(t("console.ping_failed"), "danger"); }
 }));
 $("go-join").addEventListener("click", () => ROUTER.go("network", "join"));
 $("standing-go").addEventListener("click", () => ROUTER.go("network", "join"));
@@ -2918,7 +2918,7 @@ function paintReach(state){
     if(rtt != null) row.rtt.push(rtt);
   }
   TRANSPORT_LIVE = byScheme;
-  $("dyn-toggle").textContent = "Dynamic addressing: " + (state.dynamic_address ? "on" : "off");
+  $("dyn-toggle").textContent = t(state.dynamic_address ? "console.dynamic_addressing_on" : "console.dynamic_addressing_off");
   paintBalance(state);
   paintMLO(state);
   const address = [
@@ -3017,7 +3017,7 @@ document.addEventListener("click", (event) => {
   withBusy(target, async () => {
     const {ok} = await CHANNEL.ask("trust.forgive",
       {node:target.dataset.forgive});
-    if(!ok) setMessage("manage-status", "Nothing held against that node.", true);
+    if(!ok) setMessage("manage-status", t("console.nothing_held_against_that_node"), true);
   });
 });
 // The membership, said out loud — and said in one place. `standing` is the
@@ -3145,7 +3145,7 @@ async function post(path, body, message){
     toast(message);
     tick();
     return true;
-  }catch(_){ toast("Control action failed", "danger"); return false; }
+  }catch(_){ toast(t("console.control_action_failed"), "danger"); return false; }
 }
 // The same, over the control channel — an operation instead of a path, and the
 // node's own sentence when it refuses instead of "control action failed".
@@ -3157,7 +3157,7 @@ async function run(op, params, message){
     return true;
   }catch(error){
     if(isStale(error)) return false;
-    toast("Control action failed", "danger",
+    toast(t("console.control_action_failed"), "danger",
           isRefused(error) ? error.message : "");
     return false;
   }
@@ -3196,12 +3196,12 @@ function mloWaiting(mlo){
       + " bundled and no second one is opened.</span>";
   const waiting = mlo.waiting || [];
   if(!waiting.length)
-    return '<span class="muted">No node is reached over two MLO-ready links right now.</span>';
+    return '<span class="muted" data-i18n="console.no_node_is_reached_over_two_mlo">No node is reached over two MLO-ready links right now.</span>';
   const rows = waiting.map((row) => esc(row.pseudo || row.node.slice(0, 16)) + " "
     + (row.address
         ? '<span class="muted">via ' + esc(row.address) + "</span>"
-        : '<span class="muted">— no other address on an MLO-ready medium</span>'));
-  return '<span class="muted">One link short of a bundle: </span>' + rows.join(", ");
+        : '<span class="muted" data-i18n="console.no_other_address_on_an_mlo_ready">— no other address on an MLO-ready medium</span>'));
+  return '<span class="muted" data-i18n="console.one_link_short_of_a_bundle">One link short of a bundle: </span>' + rows.join(", ");
 }
 function paintMLO(state){
   const ms = msRange;
@@ -3218,7 +3218,7 @@ function paintMLO(state){
   setHTML("mlo-summary", summary.map(([key, value]) =>
     '<div class="stat sm"><span class="v">' + esc(value) +
     '</span><span class="k">' + esc(key) + "</span></div>").join(""));
-  $("mlo-always").textContent = "Always on: " + (mlo.always ? "yes" : "no");
+  $("mlo-always").textContent = t(mlo.always ? "console.always_on_yes" : "console.always_on_no");
   // Never yank a number out from under somebody typing it.
   const bounds = mlo.bounds_ms || {};
   for(const [id, value] of [["mlo-skew", mlo.skew_ms], ["mlo-drop", mlo.drop_percent],
@@ -3255,8 +3255,8 @@ for(const [id, field] of [["mlo-skew", "skew_ms"], ["mlo-drop", "drop_percent"],
     try{
       const {ok, error} = await CHANNEL.ask("network.mlo", {[field]: value});
       $("mlo-status").textContent = ok ? "" : (error || "Refused");
-      if(ok) toast("Multi-link operation updated", "ok");
-    }catch(_){ toast("Could not save that", "danger"); }
+      if(ok) toast(t("console.multi_link_operation_updated"), "ok");
+    }catch(_){ toast(t("console.could_not_save_that"), "danger"); }
     finally{ tick(); }
   });
 function showBalance(value){
@@ -3274,8 +3274,8 @@ $("balance").addEventListener("change", async (event) => {
   try{
     const {ok, error, data} = await CHANNEL.ask("network.balance", {value});
     if(!ok){ toast(error || "Refused", "warn"); return; }
-    toast("Address preference updated", "ok");
-  }catch(_){ toast("Could not save the balance", "danger"); }
+    toast(t("console.address_preference_updated"), "ok");
+  }catch(_){ toast(t("console.could_not_save_the_balance"), "danger"); }
   finally{ BALANCE_HELD = false; tick(); }
 });
 $("net-recheck").addEventListener("click", () =>
@@ -3288,7 +3288,7 @@ $("reach-probe").addEventListener("click", (event) => withBusy(event.target, asy
     const data = await CHANNEL.call("network.probe");
     toast(data.sent ? "Sent " + data.sent + " reachability probe(s)"
                     : "No connected node can probe us", data.sent ? "" : "warn");
-  }catch(_){ toast("Probe failed", "danger"); }
+  }catch(_){ toast(t("console.probe_failed"), "danger"); }
 }));
 $("transport-blocks").addEventListener("click", async (event) => {
   const block = event.target.closest("[data-scheme]");
@@ -3299,17 +3299,17 @@ $("transport-blocks").addEventListener("click", async (event) => {
   if(remove){
     await CHANNEL.call("network.unlisten",
                        {uri:remove.dataset.removeListener}).catch(() => {});
-    toast("Listener removed");
+    toast(t("console.listener_removed"));
     tick();
     return;
   }
   if(event.target.closest("[data-listen-add]")){
     const input = block.querySelector("[data-listen-uri]");
     const uri = input.value.trim();
-    if(!uri){ toast("Enter a listener URI", "warn"); return; }
+    if(!uri){ toast(t("console.enter_a_listener_uri"), "warn"); return; }
     await withBusy(event.target, async () => {
       const {ok, error} = await CHANNEL.ask("network.listen", {uri});
-      if(ok){ input.value = ""; toast("Listener added"); tick(); }
+      if(ok){ input.value = ""; toast(t("console.listener_added")); tick(); }
       else toast(error || "Listener failed", "danger");
     });
     return;
@@ -3318,7 +3318,7 @@ $("transport-blocks").addEventListener("click", async (event) => {
     if(!STATE) return;
     const on = (STATE.transport_details || []).some((item) => item.hole_punch);
     const port = parseInt(block.querySelector("[data-udp-port]").value, 10);
-    if(!on && !(port > 0 && port < 65536)){ toast("Enter a valid UDP port", "warn"); return; }
+    if(!on && !(port > 0 && port < 65536)){ toast(t("console.enter_a_valid_udp_port"), "warn"); return; }
     run("network.udp", on ? {action:"stop"} : {action:"start", port},
          on ? "UDP stopped" : "UDP started");
     return;
@@ -3414,8 +3414,8 @@ function readOption(scheme, field){
 const SCHEME_EXTRAS = {
   udp: () =>
     '<div class="toolbar">' +
-    '<label class="field"><span>UDP port</span>' +
-    '<input type="number" min="1" max="65535" value="9001" data-udp-port aria-label="UDP port"></label>' +
+    '<label class="field"><span data-i18n="console.udp_port">UDP port</span>' +
+    '<input type="number" min="1" max="65535" value="9001" data-udp-port aria-label="UDP port" data-i18n-attr="aria-label:console.udp_port"></label>' +
     "<button data-udp-toggle></button>" +
     '<button data-flag="punch"></button>' +
     '<button data-flag="keepalive"></button>' +
@@ -3446,7 +3446,7 @@ function transportBlockHTML(scheme, options, open, view){
     '<dl class="kv" data-facts></dl>' +
     "<h3>Listeners</h3>" +
     '<div class="chips" data-listeners></div>' +
-    '<div class="toolbar"><label class="field grow"><span class="sr-only">Listener URI</span>' +
+    '<div class="toolbar"><label class="field grow"><span class="sr-only" data-i18n="console.listener_uri">Listener URI</span>' +
     '<input class="mono" data-listen-uri spellcheck="false" placeholder="' +
     esc(scheme) + '://0.0.0.0:9002"></label>' +
     "<button data-listen-add>Add listener</button></div>" +
@@ -3456,9 +3456,9 @@ function transportBlockHTML(scheme, options, open, view){
     (options.length
       ? '<div class="form-grid">' +
         options.map((field) => optionHTML(scheme, field)).join("") +
-        '</div><div class="btn-row"><button class="primary" data-apply>Apply</button>' +
+        '</div><div class="btn-row"><button class="primary" data-apply data-i18n="console.apply">Apply</button>' +
         '<span class="msg" id="opt-msg-' + esc(scheme) + '"></span></div>'
-      : '<p class="hint">This medium declares no setting.</p>') +
+      : '<p class="hint" data-i18n="console.this_medium_declares_no_setting">This medium declares no setting.</p>') +
     "</div></div></details>";
 }
 
@@ -3605,7 +3605,7 @@ async function applyTransport(scheme, button){
     await loadTransportOptions();
     setMessage("opt-msg-" + scheme,
       data.persisted ? "Applied and saved." : (data.note || "Applied."));
-    toast(scheme + " settings applied", "ok");
+    toast(t("console.settings_applied", {scheme}), "ok");
   });
 }
 
@@ -3714,7 +3714,7 @@ function openPermissions(appId){
 function paintPermDialog(){
   const view = permView(PERM.open);
   if(!view){ $("perm-dialog").close(); return; }
-  $("perm-title").textContent = (view.title || view.name || "App") + " — permissions";
+  $("perm-title").textContent = t("console.permissions_2", {name: (view.title || view.name || "App")});
   $("perm-intro").textContent = (view.description ? view.description + " " : "") +
     "Only what this app asked for is listed. Ordinary permissions are what every app has " +
     "and are on unless you turn them off; everything else is off until you turn it on.";
@@ -3761,14 +3761,13 @@ $("perm-body").addEventListener("change", async (event) => {
       box.checked = !granted;
       setMessage("perm-msg", error || "refused", true);
     }
-  }catch(_){ box.checked = !granted; setMessage("perm-msg", "refused", true); }
+  }catch(_){ box.checked = !granted; setMessage("perm-msg", t("console.refused"), true); }
   finally{ box.disabled = false; paintPermDialog(); paintAttached(); }
 });
 $("perm-token").addEventListener("click", async (event) => withBusy(event.target, async () => {
   const {ok, error, data} = await CHANNEL.ask("apps.token", {app:PERM.open});
   if(!ok){ setMessage("perm-msg", error || "refused", true); return; }
-  setMessage("perm-msg", "This app connects to " + data.host + ":" + data.port +
-    " with the token below. It proves the app is this app — keep it out of anything shared.");
+  setMessage("perm-msg", t("console.this_app_connects_to_with_the_token", {host: data.host, port: data.port}));
   await copyText(data.token);
 }));
 $("perm-forget").addEventListener("click", async () => {
@@ -3826,7 +3825,7 @@ function paintApi(){
     if(row.reach === "local") flags.push(badge("this machine only"));
     if(row.modded_by) flags.push(badge("modded by " + row.modded_by, "danger"));
     const need = row.permission === null ? badge("no app", "") :
-      (row.permission === "" ? '<span class="muted small">any app</span>'
+      (row.permission === "" ? '<span class="muted small" data-i18n="console.any_app">any app</span>'
                              : '<code class="inline">' + esc(row.permission) + "</code>");
     return "<tr><td><code class=\"inline\">" + esc(row.op) + "</code><div class=\"tiny\">" +
       flags.join(" ") + "</div></td><td>" + esc(row.summary) + "</td><td>" + need +
@@ -3921,7 +3920,7 @@ $("builtin-apps").addEventListener("click", async (event) => {
         // back disagreeing with the first.
         if(data.apps && STATE) STATE.apps = data.apps;
       }else toast(error || (action + " failed"), "danger");
-    }catch(_){ toast(action + " failed", "danger"); }
+    }catch(_){ toast(t("console.failed", {action}), "danger"); }
     finally{ if(STATE) paintApps(STATE); }
   });
 });
@@ -3973,7 +3972,7 @@ mountPackageSearch({input:"app-search", results:"app-results", wide:"app-wide"})
     const action = button.dataset.appAction, appId = button.dataset.appId;
     if(action === "uninstall"){
       const agreed = await confirmAction({title:"Delete this app from this node?",
-        body:'<p class="muted small">Nothing on the mesh changes — it can be found and installed again.</p>',
+        body:'<p class="muted small" data-i18n="console.nothing_on_the_mesh_changes_it_can">Nothing on the mesh changes — it can be found and installed again.</p>',
         confirmLabel:"Delete", danger:true});
       if(!agreed) return;
     }
@@ -3983,7 +3982,7 @@ mountPackageSearch({input:"app-search", results:"app-results", wide:"app-wide"})
         toast(ok
           ? (action === "uninstall" ? "Local app deleted" : action + " complete")
           : (error || action + " failed"), ok ? "" : "danger");
-      }catch(_){ toast(action + " failed", "danger"); }
+      }catch(_){ toast(t("console.failed", {action}), "danger"); }
       finally{ await refreshApps(); }
     });
   }));
@@ -4004,18 +4003,18 @@ $("store-publish-btn").addEventListener("click", (event) => withBusy(event.targe
   const version = $("store-version").value.trim() || "1.0.0";
   const input = $("store-files");
   if(!name || !input.files.length){
-    setMessage("store-status", "A name and at least one file are required.", true); return;
+    setMessage("store-status", t("console.a_name_and_at_least_one_file_are"), true); return;
   }
-  setMessage("store-status", "Reading files…");
+  setMessage("store-status", t("console.reading_files"));
   try{
     const files = await selectedFiles(input);
     await CHANNEL.upload("release", {name, version, notes:$("store-notes").value},
                          files, (sent, all) => setMessage("store-status",
       all ? "Sending… " + Math.round(sent * 100 / all) + "%" : "Signing…"));
     setMessage("store-status",
-      "Published and filed under its name — anybody can now find it by typing it.");
+      t("console.published_and_filed_under_its_name"));
     input.value = "";
-    toast("Published " + name + " " + version);
+    toast(t("console.published", {name, version}));
   }catch(error){
     if(isStale(error)) return;
     setMessage("store-status",
@@ -4029,7 +4028,7 @@ let UPDATE_BRANCH = "";                   // the branch it came from, if any
 async function checkForUpdates(event){
   await withBusy(event.target, async () => {
     const status = $("update-status"), notes = $("update-notes");
-    status.textContent = "Asking GitHub…";
+    status.textContent = t("console.asking_github");
     $("update-apply").hidden = true; notes.hidden = true; UPDATE_OFFER = null;
     try{
       const {ok, error, data} = await CHANNEL.ask("releases.check");
@@ -4043,23 +4042,20 @@ async function checkForUpdates(event){
       UPDATE_BRANCH = data.source === "branch" ? (data.branch || "") : "";
       const where = UPDATE_BRANCH ? " on branch " + UPDATE_BRANCH : "";
       if(!data.available){
-        status.textContent = "Up to date — running " + data.current + ", latest is " +
-          data.latest + where + ".";
+        status.textContent = t("console.up_to_date_running_latest_is", {current: data.current, latest: data.latest, where});
         return;
       }
       if(!data.can_apply){
-        status.textContent = data.latest + " is available" + where +
-          ", but this install cannot update itself: " + data.blocked;
+        status.textContent = t("console.is_available_but_this_install_cannot", {latest: data.latest, where, blocked: data.blocked});
         return;
       }
       UPDATE_OFFER = data.latest;
-      status.textContent = data.latest + " is available" + where +
-        " (you run " + data.current + ").";
+      status.textContent = t("console.is_available_you_run", {latest: data.latest, where, current: data.current});
       if(data.notes){ notes.textContent = data.notes; notes.hidden = false; }
       const apply = $("update-apply");
-      apply.textContent = "Install " + data.latest;
+      apply.textContent = t("console.install_2", {latest: data.latest});
       apply.hidden = false;
-    }catch(_){ status.textContent = "Could not check for updates."; }
+    }catch(_){ status.textContent = t("console.could_not_check_for_updates"); }
   });
 }
 async function applyUpdate(event){
@@ -4077,7 +4073,7 @@ async function applyUpdate(event){
   if(!agreed) return;
   await withBusy(event.target, async () => {
     const status = $("update-status");
-    status.textContent = "Downloading and installing " + UPDATE_OFFER + "…";
+    status.textContent = t("console.downloading_and_installing", {update_offer: UPDATE_OFFER});
     try{
       const {ok, error, data} = await CHANNEL.ask(
         "releases.apply", {version:UPDATE_OFFER, confirm:true});
@@ -4090,7 +4086,7 @@ async function applyUpdate(event){
           data.backup + ").";
       $("update-apply").hidden = true;
       UPDATE_OFFER = null;
-    }catch(_){ status.textContent = "Update failed."; }
+    }catch(_){ status.textContent = t("console.update_failed"); }
   });
 }
 $("update-check").addEventListener("click", checkForUpdates);
@@ -4121,9 +4117,9 @@ function watchRowHTML(row){
     // watches a package, so there is no one publisher to name in the row, only
     // whoever has signed the version it currently sees.
     "<td>" + esc(row.agreeing + " of " + row.quorum) +
-    (enough ? "" : ' <span class="badge warn">holding</span>') + "</td>" +
-    "<td>" + (row.auto ? '<span class="badge ok">yes</span>'
-                       : '<span class="muted small">no</span>') + "</td>" +
+    (enough ? "" : ' <span class="badge warn" data-i18n="console.holding">holding</span>') + "</td>" +
+    "<td>" + (row.auto ? '<span class="badge ok" data-i18n="console.yes">yes</span>'
+                       : '<span class="muted small" data-i18n="console.no">no</span>') + "</td>" +
     // Open takes the **record** id, Stop the **subscription** id, and both are
     // forty hex characters with nothing about them saying which. Opening
     // `row.id` asked /package for a subscription and got "package not found"
@@ -4136,14 +4132,14 @@ function watchRowHTML(row){
     '">Stop</button></td></tr>';
 }
 function publisherRowHTML(entry){
-  return '<tr><td>' + (entry.name ? esc(entry.name) : '<span class="muted">unnamed</span>') +
+  return '<tr><td>' + (entry.name ? esc(entry.name) : '<span class="muted" data-i18n="console.unnamed">unnamed</span>') +
     "</td><td><code>" + esc(shortId(entry.id)) + "</code></td>" +
     // What this key is accepted for, which the record it was pinned from
     // decided. A row with no such answer would be a list of keys whose
     // strongest permission is the one nothing on screen mentions.
     "<td>" + (entry.code
       ? badge("this node's code", "warn")
-      : '<span class="muted small">apps signed by it</span>') + "</td><td>" +
+      : '<span class="muted small" data-i18n="console.apps_signed_by_it">apps signed by it</span>') + "</td><td>" +
     // No box where there is nothing for it to allow: a scheduled restart is a
     // statement about node software, and a key that may not carry any has no
     // automatic install to turn on. A ticked box the node would refuse is
@@ -4151,11 +4147,11 @@ function publisherRowHTML(entry){
     (entry.code
       ? '<label class="check"><input type="checkbox" data-auto="' + esc(entry.id) + '"' +
         (entry.auto ? " checked" : "") +
-        '><span class="sr-only">Install automatically</span></label>'
-      : '<span class="muted small">does not apply</span>') +
+        '><span class="sr-only" data-i18n="console.install_automatically">Install automatically</span></label>'
+      : '<span class="muted small" data-i18n="console.does_not_apply">does not apply</span>') +
     '</td><td><label class="check"><input type="checkbox" data-endorse="' + esc(entry.id) + '"' +
     (entry.endorsed ? " checked" : "") +
-    '><span class="sr-only">Counts towards a quorum</span></label>' +
+    '><span class="sr-only" data-i18n="console.counts_towards_a_quorum">Counts towards a quorum</span></label>' +
     '</td><td><button class="sm danger" data-unpin="' + esc(entry.id) + '">Unpin</button></td></tr>';
 }
 // ---- publisher keys, and handing one over ----------------------------------
@@ -4166,12 +4162,12 @@ let KEYS = {keys:[], incoming:[], outgoing:[]};
 
 function keyRowHTML(row){
   return "<tr><td>" + (row.label ? esc(row.label)
-      : '<span class="muted">unnamed</span>') +
+      : '<span class="muted" data-i18n="console.unnamed">unnamed</span>') +
     '</td><td><code>' + esc(shortId(row.id)) + "</code></td><td>" +
     (row.received_from
       ? '<span class="tiny">handed over by <code>' +
         esc(shortId(row.received_from)) + "</code></span>"
-      : '<span class="tiny muted">made here</span>') +
+      : '<span class="tiny muted" data-i18n="console.made_here">made here</span>') +
     '</td><td class="tight"><button class="sm danger" data-key-forget="' +
     esc(row.id) + '">Forget</button></td></tr>';
 }
@@ -4181,7 +4177,7 @@ function keyRowHTML(row){
 function offerInHTML(row){
   return '<article class="card"><div class="card-body stack">' +
     "<p><strong>A node offers this one a publisher key.</strong></p>" +
-    '<dl class="kv"><dt>Key</dt><dd><code class="inline">' + esc(row.key_id) +
+    '<dl class="kv"><dt data-i18n="console.key">Key</dt><dd><code class="inline">' + esc(row.key_id) +
     "</code></dd><dt>Offered by</dt><dd><code class=\"inline\">" +
     esc(row.from) + "</code></dd>" +
     (row.label ? "<dt>They call it</dt><dd>" + esc(row.label) + "</dd>" : "") +
@@ -4189,9 +4185,9 @@ function offerInHTML(row){
     '<p class="muted small">Accepting means this node can publish under that key, and every ' +
     "node that pinned it will accept what this one signs. Check the id against what they told " +
     "you over a channel you trust — an offer arriving is not evidence of who sent it.</p>" +
-    '<label class="field"><span>A passphrase to keep it under</span>' +
+    '<label class="field"><span data-i18n="console.a_passphrase_to_keep_it_under">A passphrase to keep it under</span>' +
     '<input type="password" data-key-pass="' + esc(row.offer_id) + '" autocomplete="new-password">' +
-    '<span class="hint">Yours, chosen here. Never theirs.</span></label>' +
+    '<span class="hint" data-i18n="console.yours_chosen_here_never_theirs">Yours, chosen here. Never theirs.</span></label>' +
     '<div class="btn-row"><button class="primary" data-key-accept="' + esc(row.offer_id) +
     '">Accept the key</button><button class="danger" data-key-refuse="' +
     esc(row.offer_id) + '">Refuse</button></div></div></article>';
@@ -4217,7 +4213,7 @@ async function refreshKeys(){
     setMessage("key-status", "");
   }catch(error){
     if(isStale(error)) return;
-    setMessage("key-status", "Could not read the keys held here.", true);
+    setMessage("key-status", t("console.could_not_read_the_keys_held_here"), true);
   }
 }
 
@@ -4231,7 +4227,7 @@ function paintKeyPickers(){
   if(share && share.dataset.built !== options){
     const held = share.value;
     share.innerHTML = options ||
-      '<option value="">no publisher key on this node</option>';
+      '<option value="" data-i18n="console.no_publisher_key_on_this_node">no publisher key on this node</option>';
     share.dataset.built = options;
     if(held) share.value = held;
   }
@@ -4252,7 +4248,7 @@ $("publish-signer").addEventListener("change", () => {
 
 $("key-create").addEventListener("click", (event) => withBusy(event.target, async () => {
   const passphrase = $("key-pass").value;
-  if(!passphrase){ setMessage("key-status", "Choose a passphrase first", true); return; }
+  if(!passphrase){ setMessage("key-status", t("console.choose_a_passphrase_first"), true); return; }
   const agreed = await confirmAction({
     title:"Make a publisher key?",
     confirmLabel:"Make it",
@@ -4267,22 +4263,22 @@ $("key-create").addEventListener("click", (event) => withBusy(event.target, asyn
       ? "Made " + shortId(data.key.id) + ". Pin it on the nodes that should accept its releases."
       : (error || "Could not make a key"), !ok);
     if(ok){ $("key-pass").value = ""; $("key-label").value = ""; }
-  }catch(_){ setMessage("key-status", "The node did not answer.", true); }
+  }catch(_){ setMessage("key-status", t("console.the_node_did_not_answer"), true); }
   await refreshKeys();
 }));
 
 $("key-import").addEventListener("click", (event) => withBusy(event.target, async () => {
   const path = $("key-path").value.trim();
   const passphrase = $("key-pass").value;
-  if(!path){ setMessage("key-status", "Give the path to the key file", true); return; }
-  if(!passphrase){ setMessage("key-status", "Type its passphrase in the field above", true); return; }
+  if(!path){ setMessage("key-status", t("console.give_the_path_to_the_key_file"), true); return; }
+  if(!passphrase){ setMessage("key-status", t("console.type_its_passphrase_in_the_field"), true); return; }
   try{
     const {ok, error, data} = await CHANNEL.ask("keys.adopt",
       {path, passphrase, label:$("key-label").value});
     setMessage("key-status", ok ? "Took in " + shortId(data.key.id) + "."
       : (error || "Could not read that key"), !ok);
     if(ok){ $("key-pass").value = ""; $("key-label").value = ""; $("key-path").value = ""; }
-  }catch(_){ setMessage("key-status", "The node did not answer.", true); }
+  }catch(_){ setMessage("key-status", t("console.the_node_did_not_answer"), true); }
   await refreshKeys();
 }));
 
@@ -4306,9 +4302,9 @@ $("key-rows").addEventListener("click", async (event) => {
 $("share-go").addEventListener("click", (event) => withBusy(event.target, async () => {
   const key_id = $("share-key").value, node = $("share-node").value.trim();
   const passphrase = $("share-pass").value;
-  if(!key_id){ setMessage("share-status", "There is no key to share", true); return; }
-  if(!node){ setMessage("share-status", "Name the node that receives it", true); return; }
-  if(!passphrase){ setMessage("share-status", "Type the key's passphrase", true); return; }
+  if(!key_id){ setMessage("share-status", t("console.there_is_no_key_to_share"), true); return; }
+  if(!node){ setMessage("share-status", t("console.name_the_node_that_receives_it"), true); return; }
+  if(!passphrase){ setMessage("share-status", t("console.type_the_key_s_passphrase"), true); return; }
   const agreed = await confirmAction({
     title:"Hand this key to " + shortId(node) + "?", danger:true,
     confirmLabel:"Offer the key",
@@ -4316,7 +4312,7 @@ $("share-go").addEventListener("click", (event) => withBusy(event.target, async 
       "that pinned it will accept what they sign. You cannot take it back: a key you have " +
       "shared is a key two machines hold, and un-sharing it means making a new one and asking " +
       "everybody to pin that instead.</p>" +
-      '<div class="kv"><div>Receiving node</div><div><code class="inline">' + esc(node) +
+      '<div class="kv"><div data-i18n="console.receiving_node">Receiving node</div><div><code class="inline">' + esc(node) +
       "</code></div></div>" +
       '<p class="muted small">Nothing is sent until they accept. Until then this node holds the ' +
       "key unlocked, and forgets it when they answer or when the offer expires.</p>"});
@@ -4329,7 +4325,7 @@ $("share-go").addEventListener("click", (event) => withBusy(event.target, async 
       ? "Offered. It travels only once they accept."
       : (error || "Could not offer that key"), !ok);
     if(ok) $("share-pass").value = "";
-  }catch(_){ setMessage("share-status", "The node did not answer.", true); }
+  }catch(_){ setMessage("share-status", t("console.the_node_did_not_answer"), true); }
   await refreshKeys();
 }));
 
@@ -4337,7 +4333,7 @@ $("key-offers-in").addEventListener("click", async (event) => {
   const refuse = event.target.closest("[data-key-refuse]");
   if(refuse){
     await CHANNEL.ask("keys.refuse", {offer:refuse.dataset.keyRefuse});
-    toast("Offer refused");
+    toast(t("console.offer_refused"));
     await refreshKeys();
     return;
   }
@@ -4346,7 +4342,7 @@ $("key-offers-in").addEventListener("click", async (event) => {
   const offer_id = accept.dataset.keyAccept;
   const field = document.querySelector('[data-key-pass="' + offer_id + '"]');
   const passphrase = field ? field.value : "";
-  if(!passphrase){ toast("Choose a passphrase to keep it under", "danger"); return; }
+  if(!passphrase){ toast(t("console.choose_a_passphrase_to_keep_it_under"), "danger"); return; }
   const agreed = await confirmAction({
     title:"Accept this publisher key?", danger:true, confirmLabel:"Accept it",
     body:'<p class="muted small">This node will be able to publish releases under that key. ' +
@@ -4485,7 +4481,7 @@ async function refreshReleases(){
     // field this function already defends against, arriving by another road.
     if(isStale(error)) return;
     setMessage("update-standing",
-               "Could not read what this node can update to.", true);
+               t("console.could_not_read_what_this_node_can"), true);
   }
 }
 mountPackageSearch({input:"pkg-search", results:"pkg-results", wide:"pkg-wide"});
@@ -4548,8 +4544,7 @@ $("publish-go").addEventListener("click", (event) => withBusy(event.target, asyn
   // A tree is ~120 chunks onto the DHT: on a busy mesh this is not instant.
   // Whatever happens it must end in a message — a status left mid-sentence is
   // indistinguishable from a node that died.
-  setMessage("publish-status", "Reading, hashing and signing — this can take a "
-    + "moment on a busy mesh…");
+  setMessage("publish-status", t("console.reading_hashing_and_signing_this_can", {}));
   try{
     const {ok, error, data} = await CHANNEL.ask("releases.publish",
       {notes:$("publish-notes").value,
@@ -4561,8 +4556,7 @@ $("publish-go").addEventListener("click", (event) => withBusy(event.target, asyn
       : (error || "Publish failed"), !ok);
     if(ok){ $("publish-pass").value = ""; await refreshReleases(); }
   }catch(_){
-    setMessage("publish-status", "Publishing did not finish — the node may still "
-      + "be working. Check Settings → Updates again in a minute.", true);
+    setMessage("publish-status", t("console.publishing_did_not_finish_the_node", {}), true);
   }
 }));
 
@@ -4582,19 +4576,19 @@ function paintConfig(data){
   CONFIG_FIELDS = [];
   paintPower(data);
   if(!data || !data.available){
-    pill.textContent = "unavailable"; pill.className = "badge";
+    pill.textContent = t("console.unavailable"); pill.className = "badge";
     $("config-path").textContent = (data && data.reason) || "No configuration file for this node.";
     $("config-save").disabled = true; $("config-reload").disabled = true;
     return;
   }
   const settings = data.settings || [];
   const live = settings.filter((setting) => setting.live).length;
-  pill.textContent = live + " apply now · " + (settings.length - live) + " at restart";
+  pill.textContent = t("console.apply_now_at_restart", {live, live2: (settings.length - live)});
   pill.className = "badge";
   $("config-path").textContent = data.path;
   $("config-save").disabled = false; $("config-reload").disabled = false;
   if(data.problems && data.problems.length){
-    problems.textContent = "Problems in the file: " + data.problems.join(" · ");
+    problems.textContent = t("console.problems_in_the_file", {problems: data.problems.join(" · ")});
     problems.hidden = false;
   }else problems.hidden = true;
   const profiled = new Set(Object.keys(((data.profiles || [])[0] || {}).values || {}));
@@ -4609,7 +4603,7 @@ function paintConfig(data){
     // The bar above moves these; a hand edit here makes the node "custom".
     if(profiled.has(setting.name)){
       const mark = document.createElement("span");
-      mark.className = "badge"; mark.textContent = "energy bar";
+      mark.className = "badge"; mark.textContent = t("console.energy_bar");
       title.append(" ", mark);
     }
     label.appendChild(title);
@@ -4665,7 +4659,7 @@ async function loadConfig(){
   try{ paintConfig(await CHANNEL.call("config.get")); }
   catch(error){
     if(isStale(error)) return;
-    setMessage("config-status", "Could not read the configuration.", true);
+    setMessage("config-status", t("console.could_not_read_the_configuration"), true);
   }
 }
 const settingLabel = (name) => name.replace(/_/g, " ");
@@ -4690,7 +4684,7 @@ $("config-save").addEventListener("click", (event) => withBusy(event.target, asy
     if(!input) continue;
     settings[setting.name] = setting.kind === "bool" ? input.checked : input.value;
   }
-  setMessage("config-status", "Saving…");
+  setMessage("config-status", t("console.saving"));
   try{
     const {ok, error, detail, data} = await CHANNEL.ask("config.save", {settings});
     if(!ok){
@@ -4701,9 +4695,9 @@ $("config-save").addEventListener("click", (event) => withBusy(event.target, asy
       return;
     }
     setMessage("config-status", savedSentence(data), (data.problems || []).length > 0);
-    toast("Configuration saved");
+    toast(t("config.saved"));
     await loadConfig();
-  }catch(_){ setMessage("config-status", "Save failed", true); }
+  }catch(_){ setMessage("config-status", t("console.save_failed"), true); }
 }));
 $("config-reload").addEventListener("click", loadConfig);
 
@@ -4755,8 +4749,7 @@ function paintPower(data){
   pill.className = "badge" + (custom ? " warn" : (POWER.step ? " accent" : ""));
   paintPowerStep(POWER.step || 6);
   if(!data.available)
-    setMessage("power-status", "This node has no configuration file: a step applies " +
-      "now and is forgotten when it restarts.");
+    setMessage("power-status", t("console.this_node_has_no_configuration_file", {}));
 }
 $("power-step").addEventListener("input", (event) =>
   paintPowerStep(parseInt(event.target.value, 10)));
@@ -4765,7 +4758,7 @@ $("power-step").addEventListener("change", async (event) => {
   if(step === POWER.step) return;
   const input = event.target;
   input.disabled = true;
-  setMessage("power-status", "Applying…");
+  setMessage("power-status", t("console.applying"));
   try{
     const {ok, error, data} = await CHANNEL.ask("config.profile", {step});
     if(!ok){ setMessage("power-status", error || "That step could not be applied", true); return; }
@@ -4777,7 +4770,7 @@ $("power-step").addEventListener("change", async (event) => {
       (data.problems || []).length > 0);
     await loadConfig();
   }catch(error){
-    if(!isStale(error)) setMessage("power-status", "That step could not be applied", true);
+    if(!isStale(error)) setMessage("power-status", t("console.that_step_could_not_be_applied"), true);
   }finally{ input.disabled = false; }
 });
 // Manual is the only mode that does anything yet; Adaptive is shown so the
@@ -4830,7 +4823,7 @@ function ticketRoutes(data){
 }
 
 $("tk-make").addEventListener("click", (event) => withBusy(event.target, async () => {
-  setMessage("tk-status", "Creating…");
+  setMessage("tk-status", t("console.creating"));
   $("tk-qr").innerHTML = ""; $("tk-out").hidden = true; $("tk-routes").textContent = "";
   const issuer = $("inv-from").value;
   try{
@@ -4860,10 +4853,9 @@ $("tk-make").addEventListener("click", (event) => withBusy(event.target, async (
          ? "A code for " + (data.uris || []).join(", ") + "."
          : "A code. That node had no address to put beside it.");
     const minutes = Math.round((data.ttl || 0) / 60);
-    setMessage("tk-status", "Valid for " +
-      (minutes >= 60 ? (minutes / 60) + " hour(s)" : minutes + " minute(s)") +
-      ". Single use — treat it like a password.");
-  }catch(_){ setMessage("tk-status", "Could not create an invitation", true); }
+    setMessage("tk-status", t("console.valid_for_single_use", {
+      duration: minutes >= 60 ? plural(minutes / 60, "hour") : plural(minutes, "minute")}));
+  }catch(_){ setMessage("tk-status", t("console.could_not_create_an_invitation"), true); }
 }));
 $("tk-copy").addEventListener("click", () => copyText($("tk-text").textContent));
 // A join fails in a handful of ways and every one of them used to reach the
@@ -4898,8 +4890,8 @@ function looksLikeTicket(text){
 }
 $("tk-join").addEventListener("click", (event) => withBusy(event.target, async () => {
   const text = $("tk-in").value.trim();
-  if(!text){ setMessage("tk-scan-status", "Paste or scan an invitation first.", true); return; }
-  setMessage("tk-scan-status", "Joining — the handshake is post-quantum, give it a moment…");
+  if(!text){ setMessage("tk-scan-status", t("console.paste_or_scan_an_invitation_first"), true); return; }
+  setMessage("tk-scan-status", t("console.joining_the_handshake_is_post"));
   try{
     const answer = looksLikeTicket(text)
       ? await CHANNEL.ask("join.network", {ticket:text})
@@ -4914,13 +4906,13 @@ $("tk-join").addEventListener("click", (event) => withBusy(event.target, async (
     }
     $("tk-in").value = "";
     setMessage("tk-scan-status", data.through === "relay"
-      ? "Joined through a relay."
-      : "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
-    toast("Joined the network");
+      ? t("console.joined_through_a_relay")
+      : data.node ? t("console.joined_node", {node: shortId(data.node)})
+      : t("console.joined_the_network"));
+    toast(t("console.joined_the_network"));
     tick(false);
   }catch(_){ setMessage("tk-scan-status",
-    "The console stopped answering while joining. Check Network → Peers before "
-    + "trying again — the join may have gone through.", true); }
+    t("console.the_console_stopped_answering_while", {}), true); }
 }));
 async function joinThroughRelay(block){
   try{
@@ -4928,7 +4920,7 @@ async function joinThroughRelay(block){
     if(!ok) return false;
     $("tk-in").value = "";
     setMessage("tk-scan-status",
-      "Looking for a relay that can reach them — watch Network → Peers.");
+      t("console.looking_for_a_relay_that_can_reach"));
     return true;
   }catch(_){ return false; }
 }
@@ -4940,13 +4932,13 @@ let SCAN_STOP = null;
 async function startScan(){
   const video = $("tk-video"), status = "tk-scan-status";
   if(!("BarcodeDetector" in window)){
-    setMessage(status, "This browser cannot scan QR codes. Paste the ticket instead.", true);
+    setMessage(status, t("console.this_browser_cannot_scan_qr_codes"), true);
     return;
   }
   let formats = [];
   try{ formats = await window.BarcodeDetector.getSupportedFormats(); }catch(_){}
   if(formats.length && !formats.includes("qr_code")){
-    setMessage(status, "This browser cannot scan QR codes. Paste the ticket instead.", true);
+    setMessage(status, t("console.this_browser_cannot_scan_qr_codes"), true);
     return;
   }
   let stream;
@@ -4954,15 +4946,14 @@ async function startScan(){
     stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
   }catch(_){
     // Denied, no camera, or a page not served over HTTPS/localhost.
-    setMessage(status, "No camera available. It needs your permission, and a secure page " +
-      "(HTTPS or localhost).", true);
+    setMessage(status, t("console.no_camera_available_it_needs_your", {}), true);
     return;
   }
   const detector = new window.BarcodeDetector({formats:["qr_code"]});
   video.srcObject = stream; video.hidden = false;
   $("tk-scan").hidden = true; $("tk-scan-stop").hidden = false;
   await video.play().catch(() => {});
-  setMessage(status, "Point the camera at the ticket's QR code.");
+  setMessage(status, t("console.point_the_camera_at_the_ticket_s_qr"));
   let running = true;
   const timer = setInterval(async () => {
     if(!running) return;
@@ -4970,7 +4961,7 @@ async function startScan(){
       const found = await detector.detect(video);
       if(found && found.length){
         $("tk-in").value = found[0].rawValue || "";
-        setMessage(status, "Ticket scanned — check it, then press Join.");
+        setMessage(status, t("console.ticket_scanned_check_it_then_press"));
         stopScan();
       }
     }catch(_){ /* a frame that could not be read is not an error worth showing */ }
@@ -4991,20 +4982,20 @@ $("tk-scan-stop").addEventListener("click", stopScan);
 $("pw-save").addEventListener("click", (event) => withBusy(event.target, async () => {
   const current = $("pw-current").value, fresh = $("pw-new").value, repeat = $("pw-repeat").value;
   if(!current || !fresh){
-    setMessage("pw-status", "Both the current and the new password are needed.", true); return;
+    setMessage("pw-status", t("console.both_the_current_and_the_new"), true); return;
   }
   // Checked here as a courtesy; the node checks everything again for real.
-  if(fresh !== repeat){ setMessage("pw-status", "The two new passwords do not match.", true); return; }
-  setMessage("pw-status", "Changing…");
+  if(fresh !== repeat){ setMessage("pw-status", t("console.the_two_new_passwords_do_not_match"), true); return; }
+  setMessage("pw-status", t("console.changing"));
   try{
     const {ok, data} = await apiJson("/api/password", "POST", {current, new:fresh});
     if(!ok){ setMessage("pw-status", data.error || "Could not change the password", true); return; }
-    setMessage("pw-status", "Password changed." +
-      (data.sessions_revoked ? " " + data.sessions_revoked + " other session(s) signed out." : ""));
-    toast("Console password changed", "ok");
+    setMessage("pw-status", t("console.password_changed") +
+      (data.sessions_revoked ? " " + t("console.other_sessions_signed_out", {count: data.sessions_revoked}) : ""));
+    toast(t("console.console_password_changed"), "ok");
     // Never leave a password sitting in a form field.
     $("pw-current").value = ""; $("pw-new").value = ""; $("pw-repeat").value = "";
-  }catch(_){ setMessage("pw-status", "Could not change the password", true); }
+  }catch(_){ setMessage("pw-status", t("console.could_not_change_the_password"), true); }
 }));
 
 // ---- protocol trace --------------------------------------------------------
@@ -5047,7 +5038,7 @@ async function traceAction(action, extra){
     await loadTrace();
     if(action === "start" && !TRACE_POLL) TRACE_POLL = setInterval(loadTrace, 2000);
     if(action !== "start") stopTracePolling();
-  }catch(_){ setMessage("trace-status", "Trace command failed", true); }
+  }catch(_){ setMessage("trace-status", t("console.trace_command_failed"), true); }
 }
 $("trace-start").addEventListener("click", () =>
   traceAction("start", {seconds:Number($("trace-seconds").value) || 120}));
@@ -5063,7 +5054,7 @@ $("trace-export").addEventListener("click", (event) => withBusy(event.target, as
               new TextEncoder().encode(JSON.stringify(data, null, 1)),
               "application/json");
   }catch(error){
-    if(!isStale(error)) toast("The trace could not be read", "danger");
+    if(!isStale(error)) toast(t("console.the_trace_could_not_be_read"), "danger");
   }
 }));
 
@@ -5217,19 +5208,16 @@ const NLOG = {
     $("nlog-start").disabled = mine;
     $("nlog-stop").disabled = !mine;
     if(!status.running){
-      setMessage("nlog-state", "Not recording. Nothing is kept until somebody " +
-        "starts it — here, by starting a trace, or by following it from another console.");
+      setMessage("nlog-state", t("console.not_recording_nothing_is_kept_until", {}));
       return;
     }
     const who = holders.map((name) => NLOG_HOLDERS[name] || name);
     setMessage("nlog-state",
-      "Kept for " + who.join(", ") + ". " + plural(status.records || 0, "line") +
-      " held, " + fmtBytes(status.used_bytes || 0) + " of " + status.megabytes + " MB" +
-      (status.ratio ? " (" + status.ratio + "× compressed)" : "") +
-      (status.dropped ? "; " + plural(status.dropped, "older line") +
-        " pushed out to make room" : "") + "." +
-      (mine ? "" : " Stop is not yours to press here: it goes when " +
-        who.join(" and ") + " does."));
+      t("console.log_held", {who: who.join(", "), lines: plural(status.records || 0, "line"),
+                             used: fmtBytes(status.used_bytes || 0), size: status.megabytes}) +
+      (status.ratio ? " " + t("console.log_ratio", {ratio: status.ratio}) : "") +
+      (status.dropped ? "; " + t("console.log_dropped", {older: plural(status.dropped, "older line")}) : "") +
+      "." + (mine ? "" : " " + t("console.log_stop_not_yours", {who: who.join(" · ")})));
   },
 
   paintLive(trouble){
@@ -5338,7 +5326,7 @@ const NLOG = {
     const rows = [...$("nlog-view").querySelectorAll(".ll, .gap")].map((row) =>
       row.classList.contains("gap") ? "-- " + row.textContent
         : [...row.children].map((cell) => cell.textContent).join("  "));
-    if(!rows.length){ toast("Nothing to download yet", "warn"); return; }
+    if(!rows.length){ toast(t("console.nothing_to_download_yet"), "warn"); return; }
     saveBytes("nmesh-log.txt", new TextEncoder().encode(rows.join("\n") + "\n"),
               "text/plain");
   },
@@ -5361,7 +5349,7 @@ $("nlog-resize").addEventListener("click", (event) => NLOG.act("resize", event.t
   {megabytes: Math.max(1, Math.round(Number($("nlog-size").value) || 0))}));
 $("nlog-clear").addEventListener("click", async (event) => {
   if(!await confirmAction({title:"Clear this node's log?",
-      body:'<p class="muted small">What is kept is dropped; recording goes on.</p>',
+      body:'<p class="muted small" data-i18n="console.what_is_kept_is_dropped_recording">What is kept is dropped; recording goes on.</p>',
       confirmLabel:"Clear", danger:true})) return;
   NLOG.act("clear", event.target);
 });
@@ -5395,50 +5383,50 @@ $("cx-request").addEventListener("click", (event) => withBusy(event.target, asyn
     const {data} = await apiJson("/api/connect/request", "POST");
     $("cx-request-out").value = data.block;
     await copyText(data.block);
-    setMessage("connect-status", "Send this block to the other side.");
-  }catch(_){ setMessage("connect-status", "Could not create a request", true); }
+    setMessage("connect-status", t("console.send_this_block_to_the_other_side"));
+  }catch(_){ setMessage("connect-status", t("console.could_not_create_a_request"), true); }
 }));
 $("cx-accept").addEventListener("click", (event) => withBusy(event.target, async () => {
   const block = $("cx-accept-in").value.trim();
-  if(!block){ setMessage("connect-status", "Paste a request first.", true); return; }
+  if(!block){ setMessage("connect-status", t("console.paste_a_request_first"), true); return; }
   try{
     const {ok, data} = await apiJson("/api/connect/accept", "POST", {block});
     if(!ok){ setMessage("connect-status", data.error || "Accept failed", true); return; }
     $("cx-accept-out").value = data.block;
     await copyText(data.block);
-    setMessage("connect-status", "Send this invite block back.");
-  }catch(_){ setMessage("connect-status", "Accept failed", true); }
+    setMessage("connect-status", t("console.send_this_invite_block_back"));
+  }catch(_){ setMessage("connect-status", t("console.accept_failed"), true); }
 }));
 $("cx-complete").addEventListener("click", (event) => withBusy(event.target, async () => {
   const block = $("cx-reply-in").value.trim();
-  if(!block){ setMessage("connect-status", "Paste the reply first.", true); return; }
+  if(!block){ setMessage("connect-status", t("console.paste_the_reply_first"), true); return; }
   try{
     const {ok, data} = await apiJson("/api/connect/complete", "POST", {block});
     setMessage("connect-status", ok ? "Trying " + data.candidates + " candidate address(es)…"
       : (data.error || "Connect failed"), !ok);
-  }catch(_){ setMessage("connect-status", "Connect failed", true); }
+  }catch(_){ setMessage("connect-status", t("console.connect_failed"), true); }
 }));
 $("gen-invite").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{
     const data = await CHANNEL.call("join.invite");
     $("invite-out").textContent = data.code;
     await copyText(data.code);
-  }catch(_){ setMessage("invite-status", "Invite generation failed", true); }
+  }catch(_){ setMessage("invite-status", t("console.invite_generation_failed"), true); }
 }));
 $("show-cert").addEventListener("click", (event) => withBusy(event.target, async () => {
   try{ $("cert-out").value = (await CHANNEL.call("node.rootcert")).cert_hex; }
-  catch(_){ setMessage("invite-status", "Certificate unavailable", true); }
+  catch(_){ setMessage("invite-status", t("console.certificate_unavailable"), true); }
 }));
 $("trust-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const cert_hex = $("trust-in").value.trim();
-  if(!cert_hex){ setMessage("invite-status", "Paste a certificate.", true); return; }
+  if(!cert_hex){ setMessage("invite-status", t("console.paste_a_certificate"), true); return; }
   const {ok} = await CHANNEL.ask("trust.add", {cert:cert_hex});
   setMessage("invite-status", ok ? "Certificate trusted." : "Invalid certificate", !ok);
   if(ok) $("trust-in").value = "";
 }));
 $("revoke-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const node = $("revoke-node").value.trim().toLowerCase();
-  if(!node){ setMessage("manage-status", "A node id is required.", true); return; }
+  if(!node){ setMessage("manage-status", t("console.a_node_id_is_required"), true); return; }
   if(!await confirmAction({title:"Take back this membership?",
       body:'<p>Every node that hears this stops accepting that node’s chain, and the links it '
         + 'holds here end now. Only an invitation can let it back in.</p>'
@@ -5458,7 +5446,7 @@ function paintRoots(state){
   const host = $("roots-list");
   if(!host) return;
   if(!roots.length){
-    host.innerHTML = '<p class="muted small">None yet — this node trusts only itself.</p>';
+    host.innerHTML = '<p class="muted small" data-i18n="console.none_yet_this_node_trusts_only">None yet — this node trusts only itself.</p>';
     return;
   }
   host.innerHTML = roots.map((id) =>
@@ -5482,12 +5470,12 @@ document.addEventListener("click", (event) => {
 });
 $("join-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const uri = $("join-uri").value.trim(), code = $("join-code").value.trim();
-  if(!uri || !code){ setMessage("invite-status", "An address and an invite code are required.", true); return; }
+  if(!uri || !code){ setMessage("invite-status", t("console.an_address_and_an_invite_code_are"), true); return; }
   const answer = await CHANNEL.ask("join.network", {uri, code});
   const {ok, data} = answer;
   if(!ok){ setMessage("invite-status", joinFailure(answer), true); return; }
-  setMessage("invite-status",
-    "Joined " + (data.node ? shortId(data.node) : "the network") + ".");
+  setMessage("invite-status", data.node
+    ? t("console.joined_node", {node: shortId(data.node)}) : t("console.joined_the_network"));
   tick(false);
 }));
 
@@ -5497,16 +5485,16 @@ $("publish-btn").addEventListener("click", (event) => withBusy(event.target, asy
   const version = $("app-version").value.trim() || "1.0.0";
   const input = $("app-files");
   if(!name || !input.files.length){
-    setMessage("app-status", "A name and files are required.", true); return;
+    setMessage("app-status", t("console.a_name_and_files_are_required"), true); return;
   }
-  setMessage("app-status", "Reading files…");
+  setMessage("app-status", t("console.reading_files"));
   try{
     const files = await selectedFiles(input);
     const done = await CHANNEL.upload("app", {name, version}, files,
       (sent, all) => setMessage("app-status",
         all ? "Sending… " + Math.round(sent * 100 / all) + "%" : "Publishing…"));
     $("app-id-out").textContent = done.app_id || "";
-    setMessage("app-status", "Content published.");
+    setMessage("app-status", t("console.content_published"));
   }catch(error){
     if(isStale(error)) return;
     setMessage("app-status",
@@ -5515,8 +5503,8 @@ $("publish-btn").addEventListener("click", (event) => withBusy(event.target, asy
 }));
 $("fetch-btn").addEventListener("click", (event) => withBusy(event.target, async () => {
   const app_id = $("fetch-id").value.trim();
-  if(!app_id){ setMessage("app-status", "Enter a content id.", true); return; }
-  setMessage("app-status", "Fetching content…");
+  if(!app_id){ setMessage("app-status", t("console.enter_a_content_id"), true); return; }
+  setMessage("app-status", t("console.fetching_content"));
   try{
     const {ok, status, data} = await apiJson("/api/app/fetch", "POST", {app_id});
     if(!ok){
@@ -5526,8 +5514,8 @@ $("fetch-btn").addEventListener("click", (event) => withBusy(event.target, async
     $("app-files-out").innerHTML = Object.entries(data.files || {}).map(([path, b64]) =>
       '<a class="chip" download="' + esc(path) + '" href="data:application/octet-stream;base64,' +
       b64 + '">' + esc(path) + "</a>").join("");
-    setMessage("app-status", data.name + " " + data.version + " fetched.");
-  }catch(_){ setMessage("app-status", "Fetch failed", true); }
+    setMessage("app-status", t("console.fetched", {name: data.name, version: data.version}));
+  }catch(_){ setMessage("app-status", t("console.fetch_failed"), true); }
 }));
 
 // ---- managing another node -------------------------------------------------
@@ -5611,7 +5599,7 @@ function askForContext(node){
   if(target.connected){ CONTEXT.set(node, target.label, target.caps); return; }
   const name = target.label || shortId(node);
   const free = !!target.passwordless;
-  $("modal-title").textContent = "Manage " + name;
+  $("modal-title").textContent = t("console.manage", {name});
   $("modal-body").innerHTML =
     '<p class="muted small">' + (free
       ? "That node granted this one <b>manage</b> and <b>passwordless</b>: the grant " +
@@ -5625,13 +5613,13 @@ function askForContext(node){
     (free ? "" :
       '<label class="field"><span>Console password of ' + esc(name) + "</span>" +
       '<input id="ctx-pass" type="password" autocomplete="off"></label>') +
-    '<div class="btn-row"><button id="ctx-go" class="primary">Connect</button>' +
-    '<button id="ctx-no">Cancel</button></div><p id="ctx-msg" class="msg"></p>';
+    '<div class="btn-row"><button id="ctx-go" class="primary" data-i18n="console.connect">Connect</button>' +
+    '<button id="ctx-no" data-i18n="common.cancel">Cancel</button></div><p id="ctx-msg" class="msg"></p>';
   const finish = () => { $("modal").close(); $("ctx-node").value = CONTEXT.node; };
   $("ctx-go").addEventListener("click", (event) => withBusy(event.target, async () => {
     const password = free ? null : $("ctx-pass").value;
-    if(!free && !password){ setMessage("ctx-msg", "A password is needed.", true); return; }
-    setMessage("ctx-msg", "Connecting over the mesh…");
+    if(!free && !password){ setMessage("ctx-msg", t("console.a_password_is_needed"), true); return; }
+    setMessage("ctx-msg", t("console.connecting_over_the_mesh"));
     const {ok, data} = await apiJson("/api/remote/connect", "POST", {node, password});
     if(!free) $("ctx-pass").value = "";
     if(!ok || !data.ok){
@@ -5641,7 +5629,7 @@ function askForContext(node){
     }
     $("modal").close();
     CONTEXT.set(node, target.label, target.caps);
-    toast("Managing " + name, "warn");
+    toast(t("console.managing", {name}), "warn");
   }));
   $("ctx-no").addEventListener("click", finish);
   $("modal").addEventListener("close", () => { $("ctx-node").value = CONTEXT.node; },
@@ -5690,13 +5678,13 @@ function paintPrefs(){
 }
 $("pref-theme").addEventListener("change", (event) => {
   THEME.choose(event.target.value);
-  toast("Theme updated");
+  toast(t("console.theme_updated"));
 });
 $("pref-open").addEventListener("change", (event) => {
   OPEN.set(event.target.value);
-  toast("Links will open " + (event.target.value === "tab" ? "in a new tab"
-    : event.target.value === "window" ? "in a separate window"
-    : "to suit the screen"));
+  toast(t(event.target.value === "tab" ? "console.links_open_in_a_new_tab"
+    : event.target.value === "window" ? "console.links_open_in_a_separate_window"
+    : "console.links_open_to_suit_the_screen"));
 });
 // ---- restarting the node ---------------------------------------------------
 // A node comes back either because a supervisor starts it again or because it
@@ -5732,10 +5720,10 @@ async function restartNode(){
   if(!agreed) return;
   const {ok, error, data} = await CHANNEL.ask("node.restart", {confirm:true});
   if(!ok || !data.restarting){
-    toast("Not restarting", "danger", error || "The node refused.");
+    toast(t("console.not_restarting"), "danger", error || "The node refused.");
     return;
   }
-  toast("Restarting " + who, "warn", "It should be back in a few seconds.");
+  toast(t("console.restarting", {who}), "warn", "It should be back in a few seconds.");
   // The node we were driving is the one going away, so stop driving it.
   if(CONTEXT.node) CONTEXT.leave();
 }

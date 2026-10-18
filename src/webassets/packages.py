@@ -211,7 +211,7 @@ const PACKAGES = {
       ["Version", esc(row.version)],
       ["Signed by", row.signer_id
         ? '<code class="inline">' + esc(shortId(row.signer_id)) + "</code>"
-        : '<span class="muted">not stated here</span>'],
+        : '<span class="muted" data-i18n="pkg.not_stated_here">not stated here</span>'],
       ["Held by", '<code class="inline">' + esc(shortId(row.node_id)) + "</code>"],
       ["Said", esc(fmtAgo(Date.now() / 1000 - row.ts))],
       // Every publisher of this same code, forks under another name excluded.
@@ -227,7 +227,7 @@ const PACKAGES = {
         '<span class="grow"><div class="pkg-title">' + esc(row.name) + "</div>" +
         '<div class="pkg-sub">' + badges.join("") + "</div></span>" +
       "</div>" +
-      '<div><p class="eyebrow">What it says about itself</p>' +
+      '<div><p class="eyebrow" data-i18n="pkg.what_it_says_about_itself">What it says about itself</p>' +
         '<pre class="pkg-notes' + (row.notes ? "" : " empty") + '">' +
           esc(row.notes || "The publisher wrote no description.") + "</pre></div>" +
       '<div class="pkg-facts">' + facts.map(([k, v]) =>
@@ -289,9 +289,9 @@ const PACKAGES = {
       buttons.push('<button class="primary" data-pkg-act="install">' +
         "Install</button>");
     if(!core && row.published && !row.trusted)
-      buttons.push('<button data-pkg-act="trust">Pin the signing key</button>');
+      buttons.push('<button data-pkg-act="trust" data-i18n="pkg.pin_the_signing_key">Pin the signing key</button>');
     if(!opts.hideOpen)
-      buttons.push('<button data-pkg-act="page">Open on its own</button>');
+      buttons.push('<button data-pkg-act="page" data-i18n="pkg.open_on_its_own">Open on its own</button>');
     return '<div class="pkg-actions">' + buttons.join("") + "</div>";
   },
 
@@ -310,7 +310,7 @@ const PACKAGES = {
       '<label class="check"><input type="checkbox" data-pkg-act="auto"' +
         (sub && sub.auto ? " checked" : "") + (sub ? "" : " disabled") +
         "><span>Install them without asking</span></label>" +
-      '<label class="pkg-quorum"><span>Signing keys that must agree</span>' +
+      '<label class="pkg-quorum"><span data-i18n="pkg.signing_keys_that_must_agree">Signing keys that must agree</span>' +
         '<input type="number" min="1" max="8" data-pkg-act="quorum" value="' +
         esc(quorum) + '"' + (sub ? "" : " disabled") + "></label>" +
       (sub ? '<p class="small' + (enough ? " muted" : "") + '">Keys you chose ' +
@@ -381,7 +381,7 @@ const PACKAGES = {
   // quiet — the one thing a long download must never do.
   async download(row, button){
     await withBusy(button, async () => {
-      setMessage("pkg-status", "Fetching the package…");
+      setMessage("pkg-status", t("pkg.fetching_the_package"));
       try{
         const got = await CHANNEL.download("package", row.id, (have, all) => {
           setMessage("pkg-status", all
@@ -389,9 +389,9 @@ const PACKAGES = {
             : "Fetching…");
         });
         const file = (got.files || [])[0];
-        if(!file){ setMessage("pkg-status", "That package is empty.", true); return; }
+        if(!file){ setMessage("pkg-status", t("pkg.that_package_is_empty"), true); return; }
         saveBytes(got.meta.name || file.path, file.bytes);
-        setMessage("pkg-status", "Downloaded " + file.path + ".");
+        setMessage("pkg-status", t("pkg.downloaded", {path: file.path}));
       }catch(error){
         if(isStale(error)) return;
         setMessage("pkg-status",
@@ -413,7 +413,7 @@ const PACKAGES = {
       const sub = row.subscription || null;
       await this.op("packages.subscribe",
                     {record:sub ? sub.id : row.id, on:false});
-      toast("No longer watching " + row.name);
+      toast(t("pkg.no_longer_watching", {name: row.name}));
       await this.repaint(element);
       return;
     }
@@ -427,7 +427,7 @@ const PACKAGES = {
     const {ok, error} = await this.op("packages.subscribe",
                                       {record:row.id, on:true, auto, quorum});
     if(!ok){ setMessage("pkg-status", error || "Could not save", true); return; }
-    toast("Watching " + row.name);
+    toast(t("pkg.watching", {name: row.name}));
     await this.repaint(element);
   },
 
@@ -453,7 +453,7 @@ const PACKAGES = {
         "signature it made — so it is the key that signed what you are " +
         "looking at, and nothing else. It is the only thing pinned: not the " +
         "node that handed it over, not a name.</p>" +
-        '<div class="kv"><div>Signing key</div><div><code class="inline">' +
+        '<div class="kv"><div data-i18n="pkg.signing_key">Signing key</div><div><code class="inline">' +
         esc(row.signer_id || "") + "</code></div>" +
         "<div>Accepted for</div><div>" +
         esc(core ? "this node’s own code" : "apps signed by it") +
@@ -474,7 +474,7 @@ const PACKAGES = {
     const {ok, error} = await this.op("packages.trust",
                                       {record:row.id, confirm:true, auto});
     if(!ok){ setMessage("pkg-status", error || "Could not pin", true); return; }
-    toast("Pinned " + shortId(row.signer_id), "ok");
+    toast(t("pkg.pinned", {signer_id: shortId(row.signer_id)}), "ok");
     await this.repaint(element);
   },
 
@@ -499,7 +499,7 @@ const PACKAGES = {
           "own, a reason to worry or a reason not to.</p>"),
     });
     if(!agreed) return;
-    setMessage("pkg-status", "Fetching and verifying…");
+    setMessage("pkg-status", t("pkg.fetching_and_verifying"));
     const {ok, error, data} = await this.op("packages.install",
                                             {record:row.id, confirm:true});
     if(!ok){
@@ -509,7 +509,7 @@ const PACKAGES = {
     setMessage("pkg-status", data.restarting
       ? "Installed " + row.version + " — the node is restarting onto it."
       : "Installed " + row.version + ".");
-    toast("Installed " + row.name + " " + row.version, "ok");
+    toast(t("pkg.installed", {name: row.name, version: row.version}), "ok");
     await this.repaint(element);
   },
 };
@@ -559,7 +559,7 @@ PAGE_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f6f8fa" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0a0e13" media="(prefers-color-scheme: dark)">
-<title>NMesh package</title>
+<title data-i18n="pkg.nmesh_package">NMesh package</title>
 <script src="/theme.js"></script>
 <script src="/i18n.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -569,23 +569,23 @@ PAGE_HTML = """<!doctype html>
 
 <div id="login" class="gate hidden">
   <form id="login-form">
-    <div class="mark" aria-hidden="true">NM</div>
-    <div><p class="eyebrow">Package</p><h1>Sign in</h1></div>
-    <p class="muted small">This page reads the console of this node, so it needs
+    <div class="mark" aria-hidden="true" data-i18n="console.nm">NM</div>
+    <div><p class="eyebrow" data-i18n="pkg.package">Package</p><h1 data-i18n="fleet.sign_in">Sign in</h1></div>
+    <p class="muted small" data-i18n="node.this_page_reads_the_console_of_this">This page reads the console of this node, so it needs
       the console password.</p>
-    <label class="field"><span>Console password</span>
+    <label class="field"><span data-i18n="console.console_password">Console password</span>
       <input id="password" type="password" autocomplete="current-password" autofocus></label>
-    <button type="submit" class="primary wide">Enter</button>
+    <button type="submit" class="primary wide" data-i18n="fleet.enter">Enter</button>
     <p id="login-error" class="msg error" role="alert"></p>
   </form>
 </div>
 
 <main id="main" class="pkg-page hidden">"""  + ui.ctx_bar(leave=False) + """
   <header class="pkg-page-head">
-    <a class="brand" href="/"><span class="mark" aria-hidden="true">NM</span>
-      <span><b>NMesh</b><span>Package</span></span></a>
+    <a class="brand" href="/"><span class="mark" aria-hidden="true" data-i18n="console.nm">NM</span>
+      <span><b>NMesh</b><span data-i18n="pkg.package">Package</span></span></a>
     <span class="grow"></span>
-    <button id="theme-toggle" class="icon" aria-label="Switch theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
+    <button id="theme-toggle" class="icon" aria-label="Switch theme" data-i18n-attr="aria-label:console.switch_theme"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 0 1 9.2 3.5a8.6 8.6 0 1 0 11.3 11.3Z"/></svg></button>
   </header>
   <div id="view"></div>
 </main>
@@ -595,8 +595,8 @@ PAGE_HTML = """<!doctype html>
     <header class="sheet-head"><h2 id="confirm-title"></h2></header>
     <div class="sheet-body"><div id="confirm-body"></div></div>
     <footer class="sheet-foot">
-      <button id="confirm-cancel">Cancel</button>
-      <button id="confirm-ok" class="primary">Confirm</button>
+      <button id="confirm-cancel" data-i18n="common.cancel">Cancel</button>
+      <button id="confirm-ok" class="primary" data-i18n="console.confirm">Confirm</button>
     </footer>
   </div>
 </dialog>
@@ -668,7 +668,7 @@ async function boot(){
       }
       SESSION.set(data.token);
       enter();
-    }catch(_){ setMessage("login-error", "Console is not reachable", true); }
+    }catch(_){ setMessage("login-error", t("console.console_is_not_reachable"), true); }
   });
 
   SESSION.load();
