@@ -748,7 +748,7 @@ function paintNodes(){
     'Nothing runs until they do.</p><div class="btn-row"><button class="danger" data-revoke="' +
     esc(entry.id) + '">Cancel request</button></div></div></article>').join("");
   html += managed.map((node) => {
-    const caps = node.caps || [], can = (cap) => caps.includes(cap);
+    const caps = node.caps || [], can = (cap) => (node.allows || []).includes(cap);
     return '<article class="card node-card"><div class="card-head"><div class="grow">' +
       "<h2>" + esc(node.label || node.pseudo || shortId(node.id)) + '</h2><div class="sub mono truncate">' +
       esc(node.id) + "</div></div>" + badge("managed", "ok") + "</div>" +
@@ -864,14 +864,14 @@ function rightsDialog(id){
 // ---- pickers and activity --------------------------------------------------
 function paintPickers(){
   const managed = ST.managed || [];
-  fill($("shell-node"), managed.filter((node) => (node.caps || []).includes("shell"))
+  fill($("shell-node"), managed.filter((node) => (node.allows || []).includes("shell"))
        .map((node) => [node.id, node.label || node.pseudo || shortId(node.id)]));
   const dockerAble = dockerNodes();
   fill($("dk-node"), dockerAble.map(
     (node) => [node.id, node.label || node.pseudo || shortId(node.id)]));
   if(!DK.node && dockerAble.length){ DK.node = dockerAble[0].id; $("dk-node").value = DK.node; }
   fill($("scan-from"), [[ST.me, "This node (local LAN)"]].concat(
-    managed.filter((node) => (node.caps || []).includes("scan"))
+    managed.filter((node) => (node.allows || []).includes("scan"))
            .map((node) => [node.id, node.label || node.pseudo || shortId(node.id)])));
 }
 // Rewritten only when the options actually differ. This runs on every poll, and
@@ -913,7 +913,7 @@ function paintLog(){
 // rather than only in a settings page: the decision is about *this* machine,
 // and an operator reading its card is where they make it.
 function logsLine(node){
-  if(!(node.caps || []).includes("logs")) return "";
+  if(!(node.allows || []).includes("logs")) return "";
   const policy = (LOGS.policies || {})[node.id] || LOGS.defaults || {};
   const held = ((LOGS.status || {}).nodes || {})[node.id];
   const words = {always: "always collected",
@@ -1465,7 +1465,7 @@ const DK = {node:"", overview:null, stacks:null, containers:null, images:null,
             running:{}, results:{}, scope:"all", probe:null, error:"", loading:false};
 
 function dockerNodes(){
-  return (ST.managed || []).filter((node) => (node.caps || []).includes("docker"));
+  return (ST.managed || []).filter((node) => (node.allows || []).includes("docker"));
 }
 async function dockerCall(op, extra, node){
   const target = node || DK.node;

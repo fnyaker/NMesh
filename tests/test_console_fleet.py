@@ -1192,6 +1192,29 @@ class TestOperationTracking:
             await node.stop()
 
 
+class TestFullOnThePage:
+    """What a page is handed about a managed node: the ticked list to show, and
+    what it allows — `full` expanded — to decide which actions it offers."""
+
+    async def test_a_node_granting_full_allows_every_action_on_the_page(self):
+        from src.apps.fleet_state import CAPABILITIES
+        node, console, host, _ = await _make(enabled=True)
+        try:
+            bridge = host.bridge("fleet")
+            bridge._app.state.add_managed("cd" * 20, caps=["full"])
+            bridge._app.state.add_managed("ef" * 20, caps=["status"])
+            managed = {row["id"]: row for row in bridge.snapshot()["managed"]}
+            assert managed["cd" * 20]["caps"] == ["full"]
+            assert managed["cd" * 20]["allows"] == list(CAPABILITIES)
+            assert managed["ef" * 20]["allows"] == ["status"]
+            relation = bridge.api_relation("cd" * 20)
+            assert relation["caps"] == ["full"]
+            assert relation["allows"] == list(CAPABILITIES)
+            assert bridge.api_relation("ab" * 20)["allows"] == []
+        finally:
+            console.stop(); await host.stop_all(); await node.stop()
+
+
 class TestKeyUpload:
     """Importing a key from the console — the only way to give one to a node in
     a container, where `~/.ssh` does not exist."""

@@ -214,7 +214,10 @@ Both are read from **this node's** ledger at the door, like `govern`, and
 written as headers beside the replay marker (`APPS_HEADER`, `FULL_HEADER`); a
 call that names a further node without `full` is refused, never obeyed and
 never quietly run here. The ledger keeps what a human ticked: holding `full`
-shows as `full`, and narrowing to less is unticking it.
+shows as `full`, and narrowing to less is unticking it. What a page is handed
+about a managed node carries both: `caps`, the ticked list it shows and edits,
+and `allows`, that list with `full` expanded — the one a page asks before
+offering an action (the fleet snapshot's `managed` rows and `fleet.relation`).
 
 ### The relay reinvents nothing
 

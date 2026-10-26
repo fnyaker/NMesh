@@ -600,7 +600,7 @@ const NODEVIEW = {
     if(this.has("contacts", "add") && !this.saved(extras))
       items.push('<button class="item" data-nv-act="contact" data-menu-close>' +
                  icon("person") + "Add to contacts</button>");
-    if(fleet && fleet.managed && (fleet.caps || []).indexOf("invite") >= 0)
+    if(fleet && fleet.managed && (fleet.allows || []).indexOf("invite") >= 0)
       items.push('<button class="item" data-nv-act="invite" data-menu-close>' +
                  icon("send") + "Mint an invitation to its mesh</button>");
     items.push('<div class="sep"></div>');

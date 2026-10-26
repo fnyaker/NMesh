@@ -486,7 +486,11 @@ class FleetBridge:
             jobs = [dict(job) for job in self._jobs.values()]
         sections = {
             "me": self.me,
-            "managed": sorted((dict(entry, pseudo=self._name_of(entry["id"]))
+            # `caps` is what a human ticked, shown as such; `allows` is what
+            # it lets through, `full` expanded — what a page asks before
+            # offering an action.
+            "managed": sorted((dict(entry, pseudo=self._name_of(entry["id"]),
+                                    allows=effective_caps(entry.get("caps")))
                                for entry in state.managed()),
                               key=lambda entry: entry.get("label")
                               or entry.get("pseudo") or entry["id"]),
@@ -701,6 +705,7 @@ class FleetBridge:
             "node": node,
             "managed": bool(managed),
             "caps": list(managed.get("caps") or []),
+            "allows": effective_caps(managed.get("caps")) if managed else [],
             "label": managed.get("label", ""),
             "operator": operator is not None,
             "operator_caps": list((operator or {}).get("caps") or []),

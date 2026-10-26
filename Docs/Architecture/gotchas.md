@@ -2067,6 +2067,15 @@ human ticked.
 > Before giving a name a new meaning, grep every place that reads the name,
 > not only the function that is supposed to.
 
+The browser was one of those places, and the sweep above stopped at Python.
+The fleet snapshot and `fleet.relation` handed pages the ticked list, and every
+page decided its buttons with `caps.includes("shell")`: a node holding `full`
+showed its badge and offered nothing but Groups, Rights and Revoke — no shell,
+no docker, no logs, missing from the shell and scan pickers and from `/term`.
+The bridge now sends `allows` beside `caps`, filled by `effective_caps`, and a
+page gates on `allows` only (`test_no_page_gates_an_action_on_the_ticked_list`);
+`caps` stays what is shown and what the rights dialog edits.
+
 ## A SACK one bit off: the lost frame retired as delivered
 
 Seen on a live node: a UDP link with its reorder buffer full (256 of 256), its
