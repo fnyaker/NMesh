@@ -32,6 +32,7 @@ from src.node import (MeshNode, _Peer, SPEED_PROBE, SPEED_ECHO, _SPEED_CHUNK,
                       _SPEED_IDLE_PROBES, _SPEED_INFLIGHT, _SPEED_INFLIGHT_MAX,
                       _SPEED_MAX_BYTES,
                       _SPEED_MAX_SECONDS, _SPEED_MAX_PER_WINDOW,
+                      _SPEED_LOAD_SECONDS,
                       _SPEED_PROBE_TIMEOUT, _QID_LEN)
 from src.node_id import NodeID
 from src.packet import Packet
@@ -209,11 +210,12 @@ class TestTheAskingSideIsBoundedToo:
 
     def test_the_ceilings_are_ceilings_a_person_would_accept(self):
         """Written as a judgement about the product, not as a copy of the
-        constants: a test that spends eight megabytes of somebody's metered link
-        is a test nobody runs twice, and one that runs for a minute is one
-        nobody waits for."""
+        constants: one that runs for a minute is one nobody waits for, and the
+        byte ceiling is only ever reached by a link fast enough to carry it
+        within the load's few seconds — a slow link is spent by its own rate."""
         assert _SPEED_MAX_SECONDS <= 15.0
-        assert _SPEED_MAX_BYTES <= 16 * 1024 * 1024
+        assert _SPEED_LOAD_SECONDS <= _SPEED_MAX_SECONDS / 2
+        assert _SPEED_MAX_BYTES <= 256 * 1024 * 1024
         # And one chunk stays well inside what a packet carries, so a probe is
         # never a way to find the framing's edge.
         assert _SPEED_CHUNK < 60000 // 2
@@ -345,6 +347,65 @@ class TestTheMeasurementItself:
         per_test = _SPEED_IDLE_PROBES + _SPEED_MAX_BYTES // _SPEED_CHUNK
         assert per_test * 2 <= _SPEED_MAX_PER_WINDOW
         assert _SPEED_INFLIGHT_MAX * _SPEED_CHUNK <= 1024 * 1024
+
+
+class _Narrow(_Echoing):
+    """A link that carries ``rate`` probes a second and no more: each echo
+    leaves once the one before it has, as through a bottleneck."""
+
+    def __init__(self, node, *, rate):
+        super().__init__(node, delay=0.0)
+        self.gap, self.free_at = 1.0 / rate, 0.0
+
+    async def send(self, packet):
+        if packet.type != SPEED_PROBE:
+            return
+        self.seen += 1
+        loop = asyncio.get_running_loop()
+        self.free_at = max(loop.time(), self.free_at) + self.gap
+        echo = Packet.create(SPEED_ECHO, self.authenticated_id.raw,
+                             packet.src_id, packet.payload)
+
+        async def later(at=self.free_at):
+            await asyncio.sleep(max(0.0, at - loop.time()))
+            await self.node._handle_speed_echo(self, echo)
+        task = loop.create_task(later())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+
+class TestWhatATestSpendsFollowsTheLink:
+    """A fixed byte count was a burst too short to read a fast link and the
+    whole ten seconds on a slow one. The load now ends once the rate has been
+    read for `_SPEED_LOAD_SECONDS`, or at the byte ceiling."""
+
+    async def _measure(self, link_of):
+        node = await _node()
+        link = link_of(node)
+        node._peers.append(link)
+        try:
+            started = asyncio.get_running_loop().time()
+            answer = await node.console_speedtest(
+                link.authenticated_id.raw.hex())
+            return answer, asyncio.get_running_loop().time() - started
+        finally:
+            node._peers.remove(link)
+            await node.stop()
+
+    async def test_a_slow_link_is_asked_for_seconds_of_its_rate_not_ten(self):
+        answer, took = await self._measure(lambda n: _Narrow(n, rate=40))
+        assert answer["ok"] is True, answer
+        assert took < _SPEED_LOAD_SECONDS + _SPEED_PROBE_TIMEOUT + 1.5
+        # About the load's seconds at 40 probes a second, plus what was in
+        # flight when it ended — far from the ceiling.
+        assert answer["probes"] <= 40 * (_SPEED_LOAD_SECONDS + 1) + _SPEED_INFLIGHT_MAX
+        assert answer["sent_bytes"] < _SPEED_MAX_BYTES // 10
+
+    async def test_a_fast_link_is_sent_more_than_a_fixed_burst_would(self):
+        answer, _took = await self._measure(lambda n: _Echoing(n, delay=0.001))
+        assert answer["ok"] is True, answer
+        assert answer["sent_bytes"] > 8 * 1024 * 1024
+        assert answer["sent_bytes"] <= _SPEED_MAX_BYTES + _SPEED_CHUNK * _SPEED_IDLE_PROBES
 
 
 class _Queueing(_Echoing):

@@ -1789,6 +1789,9 @@ class MeshNode:
             drain_until = None
             while True:
                 now = time.monotonic()
+                if (first_echo is not None and drain_until is None
+                        and now - first_echo >= _SPEED_LOAD_SECONDS):
+                    deadline = min(deadline, now)
                 if now >= deadline and drain_until is None:
                     drain_until = now + min(1.0, _SPEED_PROBE_TIMEOUT)
                 if drain_until is not None and now >= drain_until:

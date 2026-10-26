@@ -318,10 +318,15 @@ _DIRECT_PING_TIMEOUT   = 3.0   # console PING→PONG wait before the ECHO fallba
 #   * and the answering side rate-limits per identity, so a peer cannot make us
 #     echo without end however politely it asks.
 _SPEED_CHUNK           = 16 * 1024
-_SPEED_MAX_BYTES       = 8 * 1024 * 1024   # one test, in one direction
+_SPEED_MAX_BYTES       = 256 * 1024 * 1024 # one test, in one direction
 _SPEED_MAX_SECONDS     = 10.0
+# What a test spends follows the link: the load stops once the rate has been
+# read for this long, so a slow link is asked for a few seconds of its own
+# rate and a fast one for up to `_SPEED_MAX_BYTES` — a fixed byte count is
+# either a burst too short to read a fast link or a minute on a slow one.
+_SPEED_LOAD_SECONDS    = 3.0
 _SPEED_WINDOW          = 60.0              # what the *answering* side allows…
-_SPEED_MAX_PER_WINDOW  = 1200              # …in echoes, per identity, per window
+_SPEED_MAX_PER_WINDOW  = 33000             # …in echoes, per identity, per window
 # The section a speed test declares its traffic profile under, as if it were an
 # app (`MeshNode.set_traffic_profile`): reserved, so no app can take it back.
 _SPEED_APP_ID          = _builtin_app_id("speedtest")
@@ -1195,6 +1200,7 @@ __all__ = [
     "_SPEED_IDLE_PROBES",
     "_SPEED_INFLIGHT",
     "_SPEED_INFLIGHT_MAX",
+    "_SPEED_LOAD_SECONDS",
     "_SPEED_MAX_BYTES",
     "_SPEED_MAX_PER_WINDOW",
     "_SPEED_APP_ID",

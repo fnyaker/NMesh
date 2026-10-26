@@ -171,8 +171,13 @@ Groupings (constants):
   of exactly the size that arrived, a ceiling the **answering** side owns and
   counts per identity (so reconnecting sheds none of it), and a feature name of
   its own — `speed` — so a node on a metered connection declines this and
-  nothing else. The side asking bounds itself twice over, in bytes and in
-  seconds, whichever ends first — and keeps the far end's count too
+  nothing else. The side asking bounds itself twice over, in bytes
+  (`_SPEED_MAX_BYTES`, 256 MiB) and in seconds (`_SPEED_MAX_SECONDS`),
+  whichever ends first — and what it spends follows the link: the load stops
+  once its rate has been read for `_SPEED_LOAD_SECONDS` (three), so a slow
+  link is asked for a few seconds of its own rate and a fast one for up to the
+  byte ceiling. A fixed 8 MiB was a fraction of a second on a fast link, too
+  short to read it, and the whole ten seconds on a slow one. It keeps the far end's count too
   (`_speed_spend`): the answering side stops echoing at
   `_SPEED_MAX_PER_WINDOW` a minute, silently, so a test run past it reads the
   ceiling as loss on a link that lost nothing. A test that could pass it is
