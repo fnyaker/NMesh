@@ -186,9 +186,12 @@ Groupings (constants):
   a time for the latency **at rest**, then a sliding window — a new probe
   leaves as each echo lands — for the rate and the latency **under load**. The
   window starts at `_SPEED_INFLIGHT` and opens by one per echo, up to
-  `_SPEED_INFLIGHT_MAX` (1 MB in flight), until the round trip under load passes
-  twice the one at rest plus `_SPEED_QUEUE_SLACK_MS` (a queue is filling: the
-  link is full) or a probe is lost (it halves). A fixed eight read at most eight
+  `_SPEED_INFLIGHT_MAX` (8 MB in flight). It holds while the round trip under
+  load is past twice the one at rest plus `_SPEED_QUEUE_SLACK_MS` (a queue is
+  filling: the link is full) and opens again once it drains — a jitter spike
+  no longer ends the growth — and stops for good when a probe is lost (it
+  halves). In flight bounds the reading at window / round trip: a 1 MB
+  ceiling read a 100 ms path as 10 MB/s whatever it carried. A fixed eight read at most eight
   probes per round trip, about 1 MB/s on a 130 ms path whatever the link could
   carry. With `bundle`, every **direct** member of the node's active bundle is
   loaded at once, each with its own window, and the answer gives the sum and

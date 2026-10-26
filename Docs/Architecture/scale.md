@@ -137,8 +137,9 @@ asked, and the floor never closes the fast range. A relay's probe load is now
 stays active (`transports.md`, *A busy node offers a higher fast floor*).
 
 Per-link memory is bounded by the media: a UDP link's reorder buffer
-(`max_reorder`, 256 frames of ~1.2 kB) is its largest structure, ~300 kB at
-worst, so 128 links are ~40 MB in the worst case and far less in practice.
+(`max_reorder`, 4 096 frames, `_MAX_REORDER_BYTES` 6 MB) is its largest
+structure, and every link together holds at most `_MAX_REORDER_TOTAL` (64 MB)
+out of order, however many there are; far less in practice.
 
 ## 5. Per-remote-node tables (first pass)
 

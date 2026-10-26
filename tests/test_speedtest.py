@@ -346,7 +346,7 @@ class TestTheMeasurementItself:
         run it again, or the second test of a minute reads as total loss."""
         per_test = _SPEED_IDLE_PROBES + _SPEED_MAX_BYTES // _SPEED_CHUNK
         assert per_test * 2 <= _SPEED_MAX_PER_WINDOW
-        assert _SPEED_INFLIGHT_MAX * _SPEED_CHUNK <= 1024 * 1024
+        assert _SPEED_INFLIGHT_MAX * _SPEED_CHUNK <= 8 * 1024 * 1024
 
 
 class _Narrow(_Echoing):

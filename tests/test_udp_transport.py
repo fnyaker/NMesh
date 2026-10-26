@@ -13,10 +13,12 @@ import pytest
 from src.udp_transport import (
     UDPTransport, UDPServer, _ReliableLink, _FRAME, _MAGIC,
     FLAG_DATA, FLAG_ACK_ONLY, FLAG_KEEPALIVE, FLAG_FIN, FLAG_MORE, FLAG_SEGMENTS,
+    FLAG_WIDE, _MAX_UNACKED_NARROW, _CWND_BETA,
     _SEGMENT, _SEGMENT_PAYLOAD, _MAX_PAYLOAD,
     _MAX_UNACKED, _MAX_REORDER, _MAX_REORDER_BYTES,
     _MAX_DECODED_BYTES, _MAX_SEND_QUEUE, _MAX_PEERS_UDP,
 )
+from src.transports import udp
 from src.packet import HEADER_SIZE, Packet
 
 ADDRESS = "127.0.0.1:19877"
@@ -592,12 +594,33 @@ class TestABurstDoesNotCollapseTheLink:
         """Past `_MAX_UNACKED` the old link sent the frame and forgot it: lost
         once, it was never resent, and the receiver waited for it for ever."""
         link = _ReliableLink()
+        link.peer_wide = True
         link._cwnd = float(10 ** 9)          # only the frame bound is in play
         for _ in range(_MAX_UNACKED):
             assert link.can_send(100)
             link.build_frame(make_packet(b"y"))
         assert not link.can_send(100)
         assert link.unacked_count() == _MAX_UNACKED
+
+    def test_a_far_end_that_never_said_wide_gets_the_old_window(self):
+        """It holds 256 frames out of order: one loss with more in flight
+        would have it drop, and us resend, everything past them."""
+        link = _ReliableLink()
+        link._cwnd = float(10 ** 9)
+        for _ in range(_MAX_UNACKED_NARROW):
+            assert link.can_send(100)
+            link.build_frame(make_packet(b"y"))
+        assert not link.can_send(100)
+        link.note_segments(link._recv_next, FLAG_WIDE)
+        assert link.peer_wide and link.can_send(100)
+
+    def test_wide_is_believed_only_inside_the_window(self):
+        link = _ReliableLink()
+        link.process_incoming(1000, FLAG_KEEPALIVE, b"")
+        link.note_segments(1000 + _MAX_UNACKED, FLAG_WIDE)
+        assert not link.peer_wide
+        link.note_segments(1001, FLAG_WIDE)
+        assert link.peer_wide
 
     def test_the_window_bounds_what_is_in_flight(self):
         link = _ReliableLink()
@@ -613,18 +636,18 @@ class TestABurstDoesNotCollapseTheLink:
         link._cwnd = 1.0
         assert link.can_send(60_000)
 
-    def test_a_burst_lost_together_halves_the_window_once(self):
+    def test_a_burst_lost_together_cuts_the_window_once(self):
         """Twenty frames lost to one queue overflowing are one event."""
         link = _ReliableLink()
         link._cwnd = 1024 * 1024.0
         frames = [link.build_frame(make_packet(b"w" * 1000)) for _ in range(20)]
         for frame in frames:
             link._loss(_seq_of(frame), timeout=False)
-        assert link._cwnd == 512 * 1024.0
+        assert link._cwnd == pytest.approx(1024 * 1024.0 * _CWND_BETA)
         # A loss among frames sent *after* the reduction is a new event.
         later = link.build_frame(make_packet(b"v"))
         link._loss(_seq_of(later), timeout=False)
-        assert link._cwnd == 256 * 1024.0
+        assert link._cwnd == pytest.approx(1024 * 1024.0 * _CWND_BETA ** 2)
 
     def test_acknowledged_data_grows_the_window_and_measures_the_link(self):
         link = _ReliableLink()
@@ -1057,3 +1080,80 @@ class TestAPacketIsSplitUnderTheDatagramSize:
         got = await asyncio.wait_for(srv.receive(), 10)
         assert got.payload == packet.payload
         assert not client._link.peer_reassembles
+
+
+class TestALinksSpeedIsNotItsLatency:
+    """Throughput is at most what is in flight over the round trip, so every
+    fixed amount in flight is a rate that falls with latency."""
+
+    @staticmethod
+    def _after_a_loss(cwnd: float = 8 * 1024 * 1024.0) -> _ReliableLink:
+        link = _ReliableLink()
+        link._cwnd = cwnd
+        frame = link.build_frame(make_packet(b"l"))
+        link._loss(_seq_of(frame), timeout=False)
+        return link
+
+    def test_recovery_follows_the_clock_not_the_round_trips(self):
+        """Reno won back one step per round trip: 45 s at 100 ms for 8 MB. A
+        window grown with time since the loss is back by the time the curve
+        says, whatever the path's round trip."""
+        link = self._after_a_loss()
+        assert link._cwnd == pytest.approx(8 * 1024 * 1024 * _CWND_BETA)
+        link._grow(_SEGMENT)                 # starts the epoch
+        link._epoch -= 20.0                  # twenty seconds later
+        for _ in range(5):                   # five round trips of ACKs
+            for _ in range(int(link._cwnd // (16 * _SEGMENT))):
+                link._grow(16 * _SEGMENT)
+        assert link._cwnd >= 8 * 1024 * 1024 * 0.95
+        # One step per round trip would be 80 kB further, not 2.5 MB.
+        assert link._cwnd > 8 * 1024 * 1024 * _CWND_BETA + 10 * 16 * 1024
+
+    def test_never_slower_than_the_old_step(self):
+        link = self._after_a_loss()
+        link._grow(_SEGMENT)
+        before = link._cwnd
+        link._grow(_SEGMENT)
+        assert link._cwnd - before >= _SEGMENT * 16 * 1024 / before * 0.999
+
+    def test_the_window_stays_under_the_buffer_the_kernel_granted(self):
+        class _Sock:
+            def getsockopt(self, level, option):
+                return 2 * 300 * 1024 if udp.sys.platform.startswith("linux") else 300 * 1024
+
+        class _DT:
+            def get_extra_info(self, name):
+                return _Sock() if name == "socket" else None
+
+        transport = UDPTransport(_DT(), ("192.0.2.1", 9000))
+        assert transport._link.cwnd_max == 300 * 1024
+        transport._link._cwnd = 290 * 1024.0
+        transport._link._ssthresh = 0.0
+        for _ in range(100):
+            transport._link._grow(64 * 1024)
+        assert transport._link._cwnd <= 300 * 1024
+        assert transport.stats()["socket buffer low"] is True
+
+    def test_an_unreadable_buffer_leaves_the_ceiling_alone(self):
+        class _DT:
+            def get_extra_info(self, name):
+                return None
+        transport = UDPTransport(_DT(), ("192.0.2.1", 9000))
+        assert transport._link.cwnd_max == udp._CWND_MAX
+
+    def test_out_of_order_frames_are_bounded_over_every_link(self, monkeypatch):
+        """A link is held before anyone on it authenticated, so a link's own
+        share is not the whole bound: past the share every link always had,
+        what they hold together is."""
+        import gc
+        gc.collect()
+        monkeypatch.setattr(udp, "_LINKS", udp.weakref.WeakSet())
+        monkeypatch.setattr(udp, "_MAX_REORDER_TOTAL", 3 * 1024 * 1024)
+        first, second = _ReliableLink(), _ReliableLink()
+        udp._LINKS.update((first, second))
+        for link in (first, second):
+            link.process_incoming(0, FLAG_KEEPALIVE, b"")
+            for seq in range(2, 4000):
+                link.process_incoming(seq, FLAG_DATA, b"x" * 1100)
+        assert 2.9 * 1024 * 1024 < first._reorder_bytes <= 3 * 1024 * 1024
+        assert 1.9 * 1024 * 1024 < second._reorder_bytes <= 2 * 1024 * 1024

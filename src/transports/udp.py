@@ -34,7 +34,9 @@ import asyncio
 import os
 import socket
 import struct
+import sys
 import time
+import weakref
 from collections import deque
 
 from .contract import BaseTransport, BaseServer, LinkBusy, option
@@ -66,6 +68,7 @@ FLAG_DATA = 0x04
 FLAG_FIN = 0x08
 FLAG_MORE = 0x10
 FLAG_SEGMENTS = 0x20
+FLAG_WIDE = 0x40
 
 _MAX_PAYLOAD = 60000
 # A packet larger than one datagram of `_SEGMENT` bytes is split across frames,
@@ -75,13 +78,23 @@ _MAX_PAYLOAD = 60000
 # its headers. An old peer never sets the flag and keeps getting whole packets.
 _SEGMENT = 1200
 _SEGMENT_PAYLOAD = _SEGMENT - len(_MAGIC) - _FRAME_SIZE
-_MAX_UNACKED = 256          # max unacknowledged frames in retransmit buffer
-_MAX_REORDER = 256          # max out-of-order frames buffered
+# Frames in flight bound the rate at window / round trip, and a frame is one
+# `_SEGMENT`: 256 of them is 300 kB, 3 MB/s on a 100 ms path whatever the
+# congestion window allows. 4 096 is 4.9 MB. A far end that does not say it
+# holds that many (FLAG_WIDE) keeps the old 256, or a single loss would
+# overflow its reorder buffer and every frame past it would be resent.
+_MAX_UNACKED = 4096         # max unacknowledged frames in retransmit buffer
+_MAX_UNACKED_NARROW = 256   # …towards a far end that has not set FLAG_WIDE
+_MAX_REORDER = 4096         # max out-of-order frames buffered
 # A frame count is not a memory bound: a frame carries up to _MAX_PAYLOAD, so
 # 256 of them is 15 MB per link and an attacker chooses every byte by sending
 # sequence numbers ahead of the cursor and never filling the gap. Both buffers
 # are therefore bounded in bytes as well as in entries — whichever binds first.
-_MAX_REORDER_BYTES = 2 * 1024 * 1024    # out-of-order frames held, in bytes
+# One loss holds the whole window behind its hole, so a link's share is a
+# window's worth; what every link of this process holds together is bounded
+# again, because a link is held before anyone on it has authenticated.
+_MAX_REORDER_BYTES = 6 * 1024 * 1024    # out-of-order frames held, in bytes
+_MAX_REORDER_TOTAL = 64 * 1024 * 1024   # …over every link of this process
 _MAX_DECODED_BYTES = 2 * 1024 * 1024    # decoded packets waiting for receive()
 _MAX_SEND_QUEUE = 128       # max packets waiting to be framed and sent
 # How long send() waits for room in that queue before refusing the packet.
@@ -108,15 +121,28 @@ _RTO_MAX = 2.0              # max retransmit timeout after backoff
 # socket buffer and turned one burst into a two-second stall.
 _CWND_INITIAL = 64 * 1024
 _CWND_MIN = 32 * 1024
-_CWND_MAX = 8 * 1024 * 1024
-_CWND_STEP = 16 * 1024      # congestion-avoidance growth per round trip
+_CWND_MAX = 16 * 1024 * 1024
+_CWND_STEP = 16 * 1024      # the least congestion avoidance grows per round trip
+# Past the threshold the window grows as CUBIC does (RFC 9438): with the time
+# since the last loss, not with round trips. A fixed step per round trip took
+# 45 s at 100 ms to win back the 8 MB one loss had cut and twice as long at
+# 200 ms, so a path lost its rate in proportion to its latency. A loss keeps
+# `_CWND_BETA` of the window rather than half of it.
+_CWND_BETA = 0.7
+_CUBIC_C = 0.4 * _SEGMENT   # bytes per second cubed
 # Selectively acknowledged frames above a hole that make the hole a loss rather
 # than a reordering (TCP's three duplicate ACKs).
 _DUP_THRESHOLD = 3
 # What the socket asks the kernel for. Best effort: the kernel caps it at
 # net.core.rmem_max / wmem_max, and the window above is what actually keeps a
 # burst inside whatever buffer it grants.
-_SOCK_BUFFER = 4 * 1024 * 1024
+_SOCK_BUFFER = 8 * 1024 * 1024
+# A burst the far end's buffer cannot hold is dropped by its kernel, silently,
+# and read here as congestion. Its buffer is not ours to see; ours is the same
+# request answered by a kernel usually configured alike, so the window stays
+# under what ours was granted — and says so when that is small
+# (`net.core.rmem_max`, 208 kB by default on Linux).
+_SOCK_BUFFER_LOW = 1024 * 1024
 _RTX_CHECK = 0.020          # retransmit check interval
 _KEEPALIVE_INTERVAL = 25.0  # NAT mapping refresh, seconds
 # Dead-link horizon: 3 missed keepalives, so it MUST exceed both this interval
@@ -192,6 +218,37 @@ def _grow_buffers(transport) -> None:
         pass
 
 
+def _granted_buffer(transport) -> int | None:
+    """The smaller of the two buffers the kernel actually granted, in bytes,
+    or None where it cannot be read. Linux reports twice what it holds for
+    data (the rest is its own bookkeeping), so that half is what counts."""
+    try:
+        sock = transport.get_extra_info("socket")
+        if sock is None:
+            return None
+        sizes = [sock.getsockopt(socket.SOL_SOCKET, option)
+                 for option in (socket.SO_RCVBUF, socket.SO_SNDBUF)]
+    except Exception:
+        return None
+    if not all(isinstance(size, int) and size > 0 for size in sizes):
+        return None
+    granted = min(sizes)
+    return granted // 2 if sys.platform.startswith("linux") else granted
+
+
+_LINKS: "weakref.WeakSet[_ReliableLink]" = weakref.WeakSet()
+
+
+def _reorder_room(own: int, size: int) -> bool:
+    """Is there room for ``size`` more bytes out of order in this process?
+    Summed only past the share every link had before the window widened, so
+    the walk is paid by a link already holding a lot."""
+    if own + size <= 2 * 1024 * 1024:
+        return True
+    return (sum(link._reorder_bytes for link in _LINKS) + size
+            <= _MAX_REORDER_TOTAL)
+
+
 class _ReliableLink:
     """
     Reliability state for one direction of a UDP transport.
@@ -235,6 +292,9 @@ class _ReliableLink:
         # last reduction: a loss among frames sent before it belongs to the
         # same event and does not halve the window a second time.
         self._cwnd: float = float(_CWND_INITIAL)
+        self.cwnd_max: float = float(_CWND_MAX)  # lowered to the socket's buffer
+        self._w_max: float = 0.0               # the window at the last loss
+        self._epoch: float | None = None       # when growth past it started
         self._ssthresh: float = float(_CWND_MAX)
         self._recover: int = self._send_seq
         # F-RTO (RFC 5682). A timeout resends the oldest frame alone, then the
@@ -253,6 +313,7 @@ class _ReliableLink:
         # seq → (payload, FLAG_MORE set), the out-of-order buffer
         self._reorder: dict[int, tuple[bytes, bool]] = {}
         self._reorder_bytes: int = 0      # what that buffer is actually holding
+        _LINKS.add(self)
         self._sack: int = 0               # selective-ack bitmap, kept in step
         # Segments of a packet delivered in order, waiting for its last one.
         # Never more than one packet's worth: past that the far end is lying,
@@ -263,6 +324,9 @@ class _ReliableLink:
         # Whether the far end reassembles segments (`_SEGMENT`). Learnt from
         # FLAG_SEGMENTS on a frame inside its window, and never unlearnt.
         self.peer_reassembles: bool = False
+        # Whether it holds `_MAX_UNACKED` frames out of order (FLAG_WIDE),
+        # learnt and believed the same way.
+        self.peer_wide: bool = False
 
         # ACK coalescing
         self._ack_pending: bool = False
@@ -303,7 +367,8 @@ class _ReliableLink:
         reliable link silently stops being one."""
         if not self._unacked:
             return True
-        return (len(self._unacked) < _MAX_UNACKED
+        frames = _MAX_UNACKED if self.peer_wide else _MAX_UNACKED_NARROW
+        return (len(self._unacked) < frames
                 and self._inflight + size <= self._cwnd)
 
     def segments(self, payload: bytes) -> list[bytes]:
@@ -327,7 +392,7 @@ class _ReliableLink:
         seq = self._send_seq
         self._send_seq = (self._send_seq + 1) & 0xFFFFFFFF
         ack, sack = self._build_ack()
-        flags = FLAG_DATA | FLAG_SEGMENTS | (FLAG_MORE if more else 0)
+        flags = FLAG_DATA | FLAG_SEGMENTS | FLAG_WIDE | (FLAG_MORE if more else 0)
         header = _FRAME.pack(seq, ack, sack, flags, len(payload))
         frame = _MAGIC + header + payload
         now = time.monotonic()
@@ -339,21 +404,21 @@ class _ReliableLink:
         """Build a keepalive frame (no payload, no retransmit tracking)."""
         ack, sack = self._build_ack()
         header = _FRAME.pack(self._send_seq, ack, sack,
-                             FLAG_KEEPALIVE | FLAG_SEGMENTS, 0)
+                             FLAG_KEEPALIVE | FLAG_SEGMENTS | FLAG_WIDE, 0)
         return _MAGIC + header
 
     def build_ack_only(self) -> bytes:
         """Build a standalone ACK frame."""
         ack, sack = self._build_ack()
         header = _FRAME.pack(self._send_seq, ack, sack,
-                             FLAG_ACK_ONLY | FLAG_SEGMENTS, 0)
+                             FLAG_ACK_ONLY | FLAG_SEGMENTS | FLAG_WIDE, 0)
         return _MAGIC + header
 
     def build_fin(self) -> bytes:
         """Build a FIN frame to signal graceful close."""
         ack, sack = self._build_ack()
         header = _FRAME.pack(self._send_seq, ack, sack,
-                             FLAG_FIN | FLAG_SEGMENTS, 0)
+                             FLAG_FIN | FLAG_SEGMENTS | FLAG_WIDE, 0)
         return _MAGIC + header
 
     def _build_ack(self) -> tuple[int, int]:
@@ -537,11 +602,25 @@ class _ReliableLink:
         if self._cwnd < self._ssthresh:
             self._cwnd += acked                              # slow start
         else:
-            self._cwnd += acked * _CWND_STEP / self._cwnd    # one step per RTT
-        self._cwnd = min(self._cwnd, float(_CWND_MAX))
+            step = acked * _CWND_STEP / self._cwnd           # the least, per RTT
+            target = self._cubic_target(time.monotonic())
+            if target > self._cwnd:
+                step = max(step, (target - self._cwnd) * acked / self._cwnd)
+            self._cwnd += step
+        self._cwnd = min(self._cwnd, self.cwnd_max)
+
+    def _cubic_target(self, now: float) -> float:
+        """Where the window should be ``now`` (RFC 9438 W_cubic): flat around
+        the size it was lost at, steep away from it on either side."""
+        if self._epoch is None:
+            self._epoch = now
+            self._w_max = max(self._w_max, self._cwnd)
+        k = ((self._w_max * (1 - _CWND_BETA)) / _CUBIC_C) ** (1 / 3)
+        t = now - self._epoch
+        return _CUBIC_C * (t - k) ** 3 + self._w_max
 
     def _loss(self, seq: int, timeout: bool) -> None:
-        """One congestion event: halve the window, once per window of frames.
+        """One congestion event: cut the window, once per window of frames.
 
         A loss of a frame sent before the last reduction is the same event
         seen again — a burst that lost twenty frames lost them to one queue
@@ -551,7 +630,8 @@ class _ReliableLink:
         if self._before_recover(seq):
             return                    # sent before the last reduction
         self._undo = (self._cwnd, self._ssthresh, timeout)
-        self._ssthresh = max(self._cwnd / 2, float(_CWND_MIN))
+        self._w_max, self._epoch = self._cwnd, None
+        self._ssthresh = max(self._cwnd * _CWND_BETA, float(_CWND_MIN))
         self._cwnd = float(_CWND_MIN) if timeout else self._ssthresh
         self._recover = self._send_seq
 
@@ -692,7 +772,8 @@ class _ReliableLink:
             # retransmit — drop it but re-ACK so the sender stops resending.
             if (seq not in self._reorder
                     and len(self._reorder) < UDPTransport.setting("max_reorder")
-                    and self._reorder_bytes + len(payload) <= _MAX_REORDER_BYTES):
+                    and self._reorder_bytes + len(payload) <= _MAX_REORDER_BYTES
+                    and _reorder_room(self._reorder_bytes, len(payload))):
                 self._reorder[seq] = (payload, more)
                 self._reorder_bytes += len(payload)
                 self.reordered += 1
@@ -736,10 +817,15 @@ class _ReliableLink:
         that delivers each piece as a packet, and the link would carry nothing.
         Before the first frame there is no window yet, and that frame is the
         one the cursor is adopted from anyway."""
-        if (flags & FLAG_SEGMENTS and not self.peer_reassembles
-                and (not self._recv_started
-                     or ((seq - self._recv_next) & 0xFFFFFFFF) < _MAX_UNACKED)):
+        if not flags & (FLAG_SEGMENTS | FLAG_WIDE):
+            return
+        if (self._recv_started
+                and ((seq - self._recv_next) & 0xFFFFFFFF) >= _MAX_UNACKED):
+            return
+        if flags & FLAG_SEGMENTS:
             self.peer_reassembles = True
+        if flags & FLAG_WIDE:
+            self.peer_wide = True
 
     def accepts_fin(self, seq: int) -> bool:
         """Is a FIN carrying ``seq`` one the peer could have sent?
@@ -835,7 +921,7 @@ class UDPTransport(BaseTransport):
         option("max_reorder", "int", _MAX_REORDER,
                "Out-of-order frames held while waiting for the gap to fill. "
                "Bigger tolerates more reordering and costs more memory per link.",
-               minimum=16, maximum=1024),
+               minimum=16, maximum=_MAX_REORDER),
     )
     SETTINGS: dict = {}
 
@@ -845,6 +931,9 @@ class UDPTransport(BaseTransport):
         self._sock: asyncio.DatagramTransport | None = sock
         self._remote: tuple[str, int] | None = remote_addr
         self._link = _ReliableLink()
+        self._buffer: int | None = None
+        if sock is not None:
+            self._fit_buffer()
         # Decoded packets waiting for receive(). A deque because the consumer
         # takes from the front, and bounded in bytes because nothing couples
         # arrival to consumption: a sender faster than _Peer._loop — or a
@@ -944,8 +1033,19 @@ class UDPTransport(BaseTransport):
             "spurious fast retransmits": link.spurious_fast,
             "undecodable": self.undecodable,
             "segments": link.peer_reassembles,
+            "wide window": link.peer_wide,
+            "socket buffer kB": (round(self._buffer / 1024)
+                                 if self._buffer is not None else None),
+            "socket buffer low": (self._buffer is not None
+                                  and self._buffer < _SOCK_BUFFER_LOW),
             "profile": ", ".join(sorted(self._profile)) or "default",
         }
+
+    def _fit_buffer(self) -> None:
+        self._buffer = _granted_buffer(self._sock)
+        if self._buffer is not None:
+            self._link.cwnd_max = float(max(_CWND_MIN,
+                                            min(_CWND_MAX, self._buffer)))
 
     @classmethod
     def _from_server(cls, sock: asyncio.DatagramTransport,
@@ -972,6 +1072,7 @@ class UDPTransport(BaseTransport):
         )
         self._sock = transport
         _grow_buffers(transport)
+        self._fit_buffer()
         self._remote = (host, port)
         self._owns_socket = True
         self._start_tasks()

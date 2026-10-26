@@ -1663,8 +1663,9 @@ class MeshNode:
         hides.
 
         The window opens as the link shows it can take more: one probe more
-        per echo, until the round trip under load passes twice the one at rest
-        (a queue is filling: the link is full) or a probe is lost. A window
+        per echo, holding while the round trip under load is past twice the one
+        at rest (a queue is filling: the link is full), stopping for good when a
+        probe is lost. A window
         reads at most itself per round trip, so a fixed one is a ceiling on the
         answer — eight is about 1 MB/s at 130 ms — whatever the link carries.
 
@@ -1740,7 +1741,6 @@ class MeshNode:
                 return
             if book["idle"] and rtt_ms > (2.0 * min(book["idle"])
                                           + _SPEED_QUEUE_SLACK_MS):
-                book["grow"] = False
                 return
             book["window"] = min(book["window"] + 1, _SPEED_INFLIGHT_MAX)
             book["peak"] = max(book["peak"], book["window"])
@@ -1798,6 +1798,7 @@ class MeshNode:
                     break
                 for book in books:
                     while (drain_until is None and book["flying"] < book["window"]
+                           and len(inflight) < _SPEED_INFLIGHT_TOTAL
                            and sent < _SPEED_MAX_BYTES):
                         await launch(book)
                         sent += _SPEED_CHUNK

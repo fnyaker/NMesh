@@ -1860,6 +1860,32 @@ fault, and every one of its tests fails on the old transport.
 > A test that is lowered until it passes has measured the test. When a
 > measurement shows a medium falling over, fix the medium — and say so.
 
+## A link whose speed was its latency
+
+A UDP link carried tens of MB/s over loopback and a few MB/s on any path with
+latency, and the speed test read the same cliff. Throughput is at most what is
+in flight divided by the round trip, and four things capped what was in
+flight, each at a fixed size:
+
+- **`_MAX_UNACKED` = 256 frames.** Split into 1 200-byte segments that is
+  300 kB in flight: 3 MB/s at 100 ms, whatever the congestion window said.
+  Now 4 096 (4.9 MB), granted only to a far end that sets `FLAG_WIDE` — an old
+  one holds 256 frames out of order, and one loss past that would have every
+  later frame resent.
+- **Reno recovery.** One `_CWND_STEP` (16 kB) per round trip after a loss: 45 s
+  at 100 ms to win back 8 MB, twice that at 200 ms. Now CUBIC, which grows with
+  time since the loss and keeps 0.7 of the window, not half.
+- **The socket buffer.** The 4 MB asked for is silently capped at
+  `net.core.rmem_max`, 208 kB by default; a window past it overflows the far
+  kernel and reads as loss. The granted size is now read back, caps the
+  window, and shows in the link's stats.
+- **The speed test's own window**, 1 MB, which read a 100 ms path as 10 MB/s,
+  and stopped growing for good on the first round trip that jitter doubled.
+  Now 8 MB, and it holds while a queue drains instead of stopping.
+
+> A rate that falls as the path gets longer is a window, not a link. Find
+> every fixed amount in flight and divide it by the round trip.
+
 ## A timer that could only learn that the path was fast
 
 During a speed test a live UDP link logged a smoothed round trip of 29 ms and a

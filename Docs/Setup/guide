@@ -518,6 +518,7 @@ everything an update can break.
 | **No wheel for the platform** | musl, 32-bit ARM, RISC-V: `cryptography` compiles | On a `pip install` failure, installs Rust + the OpenSSL/FFI headers (`pkg_names native`) and retries |
 | **No `git`** | Minimal images | The liboqs sources are fetched as the locked tag's archive with `curl`, and must hash to `scripts/liboqs.lock` |
 | **An inherited broken venv** | A distro upgrade that removes the interpreter, a venv created without pip | `venv_broken()` detects it on every run and recreates it |
+| **Small UDP socket buffers** | Linux caps them at `net.core.rmem_max`, 208 kB by default: UDP links on long paths stay slow (the link's stats say `socket buffer low`) | Not changed for you — it is the whole machine's setting: `sysctl -w net.core.rmem_max=16777216 net.core.wmem_max=16777216`, and the same lines in `/etc/sysctl.d/` to keep them |
 | **Little RAM, many cores** | The liboqs build gets OOM-killed (~1.5 GB per compilation unit) | Parallelism capped by `MemAvailable` |
 
 ## Families handled

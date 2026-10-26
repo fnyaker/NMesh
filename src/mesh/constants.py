@@ -332,15 +332,16 @@ _SPEED_MAX_PER_WINDOW  = 33000             # …in echoes, per identity, per win
 _SPEED_APP_ID          = _builtin_app_id("speedtest")
 # Probes outstanding at once — a *sliding* window: a new probe leaves as each
 # echo lands, so the link is never idle waiting for the slowest of a batch.
-# It starts at eight and opens by one per echo, up to the ceiling, until the
-# round trip under load passes twice the one at rest plus the slack (a queue is
-# filling, so the link is full) or a probe is lost (then it halves): a fixed
-# window is a ceiling on what the test can read, eight probes per round trip,
-# about 1 MB/s at 130 ms. The ceiling is 1 MB in flight. A burst that large is
-# what the UDP transport has to hold (`gotchas.md`, "A burst that collapsed the
-# UDP transport").
+# It starts at eight and opens by one per echo, up to the ceiling, while the
+# round trip under load stays under twice the one at rest plus the slack (past
+# that a queue is filling: it holds until the queue drains), and stops for good
+# on a lost probe (then it halves). Whatever is in flight bounds the reading at
+# window / round trip, so the ceiling is 8 MB — 80 MB/s at 100 ms; one of 1 MB
+# read a 100 ms path as 10 MB/s whatever it carried. Pacing that onto the wire
+# is the transport's own window's job (`gotchas.md`, "A burst that collapsed
+# the UDP transport").
 _SPEED_INFLIGHT        = 8
-_SPEED_INFLIGHT_MAX    = 64
+_SPEED_INFLIGHT_MAX    = 512
 _SPEED_QUEUE_SLACK_MS  = 5.0
 # A probe not echoed within this is counted lost and its slot reused. Without
 # it one dropped datagram held the whole test until the deadline.
@@ -580,8 +581,11 @@ _ROUTE_HINT_TTL           = 120.0
 # bounded on both axes in `routed.py`, and this is what a pass may cost.
 # Echo probes in flight, across the console's reachability check and the path
 # prober below. Named because two callers share it, and a literal in one of
-# them is a bound the other can silently exceed.
-_PENDING_ECHO_MAX         = 128
+# them is a bound the other can silently exceed — three, with the speed test,
+# whose window has to fit beside the other two or it evicts its own probes and
+# reads them as lost (`_SPEED_INFLIGHT_TOTAL`).
+_PENDING_ECHO_MAX         = 1152
+_SPEED_INFLIGHT_TOTAL     = _PENDING_ECHO_MAX - 128
 # How long a routed identity keeps the first hop it is reached through before
 # the node may move it to another healthy one, in seconds (`route_hold_minutes`
 # in the configuration). Long enough that a relay sees a conversation rather
@@ -1089,6 +1093,7 @@ __all__ = [
     "_PATH_STANDBY_INTERVAL",
     "_PEER_STOP_TIMEOUT",
     "_PENDING_ECHO_MAX",
+    "_SPEED_INFLIGHT_TOTAL",
     "_PKG_OWN_MAX",
     "_PKG_RATE_MAX",
     "_PKG_RATE_WINDOW",

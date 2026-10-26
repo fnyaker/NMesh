@@ -698,11 +698,17 @@ UDP is connectionless and unreliable → a **reliability layer**:
     retransmits` for a SACK hole the original then filled (Allman & Paxson,
     1999). F-RTO needs a second frame in flight to decide, and an idle link
     rarely has one;
-  - a **congestion window** in bytes (`_CWND_*`): slow start from 64 kB, one
-    `_CWND_STEP` per round trip past the threshold, **halved once per loss
-    event** — a loss among frames sent before the last reduction is the same
-    event — and dropped to its floor on a timeout. What a timeout resends at
-    once is bounded by the window too;
+  - a **congestion window** in bytes (`_CWND_*`): slow start from 64 kB, then
+    **CUBIC** growth past the threshold (RFC 9438, `_cubic_target`): the window
+    follows the time since the last loss, flat near the size it was lost at and
+    steep away from it, never less than one `_CWND_STEP` per round trip. A
+    fixed step per round trip made recovery take longer the longer the path —
+    45 s at 100 ms to win back 8 MB. A loss keeps `_CWND_BETA` (0.7) of the
+    window, **once per loss event** — a loss among frames sent before the last
+    reduction is the same event — and a timeout drops it to its floor. Its
+    ceiling is `_CWND_MAX` (16 MB) or the socket buffer the kernel granted,
+    whichever is smaller (`cwnd_max`). What a timeout resends at once is
+    bounded by the window too;
   - **F-RTO** (RFC 5682) on a first timeout: the oldest frame is resent
     **alone**, and the next two ACKs decide. Two in a row that move the cursor
     are originals arriving late — the cut to the window is undone
@@ -723,7 +729,9 @@ UDP is connectionless and unreliable → a **reliability layer**:
     off"). The meaning is the one senders always read, so a fixed receiver is
     right with every sender, old or new;
   - **never a frame untracked**: the send loop waits for room
-    (`can_send`) below both the window and `_MAX_UNACKED`, woken by the ACK that
+    (`can_send`) below both the window and `_MAX_UNACKED` (4 096 frames, or
+    `_MAX_UNACKED_NARROW` = 256 towards a far end that has not set
+    **`FLAG_WIDE`** — it holds only 256 out of order), woken by the ACK that
     frees it. `send()` waits up to `_SEND_WAIT` for room in the queue instead of
     refusing the packet — and when it does refuse, it raises **`LinkBusy`, not
     `ConnectionError`**. It used to raise the second, and `_send_to_candidates`
@@ -736,9 +744,17 @@ UDP is connectionless and unreliable → a **reliability layer**:
   keeps it, resends it, and reads the refusal as a loss, which slows it down:
   backpressure, the way TCP's window gives it. The queue may pass its bound only
   by the reorder buffer a gap-filling frame releases, which is bounded too.
-- Socket buffers are asked for `_SOCK_BUFFER` (4 MB), best effort: the kernel
+- Socket buffers are asked for `_SOCK_BUFFER` (8 MB), best effort: the kernel
   caps them at `net.core.rmem_max`, and the default of 208 kB is exactly what a
-  256 kB burst overflowed.
+  256 kB burst overflowed. What was granted is read back (`_granted_buffer`;
+  Linux reports twice what holds data) and caps the window, since a burst the
+  far end's buffer cannot hold is dropped by its kernel and read as congestion.
+  The link's stats say `socket buffer kB` and `socket buffer low` below 1 MB:
+  on such a node raise `net.core.rmem_max` and `net.core.wmem_max` (16 MB is
+  enough) or long paths stay slow.
+- **Out of order, bounded twice**: `_MAX_REORDER_BYTES` (6 MB, a window's
+  worth) per link, and `_MAX_REORDER_TOTAL` (64 MB) over every link of the
+  process, because a link is held before anyone on it has authenticated.
 - **These signals ride on the unauthenticated frame header** (`BUGSVULNS.MD`
   finding 13, still partly open). Somebody who can spoof the peer's address
   and guess the 32-bit cursor can forge a SACK pattern that triggers one fast
@@ -795,7 +811,8 @@ UDP is connectionless and unreliable → a **reliability layer**:
     its acknowledgement, one at a time. It buys a link that holds on a path
     that drops fragments — through a VPN, 16 kB pings lost 62 % where 1.1 kB
     pings lost 6 %. `_MAX_UNACKED` frames of 1 200 bytes also cap what is in
-    flight at ~300 kB, so a split link carries at most ~300 kB per round trip.
+    flight: ~4.9 MB, ~49 MB/s at 100 ms (~300 kB, 3 MB/s, towards a far end
+    without `FLAG_WIDE`).
 - **A FIN ends the link** — on the side that receives it, at once
   (`_peer_finished`). It used to be counted as an *arrival*, like a keepalive:
   it refreshed the liveness it announced the end of. The side that missed a
