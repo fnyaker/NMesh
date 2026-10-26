@@ -323,6 +323,19 @@ def test_the_rights_panel_is_wired_to_a_real_element():
         assert route in webassets.FLEET_JS, route
 
 
+def test_no_page_gates_an_action_on_the_ticked_list():
+    """A managed node's `caps` is what a human ticked, and `full` alone is a
+    list of one. Every page offering an action asks `allows`, which the bridge
+    fills through `effective_caps`; asking `caps` hid every button of a node
+    holding `full`."""
+    gate = re.compile(r"\.caps \|\| \[\]\)\.(includes|indexOf)\(")
+    for name in ("FLEET_JS", "NODE_JS"):
+        assert not gate.search(getattr(webassets, name)), name
+    assert not gate.search(terminal.JS)
+    assert '(node.allows || []).includes("shell")' in webassets.FLEET_JS
+    assert '(fleet.allows || []).indexOf("invite")' in webassets.NODE_JS
+
+
 # ── the strict CSP, applied to the assets themselves ────────────────────────
 # `default-src 'self'` without `unsafe-inline`: a `style=` attribute is ignored
 # by the browser **silently**. A progress bar written that way never fills and

@@ -2059,7 +2059,7 @@ async function loadNodes(){
   try{ data = await FEED.read("/api/fleet/state", {since: 2000000000}); }
   catch(_){ data = null; }
   if(!data) return;
-  NODES = (data.managed || []).filter((entry) => (entry.caps || []).includes("shell"));
+  NODES = (data.managed || []).filter((entry) => (entry.allows || []).includes("shell"));
   const select = $("node");
   const wanted = new URLSearchParams(location.search).get("node") || select.value;
   select.innerHTML = NODES.map((entry) =>
