@@ -481,10 +481,10 @@ class _PunchState:
     """Tracks an in-progress NAT hole-punch attempt."""
 
     def __init__(self, target: NodeID, remote_udp_addr: str,
-                 my_udp_addr: str) -> None:
+                 peer_ip: str) -> None:
         self.target = target
-        self.remote_udp_addr = remote_udp_addr   # peer's public UDP addr (from relay)
-        self.my_udp_addr = my_udp_addr           # our public UDP addr (observed by relay)
+        self.remote_udp_addr = remote_udp_addr   # where we probe the peer
+        self.peer_ip = peer_ip                   # the peer's IP, as the relay saw it
         self.probes_sent: int = 0
         self.probes_received: int = 0
         self.ack_received: bool = False

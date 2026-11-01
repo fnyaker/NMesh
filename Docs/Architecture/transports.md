@@ -926,6 +926,11 @@ coordinated by a shared relay. The machinery (`_PUNCH_*` constants):
    because on the relay's server side `remote_addr` is `None`).
 3. Each creates a `_punch_pending` state and sends a **burst of raw UDP PROBEs**,
    ML-DSA signed (`_send_punch_probes`).
+   - The probe target comes from `_punch_probe_addr`: a UDP URI or bare
+     `host:port` as relayed; a TCP URI is ignored (its port is not the UDP one);
+     when nothing usable is relayed, the peer's observed IP on the UDP port the
+     peer announces. The observed IP is the **peer's** and is never recorded in
+     `_extra_addrs`.
    - **Careful:** if the peer's UDP address is unknown (empty), **we keep the state** and do
      not probe: the peer has our address and is probing us; an incoming PROBE
      completes the punch from its source address. (A historical bug: deleting the

@@ -2849,3 +2849,13 @@ the code, and each looked right from reading it.
 - **A coroutine handed to a loop that is not there.** `ChatBridge._run` closes
   the coroutine when the loop is `None`; left unawaited it warned at exit and
   hid the real refusal.
+
+### A field named after its owner, holding somebody else's address
+`PUNCH_RELAY` carries the peer's address as the relay holds it and the peer's IP
+as the relay sees it. The handler stored that IP among `_extra_addrs` — the
+addresses *this* node is seen at — and `_PunchState` called it `my_udp_addr`.
+Two nodes that had punched through one router then each announced the other's
+IP, which is the collision "Two nodes, one public IP" above describes, produced
+by a different writer. Ask of every value written into `_extra_addrs` whose
+address it is. The probe target is chosen by `MeshNode._punch_probe_addr`, never
+taken from a TCP address (BUGSVULNS 122).
