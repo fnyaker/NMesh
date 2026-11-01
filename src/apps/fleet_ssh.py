@@ -663,7 +663,7 @@ async def _keyscan(ip: str, port: int, timeout: float) -> str:
         async with asyncio.timeout(timeout + 2):
             stdout, _ = await proc.communicate()
     except (asyncio.TimeoutError, OSError):
-        _kill(proc)
+        await kill_and_reap(proc)
         return ""
     return stdout.decode("utf-8", "replace")[:8192]
 
@@ -825,8 +825,8 @@ async def _spawn_with_pty(argv: list[str], creds: SshCredentials,
     import pty
 
     parent_fd, child_fd = pty.openpty()
-    _silence_echo(parent_fd)
     try:
+        _silence_echo(parent_fd)
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=child_fd if tty_stdio else asyncio.subprocess.PIPE,
@@ -835,9 +835,11 @@ async def _spawn_with_pty(argv: list[str], creds: SshCredentials,
             start_new_session=True,   # the pty becomes the controlling terminal
             preexec_fn=_make_controlling_tty(child_fd),
         )
-    except OSError as exc:
+    except BaseException as exc:
         os.close(parent_fd)
         os.close(child_fd)
+        if not isinstance(exc, OSError):
+            raise
         raise SshError(f"cannot start ssh: {exc}") from exc
     os.close(child_fd)
 
@@ -987,4 +989,18 @@ def _kill(proc) -> None:
     try:
         proc.kill()
     except (ProcessLookupError, OSError):
+        pass
+
+
+async def kill_and_reap(proc, wait: float = 5.0) -> None:
+    """Kill a child and collect it, bounded.
+
+    A killed child that is never waited for stays a zombie and keeps its pipes
+    for as long as this process lives; asyncio closes the pipe transports only
+    once the exit has been seen. Never raises."""
+    _kill(proc)
+    try:
+        async with asyncio.timeout(wait):
+            await proc.wait()
+    except (asyncio.TimeoutError, OSError):
         pass

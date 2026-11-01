@@ -2077,10 +2077,7 @@ class FleetApp:
             async with asyncio.timeout(timeout):
                 return await proc.wait()
         except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except (ProcessLookupError, OSError):
-                pass
+            await fleet_ssh.kill_and_reap(proc)
             return -1
         finally:
             pump_task.cancel()
@@ -2538,16 +2535,18 @@ class FleetApp:
         import pty
         shell_path = os.environ.get("SHELL") or shutil.which("bash") or "/bin/sh"
         master_fd, slave_fd = pty.openpty()
-        _set_winsize(master_fd, cols, rows)
         try:
+            _set_winsize(master_fd, cols, rows)
             proc = await asyncio.create_subprocess_exec(
                 shell_path, "-i",
                 stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
                 start_new_session=True, env=_shell_env(),
                 preexec_fn=_make_controlling_tty(slave_fd))
-        except (OSError, ValueError) as exc:
+        except BaseException as exc:
             os.close(master_fd)
             os.close(slave_fd)
+            if not isinstance(exc, (OSError, ValueError)):
+                raise
             self._fail(src, rid, f"cannot start shell: {exc}"[:128])
             return
         os.close(slave_fd)

@@ -91,7 +91,9 @@ than dropped, because losing a diagnostic to a typo is the wrong trade.
 Every failure a guard swallows lands here as well as on stderr —
 [`src/faults.py`](../../src/faults.py) carries one sink, set by the node. Those
 are the failures with no other reader at all, which makes them the lines an
-operator turning a log on is most often looking for.
+operator turning a log on is most often looking for. The log hears every one;
+stderr hears each place once a minute, with a count of what it swallowed since
+(`gotchas.md`, *Running out of descriptors*).
 
 ## What the core writes
 

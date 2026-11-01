@@ -174,6 +174,15 @@ class ConnectableFakeTransportManager:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
+def _every_fault_is_written(monkeypatch):
+    """`faults.note` writes a place once a minute; its table is process-wide, so
+    a test asserting that a failure reached stderr would otherwise depend on
+    which test ran before it in the same worker."""
+    from src import faults
+    monkeypatch.setattr(faults, "_places", {})
+
+
+@pytest.fixture(autouse=True)
 def _no_public_network_probes(monkeypatch):
     """Stub the node's outward network discovery for every test.
 

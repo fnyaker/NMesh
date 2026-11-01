@@ -39,6 +39,7 @@ import re
 import time
 
 from . import fleet_docker as docker
+from . import fleet_ssh
 from .fleet_docker import DockerError
 
 # -- labels ------------------------------------------------------------------
@@ -158,10 +159,7 @@ async def run(argv: list[str], *, cwd: str | None = None,
     try:
         await asyncio.wait_for(asyncio.gather(drain(), proc.wait()), timeout)
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        await fleet_ssh.kill_and_reap(proc)
         raise DockerError("that took too long and was stopped") from None
     return proc.returncode or 0, "\n".join(collected)[-MAX_OUTPUT:]
 
