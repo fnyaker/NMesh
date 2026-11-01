@@ -86,7 +86,7 @@ from src.apps.fleet_state import FleetState
 from src.apps.fleet_web import FleetBridge
 from src.apps.mcp import McpApp, McpBridge
 from src.apps import fleet_provision
-from src import config
+from src import config, fd_limit
 
 
 def _chat_factory(node, connector, host=None, perms=None):
@@ -404,6 +404,7 @@ def _settle_the_trial(node) -> None:
 
 
 async def main() -> None:
+    fd_limit.raise_soft_limit()
     ap = argparse.ArgumentParser()
     # Defaults live in src/config.py, not here: the parser must be able to say
     # "this flag was not given" so the file can speak. See _settle().

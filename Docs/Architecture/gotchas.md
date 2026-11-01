@@ -2475,6 +2475,36 @@ running X.
   after an update to be restarted — by nothing. Every unit written now has a
   supervisor behind that variable, and a test per unit says which.
 
+## Running out of descriptors
+
+A node that had run for days failed to start a command with `Too many open
+files: '/dev/null'`. Nothing was wrong with the command: the process had no
+descriptor left, and from that moment every place that needs one fails on its
+own — a command, an accepted link, a state file — with an error that names the
+victim, not the cause. The HTTP servers were one source (`src/http_server.py`
+bounds them now); these were the others.
+
+- **`faults.note` wrote a traceback every time.** The alert and the log ring
+  were keyed on *where*; stderr was not. A console section that raised was
+  written whole on every `node.state`, about once a second per open tab — and
+  a node short of descriptors fails in many places at once, so the journal fills
+  at the moment the disk is least able to take it. It is now written whole once
+  per place, quiet for `QUIET_SECONDS`, then says how many it swallowed; the
+  sink (the log ring) still hears every one. The table is process-wide, so
+  `tests/conftest.py` empties it for every test: a test asserting that a failure
+  reached stderr would otherwise depend on which test ran before it.
+- **A child killed and never waited for.** After a timeout `proc.kill()` was
+  the end of it; asyncio closes the pipe transports only once it has seen the
+  exit, so the pipes stayed open as long as the process lived. Use
+  `fleet_ssh.kill_and_reap`.
+- **A descriptor made, then something raised before the `try`.** `pty.openpty()`
+  followed by a call outside the guard, and a discovery socket bound before
+  `create_datagram_endpoint`: either leaks on exactly the failure that is most
+  likely when descriptors are short, which makes the shortage worse.
+- **The limit itself.** The soft limit a service manager hands out is a number
+  chosen for a shell. `fd_limit.raise_soft_limit()` raises it to the hard limit
+  (capped at 65 536) at start.
+
 ## Miscellaneous
 
 - **A per-link ceiling that closed what the tarpit had muted.** The receive loop

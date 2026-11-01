@@ -506,6 +506,22 @@ scope. Add yours.
   test the agent had not opened, and matched nothing; the half of the edit that
   did apply left the suite red for a reason that looked like the code's. →
   Read the test before writing its replacement, every time.
+- **Work done on a base 30 versions old.** A bounded HTTP server was written,
+  tested and documented against `f422105`, and `origin/main` already had
+  `src/http_server.py` doing the same job better (per-address bound included).
+  The conflict showed it at commit time, after the work. → `git fetch` and read
+  `git log HEAD..origin/main` before writing a fix, not after.
+- **A ceiling test that a timeout could pass.** The first test of the HTTP
+  connection ceiling gave its handler a 0.4 s idle timeout, so with the ceiling
+  removed the extra connection was closed by the timeout and the test still
+  passed. Caught by mutating the line. → Make every other way out slower than
+  the test, then mutate the mechanism.
+- **A baseline taken on a stub.** With `oqs` stubbed to import, 165 webconsole
+  tests failed on `HEAD` and on the change alike, and "the same failures" was
+  about to be read as no regression. → Before comparing two runs, check the
+  baseline is mostly green; a premise that fails everything compares nothing.
+  A venv with a real liboqs existed (`~/NMesh/.venv`) and was found by
+  searching for `site-packages/oqs`.
 - **A path read relative to the current directory in a script that is
   sourced.** `start.sh` read `scripts/liboqs.lock` relative to wherever it had
   `cd`'d, which under the test harness was `/usr/bin`; every stamp then looked

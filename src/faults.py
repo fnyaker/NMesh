@@ -36,6 +36,8 @@ the machine's own; a reply never is.
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import traceback
 
 # Enough to name the line that raised and how it was reached, and no more.
@@ -68,15 +70,47 @@ def unwatch(sink) -> None:
         _sink = None
 
 
+# A guard that fails in a loop — a console section on every poll — must not
+# write a traceback per pass: the journal is the disk, and the disk is not ours.
+# The first failure of a place is written whole; after it the place is quiet for
+# `QUIET_SECONDS`, then says how many it swallowed.
+QUIET_SECONDS = 60.0
+MAX_PLACES = 64
+_places: dict[str, list] = {}       # where -> [last written at, swallowed since]
+_places_lock = threading.Lock()
+
+
+def _admit(where: str) -> int | None:
+    """None to stay quiet, else how many were swallowed since the last write."""
+    now = time.monotonic()
+    with _places_lock:
+        entry = _places.get(where)
+        if entry is None:
+            while len(_places) >= MAX_PLACES:
+                del _places[next(iter(_places))]
+            _places[where] = [now, 0]
+            return 0
+        if now - entry[0] < QUIET_SECONDS:
+            entry[1] += 1
+            return None
+        swallowed, entry[0], entry[1] = entry[1], now, 0
+        return swallowed
+
+
 def note(where: str, exc: BaseException) -> None:
     """Write one swallowed failure down. **Never raises** — a failed report is
     not itself a failure, and the guard that called this was protecting
     something more important than its own logging."""
     try:
-        sys.stderr.write(f"nmesh: {where} failed\n")
-        sys.stderr.write("".join(traceback.format_exception(
-            type(exc), exc, exc.__traceback__, limit=MAX_FRAMES)))
-        sys.stderr.flush()
+        swallowed = _admit(where)
+        if swallowed is not None:
+            if swallowed:
+                sys.stderr.write(f"nmesh: {where} failed again, {swallowed} "
+                                 f"time(s) since it was last written\n")
+            sys.stderr.write(f"nmesh: {where} failed\n")
+            sys.stderr.write("".join(traceback.format_exception(
+                type(exc), exc, exc.__traceback__, limit=MAX_FRAMES)))
+            sys.stderr.flush()
     except Exception:                       # noqa: BLE001 — never the reason
         pass
     sink = _sink

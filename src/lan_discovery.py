@@ -107,9 +107,13 @@ class LanDiscovery:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         except OSError:
             pass
-        sock.bind((host, DISCOVERY_PORT))
-        await loop.create_datagram_endpoint(
-            lambda: _AnswererProtocol(self), sock=sock)
+        try:
+            sock.bind((host, DISCOVERY_PORT))
+            await loop.create_datagram_endpoint(
+                lambda: _AnswererProtocol(self), sock=sock)
+        except BaseException:
+            sock.close()
+            raise
 
     def _allow(self, src_ip: str) -> bool:
         now = asyncio.get_event_loop().time()
@@ -181,9 +185,13 @@ class LanDiscovery:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         except OSError:
             pass
-        sock.bind(("", 0))
-        transport, _ = await loop.create_datagram_endpoint(
-            lambda: _CollectorProtocol(_on_answer), sock=sock)
+        try:
+            sock.bind(("", 0))
+            transport, _ = await loop.create_datagram_endpoint(
+                lambda: _CollectorProtocol(_on_answer), sock=sock)
+        except BaseException:
+            sock.close()
+            raise
         try:
             beacon = _REQ + self._node_id
             for host in targets:

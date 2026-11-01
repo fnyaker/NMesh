@@ -4445,3 +4445,28 @@ the compose plugin, so stacks were offered a compose update that then failed.
 **Fixed** — plain HTTP only to a loopback address; anything else is HTTPS with
 its chain verified or its certificate pinned. Compose is asked for its version
 (`docker compose`, then `docker-compose`) and the answer kept ten minutes.
+
+## 121 — high — Descriptors were given back late, and swallowed failures were written without limit
+
+> **Status — fixed.** Tests: `tests/test_fd_hygiene.py`,
+> `tests/test_faults_quiet.py`.
+
+**Where** — `src/faults.py`, `src/apps/fleet.py` (`_spawn_shell`,
+`_stream_command`), `src/apps/fleet_ssh.py` (`run` over a pty, `_keyscan`),
+`src/apps/fleet_stacks.py` (`run`), `src/lan_discovery.py`.
+
+**What happens** — node C, running for days, answered a fleet update with
+`cannot run: [Errno 24] Too many open files: '/dev/null'`. Its descriptors could
+not be read, so the cause there was not observed; the code shows these ways to
+spend descriptors without giving them back: a child killed after a timeout and
+never waited for (its pipes stay open); a `pty` or a discovery socket leaked
+when a step after creating it raised; and no raised soft limit (1024 to 2048 is
+common). A swallowed failure in a loop also wrote a 12-frame traceback to stderr
+per pass — one per `node.state` for a console section that raised — so the
+journal filled exactly when everything started failing at once.
+
+**Fixed** — `fleet_ssh.kill_and_reap`, descriptors closed on the failing path,
+`src/fd_limit.py` raising the soft limit at start, and `faults.note` writing a
+place once a minute with a count. The unbounded HTTP server was fixed
+separately (`src/http_server.py`). Open: a node's descriptor count is on no
+page, so the next shortage is again found by its symptom.
