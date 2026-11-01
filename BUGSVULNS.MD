@@ -4470,3 +4470,28 @@ journal filled exactly when everything started failing at once.
 place once a minute with a count. The unbounded HTTP server was fixed
 separately (`src/http_server.py`). Open: a node's descriptor count is on no
 page, so the next shortage is again found by its symptom.
+
+## 122 — medium — A punch recorded the peer's IP as one of this node's own addresses, and probed a TCP port as if it were UDP
+
+> **Status — fixed.** Tests: `tests/test_hole_punch.py::TestPunchProbeTarget`.
+
+**Where** — `src/node.py` (`_handle_punch_relay`, `_punch_probe_addr`),
+`src/mesh/peers.py` (`_PunchState`).
+
+**What happens** — the third field of `PUNCH_RELAY` is the *peer's* IP as the
+relay sees it. The handler appended it to `_extra_addrs`, the IPs somebody
+reported seeing *this* node at, which `advertised_uris()` pairs with the local
+listener port. Every node that punched through a shared router then announced
+the other's address, and the mesh read it as "both nodes are behind 192.0.2.7,
+and one port can only reach one of them", dropped addresses, and cut healthy
+links. Separately, a relay that had only the peer's TCP link relayed that TCP
+`host:port`, and the probes went to a port the peer does not listen on over UDP,
+so the NAT mapping the peer needs was never opened.
+
+**Reproduce** — three nodes, A and C behind one router, B a relay holding TCP
+links to both; make A punch to C and read `advertised_uris()` on A.
+
+**Fixed** — the observed IP is no longer recorded; `_punch_probe_addr` takes a
+UDP URI or bare address as given, ignores another medium's port, and falls back
+to the observed IP on the UDP port the peer announces. `_PunchState.my_udp_addr`
+is now `peer_ip`, which is what it held.

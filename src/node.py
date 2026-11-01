@@ -14005,24 +14005,9 @@ Hints come first (the ``have`` byte on an announce, from an
         if self._udp_server is None:
             return
 
-        # The relay told us the peer's address. If it's a TCP address, we
-        # can't punch to it directly — we need the peer's UDP address.
-        # The peer will send us its UDP probes, and we'll learn its UDP
-        # address from the datagram source. For now, parse what we can.
-        # If the peer_addr is host:port format, use it as the UDP target.
-        udp_addr = peer_addr_str
-        if "://" in udp_addr:
-            # It's a URI like tcp://host:port — extract host:port
-            result = _validate_uri(udp_addr)
-            if result is None:
-                return
-            _, opaque = result
-            udp_addr = opaque
-
-        # Record our observed address from the relay
-        if _is_ip_address(observed_ip) and observed_ip not in self._extra_addrs:
-            if len(self._extra_addrs) < _MAX_EXTRA_ADDRS:
-                self._extra_addrs.append(observed_ip)
+        udp_addr = self._punch_probe_addr(peer_id, peer_addr_str, observed_ip)
+        if udp_addr is None:
+            return
 
         state = _PunchState(peer_id, udp_addr, observed_ip)
         state.deadline = time.monotonic() + _PUNCH_TIMEOUT
@@ -14035,6 +14020,43 @@ Hints come first (the ``have`` byte on an announce, from an
         # `_punch_pending` early blocks the punch deterministically, and a task
         # the ceiling refuses must not take that state with it.
         self._spawn_bounded(self._send_punch_probes(state))
+
+    def _punch_probe_addr(self, peer_id: NodeID, relayed: str,
+                          peer_ip: str) -> str | None:
+        """Where to send our probes for a punch to *peer_id*, from a PUNCH_RELAY.
+
+        The relay's second field is the peer's address as the relay holds it:
+        a bare UDP ``host:port``, a link URI, or nothing — a relay that only
+        accepted the peer's TCP link has no address for it at all. Its third
+        field is the peer's IP *as the relay sees it*: the peer's, never ours.
+
+        A peer we cannot probe never opens our NAT's mapping towards it, so its
+        probes are dropped there and two nodes behind NATs never meet. So when
+        the relayed address is missing or names another medium, we aim at the
+        peer's observed IP on the UDP port the peer announces; ``""`` keeps the
+        punch alive waiting for the peer's probe, ``None`` refuses it."""
+        if "://" in relayed:
+            result = _validate_uri(relayed)
+            if result is None:
+                return None
+            scheme, opaque = result
+            if scheme == "udp":
+                return opaque
+            relayed = ""          # a TCP port says nothing of the UDP one
+        if relayed:
+            return relayed
+        if not _is_ip_address(peer_ip):
+            return ""
+        entry = self._routing.get(peer_id)
+        for uri in entry.addresses if entry is not None else ():
+            result = _validate_uri(uri)
+            if result is None or result[0] != "udp":
+                continue
+            hp = split_host_port(result[1])
+            if hp is not None and hp[1].isdigit():
+                host = f"[{peer_ip}]" if ":" in peer_ip else peer_ip
+                return f"{host}:{hp[1]}"
+        return ""
 
     def _prune_punch_pending(self) -> None:
         """Drop hole-punch attempts past their deadline (counted as failed)."""

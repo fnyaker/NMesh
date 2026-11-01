@@ -195,7 +195,7 @@ class TestPunchState:
         state = _PunchState(target, "10.0.0.1:9000", "10.0.0.2")
         assert state.target == target
         assert state.remote_udp_addr == "10.0.0.1:9000"
-        assert state.my_udp_addr == "10.0.0.2"
+        assert state.peer_ip == "10.0.0.2"
         assert state.probes_sent == 0
         assert state.probes_received == 0
         assert state.ack_received is False
@@ -385,3 +385,74 @@ class TestKeepaliveBurstAsksTheLink:
         assert link.is_closed() is False
         assert link.keepalive() is False
 
+
+
+class TestPunchProbeTarget:
+    """Where a PUNCH_RELAY makes us aim our probes, and what it must not touch."""
+
+    async def _node(self, addresses):
+        node, _ = await make_node()
+        ident = CryptoIdentity()
+        pub = ident.dsa_public_key
+        nid = NodeID.from_public_key(pub)
+        node._routing.add(nid, addresses, dsa_pub=pub)
+        return node, nid
+
+    async def test_a_udp_uri_is_probed_at_its_host_and_port(self):
+        node, nid = await self._node([])
+        assert node._punch_probe_addr(
+            nid, "udp://198.51.100.9:40001", "203.0.113.7") == "198.51.100.9:40001"
+        await node.stop()
+
+    async def test_a_bare_address_is_kept(self):
+        node, nid = await self._node([])
+        assert node._punch_probe_addr(
+            nid, "198.51.100.9:40001", "203.0.113.7") == "198.51.100.9:40001"
+        await node.stop()
+
+    async def test_a_tcp_port_is_not_taken_for_a_udp_port(self):
+        """The TCP URI a relay holds names a port that is not the UDP one: it
+        aims at the observed IP on the UDP port the peer announced."""
+        node, nid = await self._node(
+            ["tcp://198.51.100.20:9000", "udp://198.51.100.20:9001"])
+        got = node._punch_probe_addr(
+            nid, "tcp://198.51.100.20:9000", "203.0.113.7")
+        assert got == "203.0.113.7:9001"
+        await node.stop()
+
+    async def test_an_empty_address_uses_the_observed_ip(self):
+        node, nid = await self._node(["udp://198.51.100.20:9001"])
+        assert node._punch_probe_addr(nid, "", "203.0.113.7") == "203.0.113.7:9001"
+        assert node._punch_probe_addr(
+            nid, "", "2001:db8::7") == "[2001:db8::7]:9001"
+        await node.stop()
+
+    async def test_nothing_to_aim_at_keeps_the_punch_waiting(self):
+        node, nid = await self._node(["tcp://198.51.100.20:9000"])
+        assert node._punch_probe_addr(nid, "", "203.0.113.7") == ""
+        assert node._punch_probe_addr(nid, "", "not-an-ip") == ""
+        await node.stop()
+
+    async def test_a_malformed_uri_refuses_the_punch(self):
+        node, nid = await self._node([])
+        assert node._punch_probe_addr(nid, "://x", "203.0.113.7") is None
+        await node.stop()
+
+    async def test_the_peers_ip_is_never_recorded_as_ours(self):
+        """The relay's third field is the *peer's* IP. Recording it among the
+        addresses this node announces makes every node behind one router claim
+        the same address."""
+        node, _ = await make_node()
+        node._punch_enabled = True
+        node._udp_server = FakeUDPServer()
+        peer = await _authed(node)
+        peer_id = os.urandom(20)
+        before = list(node._extra_addrs)
+        payload = _encode_punch_relay(peer_id, "198.51.100.9:40001", "203.0.113.7")
+        pkt = Packet.create(PUNCH_RELAY, peer.authenticated_id.raw,
+                            b"\xff" * 20, payload)
+        await node._handle_packet(peer, pkt)
+        assert NodeID(peer_id) in node._punch_pending
+        assert node._extra_addrs == before
+        assert "203.0.113.7" not in node._extra_addrs
+        await node.stop()
