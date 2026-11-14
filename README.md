@@ -269,8 +269,8 @@ A transport is anything that moves bytes. Shipped:
 | `spool://` | shared directory / file             | store-and-forward, USB stick   |
 
 Writing your own: [`Docs/Transports/guide`](Docs/Transports/guide) +
-[`template.py`](Docs/Transports/template.py). Spool:
-[`Docs/Transports/spool`](Docs/Transports/spool).
+[`template.py`](Docs/Transports/template.py), which includes the spool medium as
+a worked store-and-forward example.
 
 ## Deployments
 
@@ -311,16 +311,16 @@ fixes them: [`FAQ.md`](FAQ.md).
 
 ## Audit
 
-A full audit that follows the execution order — every packet field from the
-socket to the app, then the console and the apps — with each finding written up
-next to the invariant a fix must not break: [`BUGSVULNS.MD`](BUGSVULNS.MD).
+A full audit follows the execution order — every packet field from the socket
+to the app, then the console and the apps — with each finding written next to
+the invariant a fix must not break. The living register of what is still open,
+and the index of every finding, is [`BUGSVULNS.MD`](BUGSVULNS.MD); the full
+historical write-up is
+[`Docs/History/audit-execution-flow.md`](Docs/History/audit-execution-flow.md).
 
-68 findings, 48 security and 20 performance, all addressed. Five are recorded
-there as *partly* closed, with the reason next to each: what is left in those
-five is a design decision (authenticating the UDP frame header, serving a node
-that has not yet joined), not an unfinished patch. The last three were not found
-by reading the code — one CI failure turned them up when the base image's Python
-moved to 3.13.
+141 findings were recorded (121 security, 20 performance). Most are closed with
+the test that holds them; nine are open or partly open, each with the reason and
+what it would take.
 
 ## Tests
 
@@ -350,8 +350,9 @@ scripts/          nmesh_node.py (launcher), nmeshctl.py (the command line), nmes
 start.sh          installs dependencies and runs a node from the current tree
 install.sh        installs the tree for good + a start-at-boot service, then runs it
 docker/           relay-node image and compose file
-Docs/             guides (setup, transports, console, connector, packets)
+Docs/             Architecture/ (internal mechanics), usage guides, History/, Ideas/
 tests/            unit tests + tests/integration (real nodes)
+opencode.json     the specialised agents and their file ownership
 ```
 
 ## License

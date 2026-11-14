@@ -11,7 +11,7 @@ anything that wants to talk to other nodes on the mesh.
 ## Running it
 
 ```bash
-python scripts/console_demo.py --connector-port 8790
+python scripts/nmesh_node.py --connector-port 8790
 # -> Data connector: 127.0.0.1:8790   token=<generated token>
 ```
 
@@ -209,7 +209,8 @@ until an operator turns it on
 ([`Docs/Architecture/logging.md`](../Architecture/logging.md)). An app's access
 to it has two unequal halves, and the inequality is the design.
 
-**Writing needs no grant:**
+**Writing needs the `log` permission**, asked for in the app's manifest and
+granted per app like every other frame:
 
 ```python
 await client.log("upload finished", level="warn", topic="files")
@@ -423,6 +424,61 @@ nothing when the thing it refers to is not there yet. It works on a fast local
 link, it works in every test, and in the field it loses one edit in a hundred
 with nothing anywhere saying why.
 
+## Launching a child app
+
+The node can start declared applications and **plug them into the mesh**: it
+injects the connector's coordinates into their environment, and the app joins
+through `ConnectorClient` without knowing anything about the mesh.
+
+```bash
+python scripts/nmesh_node.py --connector-port 8790 \
+    --launch "python scripts/example_app.py"
+# repeat --launch for several apps
+```
+
+`--launch` needs a connector: pass `--connector-port`, or enable a built-in app
+(chat, contacts, fleet), which creates one itself. Without either, the launcher
+has nothing to inject and `--launch` is ignored with a note. When the node
+stops, every launched app is terminated cleanly.
+
+Writing the app:
+
+```python
+from src.data_connector import ConnectorClient
+
+async def main():
+    client = ConnectorClient.from_env()      # reads NMESH_CONNECTOR_* below
+    await client.connect()
+    me = await client.whoami()               # our NodeID on the mesh
+    while True:
+        src, payload = await client.recv()   # an incoming message
+        await client.send(src, b"echo:" + payload)
+```
+
+See [`scripts/example_app.py`](../../scripts/example_app.py) for the complete
+echo service.
+
+| Variable | Contents |
+|---|---|
+| `NMESH_CONNECTOR_HOST` | the connector's host (loopback) |
+| `NMESH_CONNECTOR_PORT` | the connector's port |
+| `NMESH_CONNECTOR_TOKEN` | the authentication token |
+| `NMESH_NODE_ID` | the node's NodeID (hex) |
+
+`launch(command, app_id=APP_ID)` launches the child **as one particular app**:
+`NMESH_APP_ID` is set, and `NMESH_CONNECTOR_TOKEN` is that app's own token rather
+than the shared one. Without `app_id` the child gets the shared token and the
+normal permissions.
+
+An app that runs whether or not anybody is there is launched with
+`NMESH_ATTENDED=0` in its `env`: an attached app is one of the things that says
+somebody is using this node, and a daemon is not one.
+
+Commands are **configuration declared by the operator**, never network input,
+and are run through `exec` (never a shell). The token travels only through the
+child's environment. The number of children is bounded, and all are terminated
+when the node stops.
+
 ## Security
 
 - **A token is mandatory** (constant-time comparison) before any action;
@@ -440,4 +496,4 @@ with nothing anywhere saying why.
 This connector is the building block: a declared app (manifest + files) launched
 by the node plugs into it to talk to the network, on its own section. Sharing
 apps over the DHT and their **signed deployment** (app_id + the author's
-signature) are described in `Docs/AppSharing/guide`.
+signature) are described in [`Docs/AppStore/guide`](../AppStore/guide).

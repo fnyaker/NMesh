@@ -1,7 +1,12 @@
-# Design plan — agnostic reachability + relayed invitation
+# Design — agnostic reachability + relayed invitation
 
-> **Status: A PLAN, not implemented yet.** A working document to be validated
-> before any code. The goal: letting two nodes reach each other even behind
+> **Historical design.** This plan was implemented; the current behaviour is in
+> [`Docs/Architecture/transports.md`](../Architecture/transports.md) and
+> [`Docs/Architecture/routing.md`](../Architecture/routing.md). It is kept as
+> the record of what was decided and why, not as a description of today.
+>
+> **Status at the time: a plan, not implemented yet.** The goal: letting two
+> nodes reach each other even behind
 > CGNAT / double NAT / symmetric NAT, **without depending on a concrete
 > transport**, and without a contraption (no dedicated quota database).
 

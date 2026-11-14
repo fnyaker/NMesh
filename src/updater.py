@@ -46,7 +46,7 @@ every node that accepts an update. What limits it:
 The mesh path exists precisely to take GitHub out of that set:
 :mod:`src.core_release` signs a release with an ML-DSA identity and this node
 installs it only from a publisher whose key its operator pinned. What neither
-path can defend against is a compromised machine — ``todo/peer-integrity.md``
+path can defend against is a compromised machine — ``Docs/Ideas/peer-integrity.md``
 covers that wider problem.
 
 Never on the event loop

@@ -11,7 +11,7 @@ dependency** (stdlib + `cryptography`, already present).
 ## Running it
 
 ```bash
-python scripts/console_demo.py --data ./mydata
+python scripts/nmesh_node.py --data ./mydata
 ```
 
 On the first run the password is **generated** and kept in
@@ -702,8 +702,9 @@ skeleton. A spinner with no end is a bug report nobody can act on.
   interpreter. **No HSTS, on purpose**: on a self-signed certificate it turns the
   browser's warning into a page that cannot be opened at all, and the
   certificate's trust comes from its pinned fingerprint.
-- **One server for the three pages** (`src/http_server.py`: console, chat, MCP),
-  built for a client that is not friendly. The TLS handshake runs in the
+- **One server for every page** (`src/http_server.py`: the console, chat,
+  contacts, fleet, the node and package views, the terminal and MCP), built for
+  a client that is not friendly. The TLS handshake runs in the
   connection's own thread, **not in the accepting one** — a listening socket
   wrapped for TLS handshakes inside `accept()`, so a client that connected and
   said nothing used to stop the console for everybody until it hung up. A
@@ -737,7 +738,9 @@ node must not be something the network can do to it.
 |---|---|
 | `/`, `/style.css`, `/app.js` | the console |
 | `/chat`, `/chat.css`, `/chat.js` | the chat app, if enabled |
+| `/contacts`, `/contacts.css`, `/contacts.js` | the contacts app, if enabled |
 | `/fleet`, `/fleet.css`, `/fleet.js` | the fleet app, if enabled |
+| `/term`, `/term.css`, `/term.js` | the terminal, full screen, under the fleet `shell` right |
 | `/node`, `/node.css`, `/node.js` | the node card as a page (`/node#<id>`) |
 | `/package`, `/package.css`, `/package.js` | one signed package, described (`/package#<record id>`) — mounted by Settings → Updates, Apps → Find an app and the node card, and served on its own for the window or tab an operator prefers |
 | `/theme.js` | sets the chosen theme **before the first paint** (blocking in `<head>`) |

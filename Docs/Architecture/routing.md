@@ -207,7 +207,8 @@ the target, authentication wants a shared anchor).
   classic DHT poisoning is closed by construction.
 - Bounded: `_MAX_ENTRIES = 8192`, `_MAX_BYTES = 128 MiB`, LRU eviction.
 - Replication: `_DHT_K = 6` nearest nodes (STORE/FIND_VALUE).
-- Use: sharing applications (`app_package.py`, see `Docs/AppSharing/guide`).
+- Use: sharing applications (`app_package.py`, see the raw-DHT appendix of
+  [`Docs/AppStore/guide`](../AppStore/guide#appendix--raw-dht-package-exchange-advanced-unsigned)).
 
 ## Public/private per-app DHT (`app_dht.py`)
 
@@ -511,7 +512,7 @@ of the three.
   on an id we never asked about. One retry only: if the slot has been taken in
   the meantime we return `False` — two nodes cannot chain each other forever.
 - Last resort: a bounded iterative `_kademlia_lookup(target)`
-  (`_KAD_LOOKUP_MAX_ROUNDS = 4`, `_KAD_LOOKUP_TIMEOUT = 3.0 s`) aggregates
+  (`_KAD_LOOKUP_MAX_ROUNDS = 10`, `_KAD_LOOKUP_TIMEOUT = 3.0 s`) aggregates
   `FOUND_NODE` until it stabilises; the results feed `_connect_routing` and the
   routing table.
 

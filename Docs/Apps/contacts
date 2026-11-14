@@ -98,7 +98,8 @@ bounded:
 | members of a shared book | 32 |
 | invitations waiting for a human | 16 in all, 2 per sender, 14 days |
 
-A book is one value of the node's drawer (256 KiB at most); a book that no
+A book is one value of the node's drawer (240 KiB at most, kept clear of the
+drawer's 256 KiB edge); a book that no
 longer fits is refused with `full` rather than truncated. Deleted contacts leave
 a tombstone for 90 days so the deletion reaches nodes that were offline; they
 are the first thing to go when room is needed.
@@ -155,7 +156,8 @@ time with a back button. The page never asks which device it is on.
   another book, **Message** (opens `/chat#c/<node id>`);
 - share dialog: invite by name or id, role, who follows, take back;
 - import / export as **vCard** (`X-NMESH-NODE` carries the node ids; any other
-  address book reads the rest). An import is capped at 600 000 characters of text and 1000 entries (the request carrying it at 2 MiB).
+  address book reads the rest). An import is capped at 600 000 bytes of vCard
+  text and 1000 entries (the request carrying it at 2 MiB).
 
 Every sentence is read from the catalogue (`t()`), and a refusal from the node
 travels as a stable code (`why`: `no_book`, `read_only`, `no_contact`, `empty`,

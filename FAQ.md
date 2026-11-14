@@ -91,19 +91,6 @@ The state directory belongs to root while the node runs under another account �
 typically an installation done with `sudo` before the node had its own service
 account. Run `./install.sh` again: it repairs ownership as it goes.
 
-### `start.sh: line …: HOME: unbound variable`
-
-A systemd service starts with no `HOME`. Fixed: `start.sh` now derives the home
-directory from the account's passwd entry. If you still see this message your
-tree predates the fix — update, or add `Environment=HOME=<prefix>` to the unit.
-
-### liboqs rebuilds on every installation
-
-It should not any more: the result is cached per wrapper version
-(`/var/cache/nmesh/liboqs-<v>` as root). If the build starts again, either the
-cache is not writable or the wrapper version changed. The message from
-`start.sh` says which.
-
 ### I lost the console password
 
 On the machine:
@@ -122,9 +109,9 @@ You do not need it. A machine deployed from *Fleet → Discover & deploy*
 generates its own password on first start and prints it to a log nobody reads,
 so the deploy form grants `manage` **and** `passwordless` by default: pick that
 node in the console's context selector and it lets you straight in, on the
-strength of the grant. Set a password of your own from **Settings → Password**
-once you are there, and untick `passwordless` on that node if you would rather
-be asked for it. Deployed before this existed? Reset it on the machine as
+strength of the grant. Set a password of your own from
+**Settings → Console password** once you are there, and untick `passwordless`
+on that node if you would rather be asked for it. Deployed before this existed? Reset it on the machine as
 above, or grant `passwordless` from that node's own *Fleet* page.
 
 ---
@@ -178,13 +165,6 @@ it again: it will ask for the password, or let you in on the grant alone if that
 right is still there. That is deliberate — the grant opens the channel, and the
 password (or `passwordless`) opens the session.
 
-### A progress or memory bar stays empty
-
-Fixed. The console's CSP (`default-src 'self'`, without `unsafe-inline`) makes
-the browser ignore **silently** any `style=` attribute, so bars written that way
-never filled. They are `<progress>` elements now. If you still see it, your tree
-predates the fix.
-
 ### The browser refuses the console's certificate
 
 It is self-signed, which is expected. Its SHA-256 fingerprint is printed when
@@ -202,12 +182,6 @@ Remote deployment installs nothing itself: it delivers the tree and calls its
 target machine** — the real cause is nearly always in there (a missing package,
 a full disk, no compiler for liboqs).
 
-### `sudo: a terminal is required`
-
-Fixed: deployment allocates a pty and answers the prompts without ever writing
-the secret to disk or onto a command line. If you still see it, update the
-**operating** node — that is the one driving SSH.
-
 ### A deployed machine does not appear in the list
 
 It joins after installing its dependencies, which can take several minutes on a
@@ -218,12 +192,6 @@ deployment has got to.
 ---
 
 ## Miscellaneous
-
-### Two idle nodes were exchanging megabytes
-
-Fixed (a `FIND_NODE`/`FOUND_NODE` loop): ~3 Mbit/s at rest became ~2 kbit/s. To
-check on your own machine: **Settings → Diagnostics → Protocol trace**, which
-gives the volume per message type without ever recording any content.
 
 ### Where are the files?
 

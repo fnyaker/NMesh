@@ -425,6 +425,19 @@ click, the mismatch is refused rather than installing something nobody has seen.
 The matching API: `GET /api/update/check`, `POST /api/update/apply` (see
 [`../WebConsole/guide`](../WebConsole/guide)).
 
+### What an update replaces
+
+An update swaps whole entries, listed in `boot_guard.REPLACE_ENTRIES`:
+`src`, `scripts`, `start.sh`, `install.sh`, `requirements.txt`,
+`pyproject.toml`, `Docs`, `docker`, `README.md`, `AGENTS.md`, `CLAUDE.md` and
+`LICENSE`. Anything not listed is left alone — which is what keeps the state
+directory, the venv and an operator's own files out of it.
+
+A **new top-level directory** in the repository that this list does not name
+will not ship to nodes updating from GitHub. Add its entry in the same commit
+as the directory; `src/` and `scripts/` are already listed, so code inside them
+travels without a change.
+
 ### Following a branch instead of the releases
 
 `update_branch` in `nmesh.conf` (empty by default; `NMESH_UPDATE_BRANCH`
