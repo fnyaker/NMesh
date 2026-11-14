@@ -30,6 +30,11 @@ API = ("https://api.github.com/repos/open-quantum-safe/liboqs/security-advisorie
        "?state=published&per_page=100&page={page}")
 _MAX_PAGES = 10
 _BOUND = re.compile(r"^(<=|>=|<|>|=)?\s*v?(\d+(?:\.\d+)*)$")
+# GitHub's range field is free text: the repository advisories also use
+# "0.15.0 and lower" / "0.16.0 and higher". Left unread, those count as
+# affected (fail-closed), which is a false positive when the lock is patched.
+_WORDS = re.compile(r"^v?(\d+(?:\.\d+)*)\s+and\s+(lower|earlier|higher|later)$",
+                    re.IGNORECASE)
 
 
 def version(text: str) -> tuple:
@@ -51,6 +56,13 @@ def in_range(locked: str, spec) -> bool:
         return True
     have = version(locked)
     for bound in spec.split(","):
+        words = _WORDS.match(bound.strip())
+        if words is not None:
+            order = _compare(have, version(words.group(1)))
+            upper = words.group(2).lower() in ("lower", "earlier")
+            if (order > 0) if upper else (order < 0):
+                return False
+            continue
         match = _BOUND.match(bound.strip())
         if match is None:
             return True

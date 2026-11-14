@@ -26,6 +26,12 @@ class TestRanges:
         ("= 0.16", True),
         ("> 0.16.0", False),
         (">= 0.17.0", False),
+        # GitHub's repository advisories use these words rather than operators.
+        ("0.15.0 and lower", False),
+        ("0.16.0 and lower", True),
+        ("0.15.0 and earlier", False),
+        ("0.16.0 and higher", True),
+        ("0.17.0 and higher", False),
     ])
     def test_the_bounds_are_read(self, spec, hit):
         assert check.in_range("0.16.0", spec) is hit

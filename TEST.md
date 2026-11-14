@@ -208,6 +208,12 @@ canonical inventory is [`SECURITY.md`](SECURITY.md); CI mechanics that a change
 can break are held by `tests/test_workflows_pinned.py` and
 `tests/test_ci_scripts.py`.
 
+The liboqs advisory check reads GitHub's `vulnerable_version_range`, which is
+free text: the repository advisories use `0.15.0 and lower` as well as
+comparison operators. A range it cannot read is treated as affected
+(fail-closed), so a parser that misses a form turns a patched lock red;
+`tests/test_liboqs_advisories.py` holds every form the API actually uses.
+
 A release job publishes only a commit the suite passed on. Every action is
 pinned to a full commit SHA and every workflow starts from `permissions: {}`.
 A new action goes in by SHA with its version as a comment (`@<sha> # v4.4.0`);
