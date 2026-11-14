@@ -9,6 +9,7 @@ These cover the answer codec (hostile input), the request→answer round trip
 the per-source rate limit, and the node-level integration.
 """
 import asyncio
+import socket
 
 import pytest
 
@@ -23,11 +24,29 @@ from src.tcp_transport import TCPTransport, TCPServer
 from tests.conftest import make_manager
 from tests.integration import free_port
 
-# These tests broadcast/answer on the fixed DISCOVERY_PORT, so two running at
-# once (on different xdist workers) would hear each other's beacons. Pin them
-# all to a single worker — they run in parallel with the rest of the suite, just
-# not with each other. Requires `--dist loadgroup` (set in pyproject addopts).
+# These tests broadcast/answer on a discovery port, so two running at once (on
+# different xdist workers) would hear each other's beacons. Pin them all to a
+# single worker — they run in parallel with the rest of the suite, just not with
+# each other. Requires `--dist loadgroup` (set in pyproject addopts).
 pytestmark = pytest.mark.xdist_group("lan_discovery")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_discovery_port(monkeypatch):
+    """Never share the port with a node already running on the machine.
+
+    A developer box that runs NMesh has a real answerer on DISCOVERY_PORT; a
+    test that expects silence would then hear it and fail for the host, not for
+    the code. Bind one free UDP port for the duration of each test instead."""
+    import src.lan_discovery as discovery
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    finally:
+        probe.close()
+    monkeypatch.setattr(discovery, "DISCOVERY_PORT", port)
 
 
 def _ip_mgr() -> TransportManager:

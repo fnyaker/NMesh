@@ -140,6 +140,9 @@ permission is the node's to name, not a thing a package states about itself.
 | `contacts` | `books` `list` `names` `search` `find` | no | no | the address books — each declares `contacts.read` |
 | `contacts` | `add` `remove` | yes | no | save or take out a node — each declares `contacts.write` |
 | `fleet` | `relation` | no | **yes** | both directions of the ledger: rights held over that node, rights it holds here, requests pending either way |
+| `fleet` | `logs_policy` | yes | no | whether this console collects that machine's log, and the size bound |
+| `fleet` | `map_targets` `map_overlay` | no | no | machines the map may be grown through, and what fleet knows about the nodes on it — local only, because a map grows at the console an operator is sitting at |
+| `fleet` | `map_links` | yes | no | what the machines this console manages say they are linked to; reading it is what keeps them pushing |
 | `fleet` | `enrol` | yes | no | ask a node for the right to manage it |
 | `fleet` | `request` | yes | no | ask a node already managed for extra rights |
 | `fleet` | `invite` | yes | no | have a node we manage mint an invitation to its mesh |

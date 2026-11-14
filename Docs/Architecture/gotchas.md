@@ -3,6 +3,96 @@
 Real bugs, hit and fixed. Each one was expensive to diagnose. If you touch the
 area, keep the fix — and if you add one, document it here.
 
+## Start here
+
+- Nothing connects any more → [Handshakes that never complete ("nothing connects any more")](#handshakes-that-never-complete-nothing-connects-any-more)
+- A link keeps coming back or being rebuilt → [A link that keeps being rebuilt](#a-link-that-keeps-being-rebuilt)
+- A timer fires for nothing, or a loop spins → [Timers that exist to find nothing](#timers-that-exist-to-find-nothing), [A probe count is not a timeout](#a-probe-count-is-not-a-timeout)
+- Routing works at three nodes and not at six → [Routing: the "works at 3 nodes, not at 6" bugs](#routing-the-works-at-3-nodes-not-at-6-bugs)
+- It delivered once and never again → [E2E sessions & liveness (the "it never delivers again" bugs)](#e2e-sessions--liveness-the-it-never-delivers-again-bugs)
+- A test hangs, a worker dies, integration is flaky → [Hangs (the job/node "never finishes")](#hangs-the-jobnode-never-finishes), [Tests: parallelism & not blocking](#tests-parallelism--not-blocking)
+- The console page is blank or resets → [The console's pages: what a repaint quietly destroys](#the-consoles-pages-what-a-repaint-quietly-destroys), [A window opened with `noopener` starts with an empty sessionStorage](#a-window-opened-with-noopener-starts-with-an-empty-sessionstorage)
+- An update installed and did not come back → [Self-update: installing is not updating](#self-update-installing-is-not-updating)
+- Too many open files → [Running out of descriptors](#running-out-of-descriptors)
+
+> Section numbers written as `§N` in code comments are historical: they name
+> entries in the numbered lists below. Where the same rule appears in more
+> than one place, its title is the authority, not the number.
+
+## Contents
+
+- [Handshakes that never complete ("nothing connects any more")](#handshakes-that-never-complete-nothing-connects-any-more)
+- [A link that keeps being rebuilt](#a-link-that-keeps-being-rebuilt)
+- [Timers that exist to find nothing](#timers-that-exist-to-find-nothing)
+- [A probe count is not a timeout](#a-probe-count-is-not-a-timeout)
+- [Adding a message to a plane everybody already speaks](#adding-a-message-to-a-plane-everybody-already-speaks)
+- [The two ends of a link do not agree at the same moment](#the-two-ends-of-a-link-do-not-agree-at-the-same-moment)
+- [A `min` in a negotiated pair is a lever anybody can pull](#a-min-in-a-negotiated-pair-is-a-lever-anybody-can-pull)
+- [The number that binds is not always in the negotiation](#the-number-that-binds-is-not-always-in-the-negotiation)
+- [A cheaper path has to keep the side effects, not just the answer](#a-cheaper-path-has-to-keep-the-side-effects-not-just-the-answer)
+- [An exact length check reads like rigour and is a compatibility bug](#an-exact-length-check-reads-like-rigour-and-is-a-compatibility-bug)
+- [What rides along becomes the cost when the cadence changes](#what-rides-along-becomes-the-cost-when-the-cadence-changes)
+- [A threshold with no margin is a switch that flaps](#a-threshold-with-no-margin-is-a-switch-that-flaps)
+- [A feature whose precondition nothing produces](#a-feature-whose-precondition-nothing-produces)
+- [A recovery phase that ends hands the work on — to nobody](#a-recovery-phase-that-ends-hands-the-work-on--to-nobody)
+- [An accusation needs somebody to accuse](#an-accusation-needs-somebody-to-accuse)
+- [The address that works for us is not the address to hand out](#the-address-that-works-for-us-is-not-the-address-to-hand-out)
+- [A send that returns is not a delivery](#a-send-that-returns-is-not-a-delivery)
+- [Two nodes, one public IP, one advertised URI](#two-nodes-one-public-ip-one-advertised-uri)
+- [A timeout named for one caller, spent by every caller](#a-timeout-named-for-one-caller-spent-by-every-caller)
+- [A lifetime average cannot notice what it is being asked about](#a-lifetime-average-cannot-notice-what-it-is-being-asked-about)
+- [A publish path that only the test suite ever called](#a-publish-path-that-only-the-test-suite-ever-called)
+- [Two signers, and the record signed by the wrong one](#two-signers-and-the-record-signed-by-the-wrong-one)
+- [A bounded bucket that evicts the record instead of the pointer](#a-bounded-bucket-that-evicts-the-record-instead-of-the-pointer)
+- [A round trip with no timeout is a lock held for ever](#a-round-trip-with-no-timeout-is-a-lock-held-for-ever)
+- [A value with a newline in it is not one value](#a-value-with-a-newline-in-it-is-not-one-value)
+- [Waiting on the loop you are running on](#waiting-on-the-loop-you-are-running-on)
+- [Two layers with different opinions about "too much"](#two-layers-with-different-opinions-about-too-much)
+- [A socket the process opened for itself is not a user](#a-socket-the-process-opened-for-itself-is-not-a-user)
+- [Hangs (the job/node "never finishes")](#hangs-the-jobnode-never-finishes)
+- [A safety net borrowed from the interpreter is not a bound](#a-safety-net-borrowed-from-the-interpreter-is-not-a-bound)
+- [Routing: the "works at 3 nodes, not at 6" bugs](#routing-the-works-at-3-nodes-not-at-6-bugs)
+- [E2E sessions & liveness (the "it never delivers again" bugs)](#e2e-sessions--liveness-the-it-never-delivers-again-bugs)
+- [Hole punching (see also `transports.md`)](#hole-punching-see-also-transportsmd)
+- [A test that corrupts something must corrupt it whatever was there](#a-test-that-corrupts-something-must-corrupt-it-whatever-was-there)
+- [Two tests, one port, one worker apart](#two-tests-one-port-one-worker-apart)
+- [Tests: parallelism & not blocking](#tests-parallelism--not-blocking)
+- [The app layer: a reply's silent failures](#the-app-layer-a-replys-silent-failures)
+- [Guarding the call is half the job; the answer is the other half](#guarding-the-call-is-half-the-job-the-answer-is-the-other-half)
+- [A bundle member is not always a peer, and one name for two things went dark](#a-bundle-member-is-not-always-a-peer-and-one-name-for-two-things-went-dark)
+- [A diagnostic must not be able to end the surface it is diagnosed through](#a-diagnostic-must-not-be-able-to-end-the-surface-it-is-diagnosed-through)
+- [A failure nobody is told about is a failure nobody can fix](#a-failure-nobody-is-told-about-is-a-failure-nobody-can-fix)
+- [A window opened with `noopener` starts with an empty sessionStorage](#a-window-opened-with-noopener-starts-with-an-empty-sessionstorage)
+- [A link cannot carry a header, so a download went to the wrong machine](#a-link-cannot-carry-a-header-so-a-download-went-to-the-wrong-machine)
+- [A request is stale when it *fails*, not only when it succeeds](#a-request-is-stale-when-it-fails-not-only-when-it-succeeds)
+- [Driving another node: a console that threw its own operator off](#driving-another-node-a-console-that-threw-its-own-operator-off)
+- [The log: five bugs that all looked like "there is nothing there"](#the-log-five-bugs-that-all-looked-like-there-is-nothing-there)
+- [The console's pages: what a repaint quietly destroys](#the-consoles-pages-what-a-repaint-quietly-destroys)
+- [A measurement that showed nothing, and a burst that measured itself](#a-measurement-that-showed-nothing-and-a-burst-that-measured-itself)
+- [A burst that collapsed the UDP transport](#a-burst-that-collapsed-the-udp-transport)
+- [A timer that could only learn that the path was fast](#a-timer-that-could-only-learn-that-the-path-was-fast)
+- [A packet that was a dozen fragments](#a-packet-that-was-a-dozen-fragments)
+- [A timer that fired on every stall](#a-timer-that-fired-on-every-stall)
+- [A first backoff of a minute](#a-first-backoff-of-a-minute)
+- [Console layout: four rules that undid another](#console-layout-four-rules-that-undid-another)
+- [Routes that changed with every packet, and dials to nodes that had gone](#routes-that-changed-with-every-packet-and-dials-to-nodes-that-had-gone)
+- [A machine that slept, and links that did not know](#a-machine-that-slept-and-links-that-did-not-know)
+- [A page following another node, and the things that cannot carry a header](#a-page-following-another-node-and-the-things-that-cannot-carry-a-header)
+- [A grant read in more places than it is checked](#a-grant-read-in-more-places-than-it-is-checked)
+- [A SACK one bit off: the lost frame retired as delivered](#a-sack-one-bit-off-the-lost-frame-retired-as-delivered)
+- [Links that came and went under load, and a log that could not say why](#links-that-came-and-went-under-load-and-a-log-that-could-not-say-why)
+- [A loop over blocks that assumes every block is the same](#a-loop-over-blocks-that-assumes-every-block-is-the-same)
+- [The terminal in a browser](#the-terminal-in-a-browser)
+- [The internal API: a call that waits on the socket it came in on](#the-internal-api-a-call-that-waits-on-the-socket-it-came-in-on)
+- [A package seen on a node's page that could not be fetched](#a-package-seen-on-a-nodes-page-that-could-not-be-fetched)
+- [Self-update: installing is not updating](#self-update-installing-is-not-updating)
+- [Running out of descriptors](#running-out-of-descriptors)
+- [Miscellaneous](#miscellaneous)
+- [Eight addresses, all TCP](#eight-addresses-all-tcp)
+- [Integration tests that shared a port](#integration-tests-that-shared-a-port)
+- [Neighbourhood maintenance](#neighbourhood-maintenance)
+- [Docker: who owns a stack, and what an update must keep](#docker-who-owns-a-stack-and-what-an-update-must-keep)
+
 ## Handshakes that never complete ("nothing connects any more")
 
 ### The answer must leave before the bookkeeping runs
@@ -1404,6 +1494,11 @@ The suite runs in parallel (`pytest-xdist`, `-n auto`, configured in
   `DISCOVERY_PORT` hear each other. They are pinned to a single worker with
   `pytestmark = pytest.mark.xdist_group("lan_discovery")` (+ `--dist loadgroup`).
   Any new broadcast test must join that group.
+- **…and crosstalk with the host.** A developer machine that runs a real NMesh
+  node has an answerer on `DISCOVERY_PORT`; a test that expects silence hears
+  it and fails for the host, not for the code. `tests/test_lan_discovery.py`
+  patches the port to one free UDP port per test. Pin the premise the same way
+  for any new discovery test; the suite must not assume an idle machine.
 - **No real network in tests.** The autouse fixture `_no_public_network_probes`
   (`tests/conftest.py`) neutralises `discover_public_ip` and the STUN probe → no
   Internet dependency, no risk of a freeze. Do not work around it without a

@@ -22,6 +22,27 @@ is in a directory somebody can read in an evening; the old flat import paths
 (`src/transport.py`, `src/udp_transport.py`, …) remain as aliases, so a
 transport written against the guide keeps working.
 
+### Registering a scheme
+
+`src/transports/registry.py:BUILT_IN` is the **only** declaration point; the
+launcher, the chat demo and the call demo all reach it through one
+`register_all()`. Two properties are load-bearing and easy to lose:
+
+- The sibling import uses `__package__`, never `__name__`. Inside `registry.py`
+  `__name__` is one level too deep, so `f"{__name__}.tcp"` asks for a package
+  that does not exist: every built-in is skipped, and the node starts with no
+  transports and nothing on screen saying why.
+- Each entry has its own guard around import, class resolution **and**
+  registration, catching `Exception` (not `BaseException`). A native dependency
+  that raises `RuntimeError`, a half-written file that raises `SyntaxError`, or
+  a duplicate scheme that raises `TransportError` must cost that entry only —
+  never an arbitrary suffix of the list.
+
+The failure mode is silent, so a new scheme is not done until
+`test_transport_registry.py` asserts it arrives:
+`register_all(TransportManager())._registry` must contain what `BUILT_IN`
+declares.
+
 ## Configuring itself: `OPTIONS` / `configure()`
 
 The same principle as observability: **the medium declares, everything else is

@@ -1,5 +1,10 @@
 # Live test over MCP — 2026-10-06 (0.4.61)
 
+> **Historical record.** This field report was written against 0.4.61. Problems
+> it lists were fixed later unless [`BUGSVULNS.MD`](../../BUGSVULNS.MD) still
+> records them as open. The current behaviour is in
+> [`Docs/Architecture/`](../Architecture/README.md).
+
 A pass over the node's operations through the MCP server, on the real mesh,
 with MLO first. Nothing in the code was changed by this pass; every problem
 below is still open unless stated otherwise.

@@ -1,6 +1,7 @@
-# TODO — Integrity / health verification between peers (core & apps)
+# Idea — Integrity / health verification between peers (core & apps)
 
-> **Status: a brainstorm, nothing is implemented.** This document lists leads
+> **Status: a brainstorm, nothing is implemented.** It is kept in `Docs/Ideas/`
+> because it is not behaviour. This document lists leads
 > for peers to reassure each other that the code they run has not been altered
 > (a machine compromised by an adversary, a poisoned app, the supply chain). It
 > does not describe how the code behaves today: it therefore has no place in

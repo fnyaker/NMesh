@@ -21,3 +21,6 @@ invite_*
 *.pyz
 .blackboxcli/
 .fuzz/
+
+# A coding agent's local allow-list is not part of the project.
+.claude/settings.local.json

@@ -94,8 +94,7 @@ the rest). A message JS composes asks `t("area.key", {param: value})`;
 Two things are **not** done yet and are the next ones to migrate, in this order:
 paragraphs that mix text with inline markup (`<p>… <code>x</code> …</p>`), and
 JS strings composed outside `toast()`, `setMessage()` and `.textContent =`. A
-test refuses any new literal in those three calls. The chat page is being
-rewritten on this system and is not migrated here. Text a *machine* reads
+test refuses any new literal in those three calls. Text a *machine* reads
 (API errors, protocol names) stays English.
 
 ## In an app

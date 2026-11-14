@@ -77,7 +77,7 @@ route, not a second front end, not another set of buttons.
 request   {"v": 1, "id": "7f3a", "op": "node.state", "params": {…}}
 reply     {"v": 1, "id": "7f3a", "ok": true,  "result": {…}}
           {"v": 1, "id": "7f3a", "ok": false, "code": "refused",
-           "error": "node.retry cannot be driven from a remote console",
+           "error": "apps.token cannot be driven from a remote console",
            "detail": {…}}
 ```
 

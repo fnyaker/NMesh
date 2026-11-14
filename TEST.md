@@ -1,319 +1,94 @@
 # Testing guide — NMesh
 
-## Unit tests
+The suite is the specification's proof. This file says how to run it, what it
+covers, and the traps that make a green run lie. The charter itself is in
+[`AGENTS.md`](AGENTS.md); the hard-won failure modes are in
+[`Docs/Architecture/gotchas.md`](Docs/Architecture/gotchas.md).
 
-Fast, no real network. They cover all the internal logic, including fuzzing (no
-hostile byte crashes a parser).
+## Quick start
 
 ```bash
 NMESH_SETUP_ONLY=1 ./start.sh   # installs everything, starts no node
 . .venv/bin/activate
-pytest
+
+pytest -q                       # unit tests: fast, no real network
+pytest tests/integration -q     # real nodes, real crypto, real sockets
 ```
 
-(`start.sh` also installs the test dependencies; it handles distributions that
-ship `pip`/`venv` separately — see [`Docs/Setup/guide`](Docs/Setup/guide). By
-hand: `python3 -m venv .venv && . .venv/bin/activate &&
-pip install -r requirements.txt`.)
+A bare `pytest` **silently skips** `tests/integration` (`pyproject.toml`; see
+below). CI runs both, in two steps. A local “full suite” that does not also run
+integration has not tested the transport layer at all.
 
-Around 3700 tests in ~30 seconds. (The figure is prose, not a promise —
-what is held to a number is in the suite itself.)
+CI runs Python 3.14 in the base image; a local venv is often 3.12. Not every
+failure reproduces across versions — check both when a difference matters.
 
----
+## What the suites cover
 
-## The charter, as tests
+| Area | Unit | Integration |
+|---|---|---|
+| Primitives — packet, crypto, certificates, codecs | yes | — |
+| Node, routing table, DHT, E2E sessions, handshake | yes | yes |
+| Transports — TCP, UDP, veil, spool, hole punching, MLO | yes | yes |
+| Invitations, join tickets, relayed invitation, pseudos | yes | yes |
+| Hostile input — random bytes, guided fuzzing, hostile plugins | yes | — |
+| Console, control plane, HTTP server, web assets, `nmeshctl` | yes | fleet calls |
+| Connector, app API, permissions, storage, MCP | yes | yes |
+| Chat, contacts, calls, file transfer | yes | yes |
+| Fleet — grants, SSH, Docker, stacks, files, terminal | yes | yes |
+| Updates, releases, package directory, boot guard | yes | yes |
+| Installer, launcher, Docker tree, liboqs lock | yes (sourced) | — |
+| i18n, UI contrast, no emoji, no external asset | yes | — |
 
-`AGENTS.md` is the specification, and a test written *from the code* only proves
-the code agrees with itself. These are written from its sentences, so the day
-one fails the argument is about the rule:
+Tests live in `tests/`; real-node scenarios in `tests/integration/`; the
+guided fuzzer in `tests/fuzz/`; measuring and attack tools in `tests/tools/`.
+Test names and docstrings say what each one protects — read the file before
+changing it.
 
-| File | Clause it holds |
-|---|---|
-| `test_charter.py` | the supply chain (no third dependency arrives in a commit that needed a helper), the language, a floor under the framing hot path, and the two security absolutes that had exceptions — the session token's comparison and where noise is charged |
-| `test_medium_agnostic.py` | "transport-agnostic": no module outside the core may name a medium, the core may name exactly the two the charter declares, **each in the one module that owns it** (so a split cannot spread the exception), and the charter and `transports.md` must say the same thing |
-| `test_hostile_plugins.py` | a transport or an app that throws, lies about types, answers enormously, or implements the bare minimum must not break the node |
-| `test_speedtest.py` | every refusal that makes "measure a link by loading it" safe to offer |
-| `test_control_plane.py` | the reach of every operation, against the ledger in `control-plane.md` |
-| `test_webassets.py` | no emoji in an interface |
-| `test_updater.py` | the version, in the two files that carry it |
+## `pyproject.toml` decides what a bare run means
 
-## Integration tests
-
-Real nodes, real post-quantum crypto, a real network stack. Excluded by default
-(see `pyproject.toml`); run them explicitly:
-
-```bash
-pytest tests/integration
+```toml
+addopts = "-n auto --dist loadgroup --timeout=120 --timeout-method=thread --ignore=tests/integration"
 ```
 
-Among other things they check:
-- The full flow invitation → handshake → session → E2E data, over **TCP** and
-  over the **spool** transport (directory/file, no socket).
-- **Multi-hop A→B→C** routing (the ends only talk through the relay), including
-  over two distinct file media.
-- Routing **beyond a handful of nodes** (`test_routing_scale.py`): a relay whose
-  table exceeds the historical cliff of five certified nodes must still answer
-  lookups, relay ping/data/directory, learn the return path along a chain, and
-  stay responsive under packets addressed to unreachable ids.
-- **An invitation that reaches a node with no address of its own**
-  (`tests/integration/test_relay_invite.py`): the relay-invite block, and the
-  compact invitation doing the same journey out of a string short enough to
-  scan — the rendezvous really lands with the relay before the string is handed
-  over, the joiner's 40 bytes become a session with the inviter, and E2E data
-  flows over the relayed path. The same file holds the other direction: a
-  ticket that names both routes tries the direct one first.
-- Recovery **after a restart** without re-inviting (routing + E2E sessions
-  restored from disk).
-- **Self-repair** (purging a dead peer) and the **app→mesh→app** path through
-  the data connectors.
-- **Two real links, one bundle** (`tests/integration/test_mlo_pair.py`): a pair
-  holding both a TCP and a UDP link negotiates a cadence, probes fast enough to
-  measure both, forms a bundle and actually sends down both of them — the one
-  thing no unit test can show, because every way this breaks is a bundle that
-  quietly never forms while everything goes on working at half the throughput.
-  And the other direction: a node that declares a phone's cadences is left alone
-  over real sockets — no striping at it, and an idle probe once a minute.
-  The same file also starts a pair on **one** link and lets it get the second
-  one itself: nothing in the test dials it, which is what makes the case worth
-  running — every other pair in that file was bundled because the test opened
-  the second link by hand, exactly as an operator pressing "retry every
-  address" used to have to.
-- **The `msg_id` hash agreed over a real link**
-  (`tests/integration/test_msg_id_hash.py`): over TCP and over UDP, both ends of
-  a fresh link end up sending BLAKE2b ids once the two records have crossed at
-  their own pace, and data — a 50 kB payload among it — arrives intact and in
-  full through the gap.
-- The **management app on a real mesh** (`tests/integration/test_fleet.py`):
-  a full enrolment with a human decision followed by an authorised command, an
-  un-enrolled operator who gets nothing, an ungranted capability refused,
-  revocation cutting access off, and section isolation (another app sees none of
-  the traffic).
-- The **live mesh map** (`tests/integration/test_fleet_map.py`): a third machine
-  joins a node an operator manages, and the operator's map learns of the new
-  link **because that machine said so** — not because anything here asked again.
-  Plus the two refusals that make it safe to offer, told apart: the capability
-  the operator was never granted, and the node's own grant its fleet app never
-  got.
+- `-n auto` spreads the suite over every core; `--dist loadgroup` honours
+  `@pytest.mark.xdist_group` so LAN-broadcast tests share a worker.
+- `--timeout=120 --timeout-method=thread` turns a hang into a fast failure with
+  a traceback, instead of a job that runs for hours.
+- `--ignore=tests/integration` is why the second command above exists.
 
----
+Run one file with `-n0` when a result is surprising:
+`pytest tests/test_x.py -q -n0`.
 
-## Measuring routing at scale
+## The integration suite is genuinely load-sensitive
 
-A few hundred post-quantum nodes in one Python process are CPU-bound, and every
-timer in that process is then wrong: a result taken there says what the machine
-could do, not what the mesh does. `tests/tools/mesh_sim.py` runs the nodes over
-several processes (real TCP on loopback between all of them) and drives them
-from one:
+`tests/integration` binds **fixed ports** and measures **wall-clock deadlines**
+(20–25 s `wait_for_session`). Under `-n auto` on a loaded machine it fails
+intermittently, on `origin/main` too, on *different* tests each run.
 
-```bash
-python tests/tools/mesh_sim.py --procs 8 --nodes 120 --pairs 100 --wait 12
-python tests/tools/mesh_sim.py --procs 8 --nodes 120 --kill 0.3      # then heal
-```
+- A single red CI run on integration is **not** evidence that your change broke
+  it. A different test failing per run is the signature of load.
+- `1/N` vs `0/N` rerun counts are not evidence either way; the confidence
+  intervals overlap. Do not argue from them.
+- To get a trustworthy signal, run serially (`-n0`), where both revisions pass
+  consistently, or compare *failure identities* across commits.
+- Before blaming load, run the suite under `-n auto` four to six times and look
+  at *which* test fails: one name failing most runs is a test bug; names
+  changing run to run is load.
+- Every port a test uses must be reserved:
+  `free_port(n + 1)` when the test listens on `base + n`.
+  `tests/test_integration_ports.py` refuses a shared `127.0.0.1:NNNN`.
 
-Each of `--pairs` random pairs that share no link is sent one first message. It
-prints how many arrived, how many needed the sender to retry (read from the
-sender's own handshake book, so it does not depend on the wall clock), the
-packets sent and relayed, and the **lateness of the slowest worker's event loop**.
-Past a loop lag p99 of a few hundred milliseconds the figures describe the
-machine. It is a measurement tool, not a test: nothing in `pytest` runs it.
+`test_spool_transport`'s one CI failure is still unexplained
+([`BUGSVULNS.MD`](BUGSVULNS.MD), finding 81).
 
-Options worth knowing:
+## `[gwN] node down: Not properly terminated`
 
-* `--fast` replaces `oqs` with `tests/tools/fake_oqs.py`: the same key, signature
-  and ciphertext sizes, hashes instead of lattices. It gave the same figures as
-  the real thing at 240 nodes and reaches 2000 on twelve cores (about 3 MB per
-  simulated node, and a join phase that takes minutes: it is sequential).
-* After the settling time it prints, for every node, how many of its **true**
-  1, 3 and 8 nearest nodes (computed over all ids) it is linked to and has in its
-  routing table. A routing algorithm that depends on that is checked by it
-  directly, not by its side effects.
-* `--explain` says what both ends of each undelivered first contact looked like:
-  links, routing table size, and how many nodes know the receiver.
-* The same seed moves by five first contacts or more from run to run. Compare
-  ranges over several seeds, never one run against one run.
+This is **not** a test failure and not flaky infrastructure. A pytest-xdist
+worker *process* died without finishing its side of the protocol. In this
+repository there is one way that happens: a test hung, and the thread timeout
+answered with `os._exit(1)`; the stack dump is usually lost with the process.
 
-### Hostile requests at the console's API
-
-`tests/tools/api_fuzz.py` signs in to a **throwaway** node and sends every route
-the page's scripts call: first with no session (each must refuse), then with
-truncated, binary, deeply nested and oversized bodies and values of the wrong
-type. It reports a 5xx or a dropped connection, a route that answers without a
-session, and the node not answering afterwards. A relay's `502 {"error": …}` is
-a refusal and is counted as one.
-
-```bash
-python tests/tools/api_fuzz.py https://127.0.0.1:8787 <password> --rounds 3
-```
-
----
-
-## CI
-
-GitHub CI (`.github/workflows/ci.yml`) runs the unit tests and then the
-integration tests on every push to `main` and every pull request.
-
-The suite itself is one composite action, `.github/actions/suite`: the `test`
-job of `ci.yml` runs it on every change, and the `test` job of `release.yml`
-before anything is published, so a release is a commit the suite passed on.
-It is an action and not a reusable workflow because branch protection requires
-the status check `test` by name, and a reusable workflow reports its job as
-`test / test` — the required check then never arrives and the PR stays blocked
-with every check green.
-
-The tests run **inside the base image** (`docker/Dockerfile.base`, published by
-`base-image.yml`), which already carries a **compiled liboqs** and every
-dependency. So the C library is not rebuilt on every run, and we test on the
-exact runtime the app ships with (Python 3.14). The published base is used only
-once its provenance checks out — attested by `base-image.yml`, run from `main`
-(`.github/scripts/pull-verified.sh`) — and then by the digest that was checked.
-If it is unreachable or unproven (first bootstrap, a fork PR with no package
-access, a base published before it was attested), CI builds it here
-(`.github/scripts/provide-base.sh`); every job that uses the base, the fuzzer
-and the console scan included, goes through that script. The reference a
-script prints is checked to be a plain lowercase image name and digest (or
-tag), and reaches the job's later steps through a file in `$RUNNER_TEMP`,
-never `$GITHUB_ENV`, where a value with a newline would define a second
-variable.
-
-Alongside it, GitHub runs **CodeQL** (`codeql.yml`: extended queries on
-Python, JavaScript and the workflows, plus `.github/codeql/nmesh`, the same
-security queries with mesh input as their source), **secret scanning** with push protection, and **Dependabot**
-(`.github/dependabot.yml`); [`SECURITY.md`](SECURITY.md) lists them. Every
-action in a workflow is pinned to a full commit SHA and every workflow starts
-from `permissions: {}`, granting each job its own; `tests/test_workflows_pinned.py`
-refuses a tag reference or a missing `permissions: {}`. A new action goes in by
-SHA with its version as a comment (`@<sha> # v4.4.0`); Dependabot moves the pin,
-and offers a release only once it is a week old (`cooldown`). A workflow of
-this repository is called as `$/.github/workflows/…` (the self-repository
-form), never `./…`, which is read from whatever the workspace holds by then.
-
-`repo-checks.yml` checks what builds and ships the code, on every change and
-weekly, each tool from its image pinned by digest:
-
-- **zizmor** over the workflows: template injection, excessive permissions, a
-  pin whose version comment lies, an action found vulnerable after it was
-  pinned. Any finding fails; one set aside goes in `.github/zizmor.yml` with its
-  reason. Run it locally with `uvx zizmor .github/workflows`.
-- **gitleaks** over the whole history, not only the tip: a key committed and
-  deleted is still in every clone. A fixture that looks like a key is listed by
-  fingerprint in `.gitleaksignore`.
-- **hadolint** and **Trivy's misconfiguration rules** over both Dockerfiles; a
-  rule set aside is in `.hadolint.yaml` or `.trivyignore`, with its reason.
-
-The publishing jobs (`base-image.yml`, `ci.yml`'s `docker`, `release.yml`)
-start with StepSecurity's Harden-Runner in `audit` mode: every outbound
-connection the job makes is listed in the run's summary. That is a record, not
-a barrier; `block` with an allow-list is the next step, once the lists from a
-few runs say what the jobs legitimately reach.
-
-`.github/codeql/nmesh/NMeshSources.qll` is where the mesh is declared as
-remote input: bytes an asyncio protocol or stream hands over, a spooled frame,
-and the parameters of the handlers a dispatch table reaches
-(`_on_*(self, src, document)`, `_handle_*(self, peer, packet)`) — a handler
-named otherwise is invisible to those queries. To see what it matches, or to
-run the queries before pushing, with the CodeQL CLI:
-
-```
-codeql database create /tmp/nmesh-db --language=python --source-root=.
-codeql query run --database=/tmp/nmesh-db .github/codeql/nmesh/probe/ListSources.ql
-codeql database analyze /tmp/nmesh-db .github/codeql/nmesh/queries --format=sarif-latest --output=/tmp/mesh.sarif
-```
-
-The `docker` job scans the image it built with Trivy (pinned by digest) and
-fails on a HIGH or CRITICAL vulnerability that has a fix, or on a secret; a
-vulnerability with none yet is listed and let through. Trivy reads a saved copy
-of the image (`docker save`, `--input`) and is never given the Docker socket —
-the socket is root on the runner — and the registry login comes only after the
-scan, so nothing the scanner runs could reach a credential that pushes. The
-same scan writes the image's SBOM (CycloneDX), attested beside its provenance
-(`actions/attest-sbom`). `release.yml` does the same for the image a tag
-publishes, and leaves `:latest` to `ci.yml`. `audit.yml` scans the published
-image every Monday, once its provenance is checked, since a fix released after
-the last build is news nothing in the tree carries; `base-image.yml` lists the
-base's vulnerabilities without gating on them (no node runs the base).
-`tests/test_workflows_pinned.py` refuses a `docker run` of a registry image not
-pinned by digest, a `docker pull` outside the verifying scripts, the socket
-handed to anything, a login before a scan, and a release job that does not
-wait for the suite; `tests/test_ci_scripts.py` drives the verifying scripts
-with a `docker` and a `gh` that answer each way.
-
-### The repository itself (`scorecard.yml`) and what it ships
-
-OpenSSF Scorecard runs on every push to `main` and weekly, and its findings
-land in the Security tab beside CodeQL's; they are not published to the
-OpenSSF API. `release.yml` and the `docker` job attest the provenance of the
-zipapp and of every image they push (`actions/attest-build-provenance`), and
-both Dockerfiles take `python:*-slim` by digest
-(`tests/test_docker_image_tree.py`), which Dependabot moves.
-
-### The console under a scanner (`audit.yml`, `console-dast`)
-
-Every week, a throwaway node from the published image is scanned by OWASP ZAP
-(pinned by digest): its public pages with the baseline scan, then **every API
-route the pages call**, actively and signed in. The API has to be described to
-it — the spider follows links, and the console's API is only ever reached from
-JavaScript, so a spidered scan tests seven static files — which is what
-`tests/zap/console_openapi.py` does from the same route reading the MCP server
-uses. A FAIL fails the job; the reports are kept as an artifact. Expect one
-warning, HSTS, which is refused on purpose (`src/http_headers.py`), and 502s
-on Fleet routes asked about a node that does not exist, which is the right
-answer.
-
-### Coverage-guided fuzzing (`tests/fuzz`)
-
-`tests/test_fuzz.py` throws random bytes, which stop at the first length
-check. `tests/fuzz` keeps what made a parser take a new branch and mutates from
-there, the way AFL does, on the standard library alone: coverage comes from
-`sys.monitoring` (3.12+), counting first sightings of lines and branches under
-`src/`. Every parser a peer's bytes reach is a target in
-`tests/fuzz/targets.py`, with the contract its code states — "raises
-`TicketError`, never anything else", "`None` for anything that does not check
-out" — and anything else it raises is a finding, as is a parse slower than
-half a second. Signature checks are answered "yes", so the fuzzer reaches what
-an adversary who signs can send. Seeds are built by the tree's own encoders,
-and a seed that fails to build fails the suite rather than leaving a target
-fuzzed from nothing.
-
-```
-python -m tests.fuzz --list
-python -m tests.fuzz                       # every target, 60 s each
-python -m tests.fuzz packet core_release -s 600
-```
-
-The suite runs each target for 3 000 inputs (`tests/test_fuzz_guided.py`),
-which catches a contract a change breaks outright; `fuzz.yml` runs every one
-for 30 s each week and keeps any finding as an artifact. The long runs belong
-on a machine with time to spare: the corpus under `.fuzz/corpus` is fed back
-each time, so a campaign starts where the last one stopped. A new parser of
-peer input gets a target in the same commit.
-
-`audit.yml` runs `pip-audit` over `docker/requirements.lock`, the hash-locked set
-the base image installs, on every change and every Monday.
-It also reads **liboqs's own advisories** (`tests/tools/liboqs_advisories.py`):
-liboqs is C built from source, so no package index — and so neither
-Dependabot, nor pip-audit, nor an image scanner — ever sees it. An advisory
-whose range holds the locked version fails, unless `scripts/liboqs.accepted`
-names it with the reason it cannot reach a node; an exception the lock has
-outgrown is reported for removal. `tests/test_liboqs_advisories.py` holds the
-range reading offline.
-`tests/test_liboqs_lock.py` holds `scripts/liboqs.lock`, `requirements.txt`
-and that lock together, and runs `scripts/build_liboqs.sh` offline against a
-moved tag and a tampered archive; `NMESH_NETWORK_TESTS=1` also checks the
-locked digest against the archive GitHub serves today. The same file checks
-that only the two schemes a node uses are compiled (`OQS_MINIMAL_BUILD`), with
-the stateful signatures off.
-
-### `[gwN] node down: Not properly terminated`
-
-This is **not** a test failure and not flaky infrastructure. It means a
-pytest-xdist worker *process* died without finishing its side of the protocol,
-and in this repository there is one way that happens: a test hung, and
-`--timeout=120 --timeout-method=thread` answered the hang with `os._exit(1)`.
-The stack dump the plugin writes on its way out is usually lost with the
-process, which is why the line arrives with no traceback and no test named.
-
-To find the test, re-run with the timeout raising an exception instead of
-killing the worker:
+Re-run with the timeout raising an exception instead of killing the worker:
 
 ```bash
 pytest -q --timeout=60 --timeout-method=signal
@@ -322,510 +97,165 @@ pytest -q --timeout=60 --timeout-method=signal
 That reports the hang as an ordinary failure, with the traceback pointing at
 whatever the loop was parked on.
 
-**Reproduce on the CI interpreter, not yours.** CI runs Python 3.14; the suite
-passing on an older local Python proves less than it looks. `wait_closed()`
-changed semantics in 3.12 and deadlocked the data connector's shutdown on 3.13
-while staying green 3.11 (`gotchas.md` §1). Either run the base image, or point
-a 3.14 interpreter at the tree:
+## Clock-origin bugs: run as a freshly booted machine
+
+`time.monotonic()` is measured from the machine's boot, so the same code sees
+`now ~= 10` in a fresh CI container and `now ~= 500000` on a developer box.
+Any absolute-uptime comparison breaks only in the first case.
+
+- The dangerous direction is `now - field < LIMIT` (a cooldown), not
+  `now - field >= LIMIT` (elapsed).
+- The fix is a sentinel that cannot be a timestamp: seed `None` and skip the
+  comparison while unset.
+- `tests/conftest.py` has a `fresh_boot` fixture that shifts the clock **origin**
+  for `src.node` and the calling test module together. Shift both or neither;
+  moving only one leaves the test writing deadlines days into the node's future.
+- When CI reports “passes locally, fails here” for a timing test, run it under
+  `fresh_boot` first.
+
+Audit scope: anything captured at import from `sys.argv`, `sys.executable`,
+`os.getcwd()`, `os.environ` or `__main__`, then asserted on. A test must not
+assert how the suite was invoked — pin the premise (`restart_plan`, `_LAUNCH`)
+instead. `-n0` is the cheap way to find both classes: if a verdict changes
+between `-n0` and `-n auto`, the test is reading the runner, not the code.
+
+The **host** is a premise of the same kind. Pin `os.path.exists`, isolate
+`PATH`, and do not let a developer machine's installed NMesh answer for the
+code under test.
+
+## Proving a fix actually guards something
+
+Mutation-test by reverting **only** the source, keeping the new tests:
 
 ```bash
-docker run --rm -v "$PWD:/app" -w /app ghcr.io/fnyaker/nmesh-base:latest pytest -q
+git stash push -q src/     # NOT a bare `git stash` — that takes the tests too
+pytest <new tests> -q      # must FAIL here
+git stash pop -q
+pytest <new tests> -q      # must PASS here
 ```
 
----
+Clear `__pycache__` after the pop when a stashed edit kept the file's size — a
+version bump is the usual one. `git stash pop` rewrites the file within the same
+second, and a `.pyc` is trusted on mtime-in-seconds plus size: the suite then
+ran the *stashed* `src/version.py` and failed `test_matches_pyproject` on a tree
+whose two version files agreed.
 
-## Where the tests are
+```bash
+find src tests -name __pycache__ -prune -exec rm -rf {} +
+```
+
+Beware the **vacuous guard**: a test that passes on the buggy revision tests
+nothing. Point such a test at a manager with nothing registered, at a fake that
+decides by a field rather than by `type`, or at a topology that removes the
+shortcut.
+
+## Fuzzing
+
+`tests/test_fuzz.py` throws random bytes, which stop at the first length check.
+`tests/fuzz` keeps what made a parser take a new branch and mutates from there,
+on the standard library alone: coverage comes from `sys.monitoring`, counting
+first sightings of lines and branches under `src/`.
 
 ```
-tests/
-├── test_packet.py / test_crypto.py / test_cert.py     — primitives
-├── test_node.py / test_routing.py / test_handshake.py — node & routing
-├── test_http_server.py                                — the console against a client that
-│     connects and says nothing, that connects in numbers, or hangs up mid-request
-├── test_loop_backtrack.py                             — a routed packet that
-│     comes back round a cycle leaves by another neighbour, and what that may
-│     cost is bounded (replays, fanout, the book)
-├── test_link_prune.py — idle links closed (structure, links in use, bundles, relay and
-│     probe links, nodes whose leaf we are, redialled links kept), told with
-│     LINK_RELEASE and not chased, bounded; the link budget's bounds
-├── test_neighborhood.py — the maintained neighbourhood, including the leaf set
-│     (searching until the nearest known nodes are all linked, quiet after, bounded,
-│     not kept searching by a node nobody can reach)
-├── test_routing_stability.py                          — routing regressions:
-│     the size of a FOUND_NODE, acquiring a route outside the receive loop,
-│     the return path learned from traffic, bounded teardown, a first
-│     links spread over distance and a lookup that stops buying links, a first
-│     handshake carried by two neighbours (and by one only when it has one,
-│     or a direct link to the target)
-├── test_e2e.py / test_data.py                         — E2E encryption
-├── test_invite*.py / test_cert_store.py               — invitations & trust,
-│     including the **rendezvous** that lets one reach a node with no address of
-│     its own: an offer only ever about its own sender (the key must hash to the
-│     sender's id and have signed the token), never from an unauthenticated
-│     link, never naming somebody else's key, expiring, bounded and rate
-│     limited — and the short seek it authorises, which becomes an ordinary
-│     signed seek only where a matching offer is, is refused when aimed at a
-│     node the offer does not name, and is silent everywhere else rather than
-│     answering "no such code"
-├── test_release_trust.py                              — what may replace this
-│     node's code: corroboration counted in signatures and never in mirrors, a
-│     quorum of endorsed keys that 200 minted publishers cannot reach, a
-│     disputed version refused by both routes, and a publisher key that stays
-│     encrypted at rest
-├── test_pkg_dir.py                                    — the package directory:
-│     a record can only say what its own key signed, an unknown flag or kind is
-│     refused, the keys it is filed under are derived from the name and from
-│     the release rather than declared, a source digest that ignores
-│     documentation and nothing else, a crowded prefix bucket that drops a
-│     pointer and never a package — and the publication proof, which names the
-│     node and the release so it cannot be lifted onto another record
-├── test_release_mesh.py                               — releases over a mesh:
-│     publishing, gossip that terminates, the three install gates, the
-│     automatic pass and the restart it ends in — and that a release is bytes
-│     and a signature, so the publisher is never one of the nodes a fetch asks,
-│     holders come before peers, the number asked is bounded, an install runs
-│     on the descriptor in hand rather than on that key's newest, and dropping
-│     the publisher index did not drop the publisher gate; plus recommending is
-│     holding — a record is the node's own sentence, a detached key needs no
-│     second artefact, and a release nobody can point at is not recommended
-├── test_key_share.py                                  — handing a publisher key
-│     to another node: an offer signed by a key the sender does not hold, an
-│     offer replayed at a node it does not name, an acceptance whose node id
-│     does not match the key inside it, a substituted KEM key, a grant opened
-│     with the wrong secret or carrying a secret that does not match the offered
-│     public half, an offer that expired, and a store that only ever keeps a
-│     file whose two halves agree
-├── test_subscriptions.py                              — what this node watches:
-│     a corrupt or doctored file yields no subscriptions, a quorum is clamped to
-│     something reachable, and only publishers the operator chose are counted
-│     towards one
-├── test_behaviour.py                                  — the detection frame: a
-│     rule that fires on everyone disarms itself, transport classes judged
-│     apart, being new / quiet / unfamiliar are never signals, every rule
-│     states what would make it wrong, and a condition is charged **once** and
-│     not once per sweep — the inequality that makes "no single rule ever bans"
-│     true rather than intended; then D5, the profile break, the only signal
-│     that catches a stolen key; E2, the peer whose view of the network nobody
-│     shares (padding with one famous id does not clear it, a partition says
-│     nothing); and A1, the burst of members under one issuer, compared to that
-│     issuer's own history and never to anybody else's
-├── test_features.py                                   — capability negotiation:
-│     silence means the classic set, a name we do not know is not an offence,
-│     nothing security-critical is negotiable
-├── test_msg_id_hash.py                                — the `msg_id` hash, per
-│     link: a peer that has not said `msgid_b2b` gets the SHA-256 id exactly as
-│     every older build computes it (checked against the formula written out,
-│     not against `Packet`), a receiver accepts either id before it has heard
-│     the announcement, a relay re-heads a packet for an old link, and one
-│     packet down both kinds of link is one entry in the replay window
-├── test_mlo.py                                        — multi-link operation and
-│     the keepalive accord: which links measure alike enough to carry one node's
-│     traffic together, the reordering that buys, a lossy member benched and
-│     rejoining only at *half* the threshold (one number in both directions is a
-│     link that flaps on a single probe); probes matched to their own answer, and
-│     a probe nobody answers charged as lost rather than left pending; and the
-│     three properties an adversary would go for — a peer that never heard of
-│     this is untouched, a request can only ever ask this node to do **less**
-│     and lapses rather than sticking, and *no declaration at all* lowers either
-│     of this node's cadences (swept over every corner of the hard range, not
-│     argued: it is why a cadence is negotiated as a range per mode rather than
-│     as one window whose ceiling anybody could pull down). Plus what a probe
-│     weighs: the addresses ride it only when the peer might not have them, and
-│     a probe that carries none still proves recency — the invariant the old
-│     unconditional merge protected; and the running loss count a link's score
-│     reads per packet, held against a recount
-├── test_reputation.py / test_app_guard.py             — zero trust: the ledger,
-│     the rate gate, the signed accusation, and above all what hearsay may NOT
-│     do — hearsay alone sanctions nobody (it stops below the *first* threshold,
-│     not the last, because being "wary" already means dropping the peer's
-│     traffic), a verdict a crowd reached for us is never re-broadcast under our
-│     own key, one line of descent is one voice however many identities it
-│     holds, an accuser that names everybody stops being counted, two nodes
-│     accusing each other cancel both ways, an accusation naming us is neither
-│     acted on nor relayed, the accused is never told; plus an app's own
-│     per-kind allowances, reported once per window and never fatally
-├── test_cert_renewal.py / test_revocation.py          — certificate lifecycle:
-│     expiry, pruning, the renewal exchange and its refusals; and taking a
-│     membership back: who may say it, what it may not reach, a root that can
-│     only be dropped locally, records that survive a restart
-├── test_fuzz.py                                       — hostile inputs
-├── test_spool.py                                      — bundle & file transport
-├── test_webconsole.py / test_data_connector.py        — console & connector,
-│     including that **every route answers**: a handler that raises, or a body
-│     that is not JSON, becomes a 500 and not a closed socket — which is what a
-│     page draws a spinner for ever on
-├── test_app_auth.py                                   — application identity:
-│     scoping (app/audience/purpose/ctx), freshness, anti-replay, key binding,
-│     hostile parsing, mutual login
-├── test_fleet*.py / test_console_fleet.py             — the management app: the
-│     three authorisation gates taken one at a time (a signature missing/altered/
-│     replayed/issued for another node or another purpose, an un-enrolled sender,
-│     a missing capability), SSH credentials that never leak, a ledger that fails
-│     closed, and the `manage` console relay: refused paths (fleet, remote, chat,
-│     outside the API), splitting and reassembling a reply, an over-large reply
-│     explained rather than truncated, a reply forged by a third party ignored,
-│     bounded calls. The `docker` plane: its own grant, an operation that is not
-│     one refused by name, a signature for it that still cannot open a shell, and
-│     a ceiling on how many run at once; `Update` carrying stack names, which are
-│     dropped without the second grant and cleaned before they could reach an
-│     argv; groups, where membership lives in one place and a revoked node leaves
-│     them. Plus the terminal path: output leaves the pty in the order
-│     it was produced (one drain, never a task per chunk) and its buffer keeps
-│     the tail when a program outruns the link, and a held read answers on the
-│     byte, returns at once when there is backlog, gives up rather than parking
-│     for ever, and does not wait at all for a session nobody opened
-├── test_veil.py                                       — `veil://`: packets cross both ways;
-│     the wire has no repeated bytes and near-maximal entropy in both
-│     directions; a prober (nothing, HTTP, noise, zeros, 0xff) gets no byte; a
-│     wrong key, a replayed hello and a hello outside the clock window are not
-│     answered; the edge of the window is; unproved connections are bounded
-├── test_fleet_docker.py                               — docker and Portainer (usage samples, volumes, networks and image removal included, with hostile daemon answers): what
-│     may reach a socket or an argv (a name that is not a name is refused, never
-│     escaped; a container is *built* from a validated shape rather than
-│     forwarded, so `Privileged` cannot ride in; a bind mount is two absolute
-│     paths or a volume name; a command is split, never handed to a shell), the
-│     multiplexed log header taken off rather than printed, and the wire itself
-│     driven against a socket that answers like a daemon — both framings, the
-│     daemon's own message surfaced, a failed pull *inside* a 200 still a
-│     failure, an oversized answer refused, an engine that dropped our API
-│     version asked again in its own, a reference split where docker splits it,
-│     a private registry reached with this account's login and no other's, an
-│     archive read without following a link or a climbing name. For Portainer:
-│     an address that is a host and nothing else (HTTP to loopback only), a token
-│     that cannot become a second header, a fingerprint pin, a probe that sends
-│     no token, a git stack redeployed through git with the credentials
-│     Portainer stored, the stack's environment handed back rather than erased,
-│     and a stack matched to its record by id, never by an ambiguous name
-├── test_fleet_stacks.py                               — stacks recovered from
-│     compose's own labels (one-offs left out, bounded, whatever the daemon
-│     sends); a Portainer stack known by its directory, a Portainer server or
-│     agent by its container; which act each stack's Update is; the replacement
-│     of a container (what the old image supplied left to the new one, what the
-│     container was given kept, anonymous volumes and aliases carried, the old
-│     one put back when the new one does not stay up, a digest left alone, a
-│     shared network refused); an update where one service failing costs only
-│     itself; the six states a check tells apart; compose asked rather than
-│     assumed, its argv, no `--remove-orphans`; a stack's file read without its
-│     environment; a new stack's file written privately under the node's state
-├── test_fleet_deploy.py                               — remote deployment and the
-│     right to update: the authorised script is not inside the node's prefix, the
-│     rule names one path with no wildcard, the wrapper refuses every argument,
-│     the plan prefers the grant when there is one, `NoNewPrivileges` is seen
-│     **before** sudo is ever run (and a node already root is unaffected), and the
-│     systemd unit follows the grant instead of undoing it; plus, for deployment:
-│     install.sh travels in the payload and nothing reimplements it, no password
-│     written into a script, escalation stated rather than probed, prompt order
-│     (login then escalation, never replayed), refusing a system install with no
-│     route to root; plus the **install options** a deploy may choose, every one
-│     of which ends on a command line on a third machine — a path that is not one
-│     is dropped rather than escaped, a service name is a name, and the node
-│     flags come from a list in the source rather than from the wire
-├── test_join_ticket.py / test_qr.py                   — compact ticket and QR:
-│     round trip, case and spaces immaterial, a typo caught, random bytes that
-│     raise nothing but TicketError, a hostname refused; for the QR, structure and
-│     bounds, plus — if the optional tooling is installed — module-by-module
-│     equality with an independent encoder and a real decode of the rendered SVG
-├── test_console_feed.py                               — what the console sends
-│     a page: the revision is the content and not a counter (so it cannot drift
-│     from what it describes), key order is not content, a claim that cannot be
-│     read is answered in full rather than interpreted, only the section that
-│     moved comes back, what is not a section always travels, every answer names
-│     the build that gave it — and a page that says nothing still gets the flat
-│     shape it always got, which is the case a version number exists for. The
-│     two feeds that ride it are checked where they live: the fleet ledger in
-│     test_console_fleet.py, chat's social half in test_chat_web.py — sections
-│     named, one that moved coming back, one that did not staying away, and the
-│     messages travelling beside them whatever the claim says
-├── test_contacts_state.py                             — the address books' data
-│     and rules: every collection bounded (books, contacts, nodes, names,
-│     notes, members, invitations), an entry with nothing in it refused, the
-│     newest version winning by [counter, writer] whatever order they arrive,
-│     tombstones kept for a deletion to travel and dropped first when room is
-│     needed, a book that no longer fits refused rather than truncated, search
-│     by name / label / note / the start of an id, vCard in and out with hostile
-│     cards, and a state file that lies cut down to what it can prove
-├── test_contacts_sync.py                              — two and three nodes keeping
-│     one book in step over a wire that hands each message straight to the other
-│     node's handler: nothing enters a book that was not accepted, a reader
-│     cannot write, a message that is not what it says is dropped and its sender
-│     reported, an unknown book is answered with silence, revoke detaches the
-│     copy, and a dozen shapes of garbage never raise
-├── test_contacts_integration.py                       — chat over the books: the
-│     permission tree (sensitive, a read half and a write half, a parent covering
-│     its children, a shared-token client never getting it), the link's four
-│     states and its refusal naming the permission, the old contacts moving only
-│     when chat may write, the books' name winning on screen, a saved name found
-│     first, and an operation that names a permission nobody has being no way
-│     to need nothing
-├── test_console_contacts.py                           — the console's side: the
-│     page served only while the app runs and its API never without a session,
-│     a refusal arriving as a stable code, export / import round trip with the
-│     import body capped, nonsense bodies never a 5xx, and chat's missing
-│     permission arriving as a 403 naming it
-├── test_i18n.py                                       — one catalogue per language: the
-│     same keys and parameters everywhere, the plural forms each language needs,
-│     the browser's plural rule and parameter filling held to the Python ones by
-│     running both, and every key the chat and contacts pages ask for — in their
-│     markup, their script, and the refusal codes the node can send — defined in
-│     all seven
-├── test_chat_web.py (voice messages)                  — a voice message is a file
-│     whose name says so, and the name is the sender's: the exact pattern, the
-│     length and size bounds, a size that is not a plain integer (a boolean is
-│     one in Python), a borrowed name on a huge file or a picture staying what it is
-├── test_console_auth.py                               — console credential:
-│     the password never stored, a salt per credential, a corrupt file or an
-│     unknown algorithm refused, an outsized input rejected before hashing,
-│     mode 0600 even under a permissive umask
-├── test_trace.py                                      — protocol trace:
-│     never a payload in what is kept, a bounded ring, automatic stop, a
-│     malformed packet that does not raise, throughput computed over the
-│     recording window (not over the burst), the file in 0600
-├── test_fleet_logs.py                                 — a fleet's logs: the
-│     `logs` grant that `status` and `manage` do not imply, a follow that
-│     expires rather than running for ever, a push carrying a rid nobody asked
-│     for, one bounded ring per machine so a chatty one cannot push out a quiet
-│     one's, a merged view ordered by *our* clock rather than by the time
-│     the far machine supplied, a machine collected across its own restart (the
-│     run travels with the number), a refusal said once on the machine's line,
-│     and the panel reading the body rather than the envelope
-├── test_map_growth.py                                 — the link map past one
-│     node's eyes: only a machine that granted `links` is asked, the map is a
-│     freshness book (a source that went quiet leaves it rather than ageing on
-│     it), an answer replaces rather than accumulates, a change is what is worth
-│     a frame and a moving latency is not, nothing is followed while nobody is
-│     looking, and the three questions the map asks fleet deliberately do not
-│     travel
-├── test_alerts.py                                     — the notice board: a
-│     flood that is one line with a count, a chatty warning that never pushes
-│     out an error, "seen" that is not "gone", an app that cannot post as
-│     another or as the core, and a module whose own call graph proves it acts
-│     on nothing
-├── test_logbook.py                                    — the log ring: nothing
-│     kept until asked and what was kept dropped when it stops, a flood that
-│     never grows past the megabytes an operator allowed, a reader too slow for
-│     the ring told how much it lost, a source refused rather than truncated
-│     into somebody else's, and `record` that never raises whatever it is handed;
-│     plus the holds (each owner stops only its own), a cursor that moves past
-│     lines a filter left out, a number from another run answered from the start,
-│     paging back with `before_seq`, and a size that counts the open block
-├── test_control_logs.py                               — the same ring driven
-│     from a console: sized before it is started, read newest-first by a person
-│     and oldest-first by a subscriber, the trace's switch that starts both
-│     recordings — and stops only its own, including when it runs out — and the
-│     grant that decides what an app may read
-├── test_app_logs.py                                   — an app's half: the node
-│     stamps the source so one app cannot be quoted as another, a read without
-│     the grant is *answered* and refused rather than dropped, a grant asked per
-│     frame rather than captured once, a watcher forgotten when its socket goes,
-│     a line recorded off the loop that still reaches one, and a watcher that
-│     keeps the ring on by itself and lets it go when it leaves
-├── test_session_store.py                              — persistence (encrypted)
-├── test_start_script.py / test_install_script.py      — both scripts, sourced in
-│     library mode (nothing is installed): distro, sudo, venv probe for one;
-│     init detection (systemctl without systemd), privileges, paths, creating the
-│     dedicated system account, directories never handed to root by mistake,
-│     generated units, tree copying for the other. Including: a bare
-│     systemd-style environment (no HOME, a home that does not exist or is not
-│     writable) and liboqs reuse (cache, an unloadable candidate never adopted,
-│     verification at the destination)
-├── test_updater.py                                    — GitHub update:
-│     version comparison, hostile fields bounded, a booby-trapped archive
-│     (absolute path, traversal, symlink, special file), state and venv never
-│     touched, restore after a failure, the repository pinned, the two ways
-│     a node comes back after an install — a supervisor, or re-execing itself
-│     — and a new tree that will not import (or hangs, or has no launcher)
-│     taken straight out again before anything restarts onto it
-├── test_boot_guard.py                                 — a tree on trial: every
-│     start counted, a tree that never stays up put back (what it added
-│     removed, the failed one kept aside, state untouched), one that stays up
-│     left alone, a rollback cut short finished by the next start, a trial file
-│     it cannot read never stopping a start, start.sh counting before anything
-│     an update can break, and a start counted once by either launcher
-├── test_config.py                                     — configuration file:
-│     hostile parsing (a broken line, an unknown key, a huge file, random bytes,
-│     a value trying to open a second line), precedence, settings not editable
-│     from the console, mode 0600, installer merge
-├── test_docker_image_tree.py                          — the image carries what
-│     fleet provisioning requires ("no NMesh tree at /app")
-├── test_webassets.py                                  — the web assets, checked
-│     at build time: the JS parses (a syntax error is a blank page, not a red
-│     test), no `$("id")` points at a missing element, no external resource, no
-│     `style=` attribute (the CSP ignores it silently), and the terminal emulator
-│     reads back what a real shell writes (`term_emulator_test.js`, run under
-│     node; `channel_test.js` and `events_test.js` drive the console's two
-│     loops the same way: one change poll however often it is restarted, a
-│     node that restarted read from zero, a context kept through a link being
-│     rebuilt, a stream that came back repainting everything and one the
-│     browser gave up on reopened), read back from the **model** rather than from markup — the screen is
-│     drawn on a canvas now, so there is no HTML to assert on and no injection to
-│     guard against — including what a *full-screen* program does: the alternate screen,
-│     a scroll region, insert/delete of lines and characters, 256-colour and
-│     24-bit, erase painting the background, a resize that keeps its content,
-│     the reports a program waits on, mouse encoding, and the two forms of the
-│     cursor keys. Plus the contracts around it: the read is held rather than
-│     polled, the pty is told the size the pane actually has, and the mouse is
-│     reported only while a program asked for it. Plus the two shapes that make
-│     it fast: the parser never slices its buffer (asserted as *time* — a frame's
-│     worth of escapes has to parse in well under the frame it belongs to), and a
-│     repaint touches the rows a program moved rather than the whole screen. Also the shared node view: one implementation mounted in four places
-│     (the console dialog, chat's panel, fleet's sheet, the `/node` page), it only
-│     offers what an app declares, it hides the button pointing back where you
-│     came from, and the addresses start folded away. And the wiring a switch of
-│     node depends on: each shared view drops what it holds *itself* (so a page
-│     that never heard of the context is still reset), the stream and the
-│     repaint restart once for every page after everybody has dropped, and a
-│     managed node that throws us out — or goes quiet three times running —
-│     hands the context back instead of leaving a page that answers nothing
-├── test_transport_options.py                          — configuring a transport
-│     without knowing what a transport is: coercion and bounds for every kind
-│     (bool/int/float/text/choice/multi), partial application (one bad field does
-│     not throw away the good ones), SETTINGS replaced and not mutated, the file
-│     carrying `scheme.option` keys without validating them, a bounded section, a
-│     render/parse round trip, and a mistyped setting reported at startup, never
-│     fatal
-├── test_link_stats.py                                 — what the mesh shows of
-│     itself: jitter telling a steady link from one that oscillates, loss not
-│     inferred from a single probe, a bounded history, per-address status (in use
-│     beats the log, "never tried" ≠ "broken"), a log bounded on both axes, and a
-│     transport that raises or returns nonsense not breaking the snapshot
-├── tests/integration/test_fleet.py (control frames)    — the same frame a page
-│     sends to its own console, crossing a **real mesh** to another node's real
-│     plane: answered by the node it was addressed to, refused there when that
-│     node keeps the operation to itself, and answered rather than dropped when
-│     what arrives is not a frame at all
-├── test_control_plane.py (what the review found)       — the two findings from
-│     this feature's security review, each pinned in both layers: a value cannot
-│     smuggle a second setting into the configuration file (the field that
-│     declared it refuses a newline, and so does the file format that owns the
-│     constraint — `spool` wrote `launch`, which the console may never write),
-│     a frame of five thousand brackets is refused rather than raised out of a
-│     channel that says it never raises, and a node id that is not one runs
-│     **nowhere** instead of falling through to this machine
-├── test_control_plane.py (the ledger is true)          — the table in
-│     `Docs/Architecture/control-plane.md` is read back and compared against the
-│     plane: every operation present, every "local only" star matching the
-│     declaration, and the bounds quoted in kilobytes equal to the constants.
-│     It caught two lies the moment it was written (a frame that had grown to
-│     24 kB and an operation that had stopped travelling), which is the argument
-│     for it: a table maintained by hand is a table that drifts
-├── test_control_plane.py (the whole plane at once)     — two sweeps rather than
-│     two examples: the node is asked what it exposes and then asked for **every
-│     operation** with the marker a relayed call carries — each answers a frame,
-│     each one not declared remote comes back refused — and a few dozen
-│     generated frames must each come back with a code from the closed set and
-│     nothing of this machine in them. A module added later is covered by
-│     construction, which is the only way a gate stays true
-├── test_control_plane.py (store & joining)             — an app is not the
-│     node's own program, so installing one travels while pinning a signing key
-│     does not; a catalogue paged and sorted where the list is; minting an
-│     invitation stays here and joining travels; a ticket carries both halves or
-│     you send both; a join that fails says which of the five ways, with the
-│     detail beside the sentence rather than folded into it
-├── test_control_plane.py (packages & keys)             — asking this node and
-│     asking the network are two operations with two ceilings (and only the
-│     cheap one travels), a lookup asks one question rather than two, installing
-│     and pinning are confirmed and local, and of the key operations only the
-│     overview travels — a passphrase is typed at the machine that will hold the
-│     key, and reaches the node exactly as typed
-├── test_control_plane.py (releases)                    — the node's own code:
-│     only the read travels (what a node accepts for replacing its program is
-│     pinned by a human at that node, and the rest would not fit the relay
-│     anyway), a passphrase is the one field never trimmed, a key is hex before
-│     the node sees it, a version GitHub has moved past is refused rather than
-│     installed, and GitHub not answering comes back as the answer
-├── test_control_plane.py (a node that went away)       — the relay's own
-│     failures, read back as codes: a node that never answered is `unavailable`
-│     (it came back as a 502, and calling that "failed" left a console pointed
-│     at a machine that had gone, looking alive and showing nothing), and a far
-│     node's session expiring is that node's, never this console's
-├── test_webassets.py (a switch of node)               — what a page drops and
-│     when: each shared view registers its own reset, the stream and the repaint
-│     restart once for every page *after* everybody has dropped, a stale reply is
-│     never painted as a failure, and a view on the cadence says when it could
-│     not read instead of keeping what it last held
-├── test_control_plane.py (trust & network)             — the two modules an
-│     operator uses on a machine they are not in front of: a certificate that is
-│     hex before the node is asked to parse it, a toggle that takes a boolean
-│     and nothing else, a value the *node* decides the range of, a partial
-│     update that leaves the six fields it did not mention alone, and a refusal
-│     per operation rather than one sentence for all of them
-├── test_control_plane.py                              — the management plane: an
-│     operation nobody declared does not exist (even when the method is there),
-│     an undeclared argument is refused, a frame that is not one is answered
-│     anyway, a local-only operation is refused from a remote console and the
-│     catalogue a remote console reads is the narrow one, a module that throws
-│     says nothing about this machine — plus the bounds held against the relay's
-│     (a frame that fits `CONSOLE_REQ_MAX`, every remote operation's ceiling
-│     inside `REMOTE_BUDGET`), and that a far node's session expiring is not read
-│     as ours
-├── test_app_api.py                                    — the app API surface: an
-│     operation that is not declared does not exist (even when the method is
-│     there), an undeclared argument is refused and not ignored, every value is
-│     coerced and bounded, an app that stopped is no longer reachable, an app that
-│     raises does not hand over its internals — and what chat and fleet expose is
-│     pinned (widening it is a security change)
-├── test_app_perms.py                                  — what an app may do:
-│     the tree (a parent covers its children, taking it back takes them), a
-│     manifest as hostile input (bounded, typed, an unknown permission refused
-│     by name), a broken state file that grants nothing, a built-in's manifest
-│     no client can rewrite, every plane module mapped, the operations that
-│     grant reachable by no app, and a mod the node survives (fallback,
-│     arguments checked again, never its own calls)
-├── test_app_connector.py                              — the connector as the
-│     internal API, over a real socket: an app is an app only with its own
-│     token, a frame not asked for is answered empty, a control call is the
-│     plane's answer (and a malformed one is answered with its id), a hook
-│     belongs to its client and its permission, only the client asked can
-│     answer a call, and no garbage ends a connection
-├── test_mcp.py                                        — the MCP app: tools
-│     generated from the catalogue (machinery excluded, page routes only when
-│     callable), schemas from declarations, a refusal as a readable result, a
-│     job polled to its end, the door (token, foreign Origin, 413, 405, batch),
-│     the token kept in the drawer, and the stdio bridge
-├── test_address_retry.py                              — re-dialling an address:
-│     by hand (one `proto://addr` or all of them, and what each one did is
-│     reported; an address that is not this node's is refused without dialling),
-│     the periodic loop (the cadence belongs to the medium, a pass is capped
-│     however many nodes are waiting, a node already linked is never re-dialled,
-│     and the loop survives a medium that raises), and latency steering (off
-│     until asked for, a marginal gain moves nothing, a real gain moves and closes
-│     the old link, never two links to one node after the measurement), plus the
-│     priority system: a priority's bounds, the latency↔priority slider at both
-│     extremes, an address never measured worth the middle, latency that curves
-│     (an absurd measurement does not flatten the real differences), the order
-│     shown to the operator being the one that dials, and a transport manager that
-│     cannot answer stopping nothing
-├── test_reconnect.py                                  — getting a node back the
-│     moment its link dies: an established link lost under us is chased from half
-│     a second, doubling to a ceiling and giving up at the end of its window; a
-│     link we cut ourselves (tarpitted, or cut for noise) is never dialled back;
-│     losing one of two media to a node is not losing the node; our own evidence
-│     decides and the crowd's does not; a second loss extends the window without
-│     re-arming the backoff; and the bounds hold — the book, the dials in flight,
-│     the wait between passes — with a dial that raises not killing the loop.
-│     Plus the two ways a chase must end early: a membership its issuer took
-│     back, and a node the operator forgot
-├── test_integration_ports.py                          — no two integration
-│     tests bind the same loopback port: under xdist that is a race whose loser
-│     fails in `wait_for_session` fifteen seconds later, reading as a flaky mesh
-│     rather than as a reused number. Checked in the fast suite, because a guard
-│     you only run beside the thing it guards is one CI tells you about
-├── test_ui_contrast.py                                — colour tokens: the WCAG
-│     ratio of every text/background pair in both themes, and no page redefining
-│     a token of the system
-└── integration/                                       — real nodes (TCP + spool)
-      including test_idle_chatter.py: two joined, idle nodes stay quiet (the
-      FIND_NODE/FOUND_NODE loop that used to saturate the link), and discovery
-      still works when there really is something to find; test_join_ticket.py:
-      a real join from the ticket alone, single use, an expired ticket, a forged
-      code, the "confirmed public address" gate; test_pkg_dir.py, which publishes
-      a release on one node and finds it on another by typing three letters, by
-      the publisher's node id, pins the key that came inside the record and
-      installs from it — plus the two refusals (a recommendation cannot be
-      pinned, and finding a release does not make it installable) and a
-      publisher key handed from one node to the other, the recipient then
-      signing a release with it; and
-      test_fleet.py, which sends a relayed console call across a real mesh (a
-      90 kB reply, so several frames) and checks that it is refused without the
-      `manage` grant
+python -m tests.fuzz --list
+python -m tests.fuzz                       # every target, 60 s each
+python -m tests.fuzz packet core_release -s 600
 ```
+
+Every parser a peer's bytes reach is a target in `tests/fuzz/targets.py`, with
+the contract its code states (“raises `TicketError`, never anything else”,
+“`None` for anything that does not check out”). Anything else it raises is a
+finding, as is a parse slower than half a second. Seeds are built by the tree's
+own encoders; a seed that fails to build fails the suite rather than leaving a
+target fuzzed from nothing. The short run (`tests/test_fuzz_guided.py`) catches
+a contract a change breaks outright; `fuzz.yml` runs every target weekly.
+
+A new parser of peer input gets a target in the same commit.
+
+## Measuring, not guessing
+
+`tests/tools/mesh_sim.py` runs nodes over several processes (real TCP on
+loopback) so the event loop is not the measurement:
+
+```bash
+python tests/tools/mesh_sim.py --procs 8 --nodes 120 --pairs 100 --wait 12
+python tests/tools/mesh_sim.py --procs 8 --nodes 120 --kill 0.3      # then heal
+```
+
+It prints deliveries, retries, packets sent and relayed, and the **lateness of
+the slowest worker's event loop**. Past a loop lag p99 of a few hundred
+milliseconds the figures describe the machine, not the mesh. `--fast` replaces
+`oqs` with `tests/tools/fake_oqs.py` (same sizes, hashes instead of lattices).
+`--explain` says what both ends of an undelivered first contact looked like.
+
+`tests/tools/api_fuzz.py` signs in to a throwaway node and sends every route
+the page's scripts call: no session, truncated, binary, deeply nested and
+oversized bodies, wrong types. A relay's `502 {"error": …}` is a refusal and is
+counted as one.
+
+## CI, in one screen
+
+`.github/actions/suite` is the whole test job; `ci.yml` runs it on every push
+and PR, `release.yml` runs it before publishing. It runs inside the base image
+(`docker/Dockerfile.base`) with a compiled liboqs and Python 3.14, so the C
+library is not rebuilt per run and the runtime matches what ships.
+
+Alongside it: CodeQL (Python, JavaScript and the workflows, plus
+`.github/codeql/nmesh` with mesh input as its source), secret scanning with push
+protection, Dependabot, zizmor, gitleaks, hadolint, Trivy, pip-audit, liboqs
+advisories, OWASP ZAP against a throwaway console, and OpenSSF Scorecard. The
+canonical inventory is [`SECURITY.md`](SECURITY.md); CI mechanics that a change
+can break are held by `tests/test_workflows_pinned.py` and
+`tests/test_ci_scripts.py`.
+
+The liboqs advisory check reads GitHub's `vulnerable_version_range`, which is
+free text: the repository advisories use `0.15.0 and lower` as well as
+comparison operators. A range it cannot read is treated as affected
+(fail-closed), so a parser that misses a form turns a patched lock red;
+`tests/test_liboqs_advisories.py` holds every form the API actually uses.
+
+A release job publishes only a commit the suite passed on. Every action is
+pinned to a full commit SHA and every workflow starts from `permissions: {}`.
+A new action goes in by SHA with its version as a comment (`@<sha> # v4.4.0`);
+Dependabot moves the pin.
+
+## Reading CI logs
+
+`GET /repos/{o}/{r}/actions/jobs/{job_id}/logs` **302-redirects** to blob
+storage. `urllib` follows it, but bulk or unauthorised access returns `403`.
+Fetching logs for many jobs in one pass fails silently if you do not check — an
+early scan reported “no failures ever” purely because every fetch 403'd.
+
+## Version bumps and branch updates
+
+Every finished piece of work bumps [`src/version.py`](src/version.py) **and**
+`pyproject.toml` together; `tests/test_updater.py` asserts they agree.
+
+`updater._source_version(branch)` reads `src/version.py` on the branch and
+offers it only when `is_newer(latest, __version__)`. If the branch and the
+running tree declare the same version, the updater correctly reports
+`offered: false` and **silently delivers nothing** — which is how a branch's
+fixes fail to reach a node following it. Bump both files before expecting a
+branch to be offered.
+
+## Test-writing rules
+
+- Write from the charter or the bug, not from the code; otherwise the test only
+  proves the code agrees with itself.
+- For each new test, say which line would have to be removed for it to fail.
+  If there is no such line, it is not a test.
+- Assert the property the test is named for, not every field that happens to
+  hold still on the path you imagined.
+- Read the test before rewriting it. A replacement written from memory matches
+  nothing and leaves the suite red for a reason that looks like the code's.
+- After changing a signature, `grep -rn` the method name over `tests/`
+  **including** `tests/integration`; the default run does not look there.
+- Never use a real address, node name, hostname, account or path in a fixture or
+  a bug report: use 192.0.2.0/24, 198.51.100.0/24 or 203.0.113.0/24.
+  `tests/test_no_live_addresses.py` refuses a real IPv4 literal.
+- A test that corrupts something must corrupt it whatever was there; pin the
+  premise rather than inheriting the runner's.
+- Before broadening a sweep, list every holder of the state it reaps.
+
+More process errors, with the rule each one produced:
+[`Docs/Contributing/agent-mistakes.md`](Docs/Contributing/agent-mistakes.md).
